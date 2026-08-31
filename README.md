@@ -1,196 +1,272 @@
-# azdl — Steam Depot & Manifest Downloader Engine
+# azdl — Open-Source Game Launcher & Runtime Orchestrator Blueprint
 
-A technical guide and specification for building a standalone, high-performance Steam depot and manifest downloader.
+A complete, production-ready architectural guide for building a modular, cross-platform game launcher and runtime orchestrator (similar to **Arachnel** or **Hydra**) by integrating battle-tested **Open Source Software (OSS)** tools and community patch engines.
 
 ---
 
-## 1. Overview & Architecture
+## 1. System Architecture
 
-Steam games are distributed as encrypted, compressed ~1 MB chunks over Valve's Content Delivery Network (CDN). To recreate the download engine, you need to implement a 5-stage pipeline:
+Instead of reinventing custom download protocols or low-level DRM unpackers from scratch, **azdl** acts as a unified **controller and orchestrator** that binds specialized OSS components into an automated pipeline:
 
 ```
-┌───────────────────────────┐
-│ 1. Manifest & Key Source  │ ──> Fetch Depot Manifest (.manifest) & 256-bit AES Depot Key
-└─────────────┬─────────────┘
-              ▼
-┌───────────────────────────┐
-│ 2. Manifest Parser        │ ──> Extract file trees, chunk SHA-1 hashes, byte offsets & sizes
-└─────────────┬─────────────┘
-              ▼
-┌───────────────────────────┐
-│ 3. CDN Chunk Downloader   │ ──> Async HTTP pool pulling /depot/{depotId}/chunk/{chunkId}
-└─────────────┬─────────────┘
-              ▼
-┌───────────────────────────┐
-│ 4. Decrypt, Decompress &  │ ──> AES-256-ECB/CBC -> LZMA/Zstd decompress -> SHA-1 verify
-│    Assemble Files         │ ──> Write directly to disk at target file offsets
-└─────────────┬─────────────┘
-              ▼
-┌───────────────────────────┐
-│ 5. DRM Stripping & Config │ ──> Steamless (SteamStub unpack) + Goldberg Steam Emulator
-└───────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                               Frontend & User Interface                                │
+│       (Tauri / Rust + Svelte/React  OR  Qt 6 / QML  OR  Electron / Next.js)             │
+└───────────────────────────────────────────┬─────────────────────────────────────────────┘
+                                            │ IPC / CLI Controller
+┌───────────────────────────────────────────▼─────────────────────────────────────────────┐
+│                                 azdl Core Orchestrator                                  │
+├──────────────────┬──────────────────┬──────────────────┬─────────────────┬──────────────┤
+│ Catalog & Feeds  │ Download Manager │ Patching Engine  │ Runtime Manager │ Steam Export │
+└────────┬─────────┴────────┬─────────┴────────┬─────────┴────────┬────────┴──────┬───────┘
+         │                  │                  │                  │               │
+         ▼                  ▼                  ▼                  ▼               ▼
+┌─────────────────┐ ┌────────────────┐ ┌────────────────┐ ┌────────────────┐ ┌─────────────┐
+│ Steam Store API │ │DepotDownloader │ │ Steamless CLI  │ │  Proton-GE /   │ │Shortcuts.vdf│
+│  SteamGridDB    │ │ (SteamRE / .NET│ │(atom0s / Mono) │ │   Wine Prefix  │ │  & Artwork  │
+│  JSON Feeds     │ │   Depot Engine)│ │  Goldberg Emu  │ │ VC++ / DirectX │ │ Steam Deck  │
+│                 │ │                │ │Online-Fix Shim │ │  Dependencies  │ │ Integration │
+└─────────────────┘ └────────────────┘ └────────────────┘ └────────────────┘ └─────────────┘
 ```
 
 ---
 
-## 2. Core Concepts & Data Formats
+## 2. Core OSS Building Blocks & Upstream Repositories
 
-### 2.1. AppIDs, DepotIDs & Manifests
-* **AppID:** Unique identifier for a game on Steam (e.g. `480` for SpaceWar, `1091500` for Cyberpunk 2077).
-* **DepotID:** Each game consists of multiple depots (executable binaries, OS-specific assets, language audio packs, DLCs).
-* **Manifest GID (ID):** A 64-bit integer representing a specific build version of a depot.
-* **Depot Key:** A 256-bit (32 bytes / 64 hex characters) symmetric AES key specific to each DepotID.
+| Subsystem | Primary OSS Project | Upstream Repository | Role in Pipeline |
+| :--- | :--- | :--- | :--- |
+| **Depot Downloader** | **DepotDownloader** | [`SteamRE/DepotDownloader`](https://github.com/SteamRE/DepotDownloader) | CLI/library to download Steam manifests, depots, and files directly from Valve CDNs using account credentials or manifest/depot keys. |
+| **Steam Client Lib** | **SteamKit2** | [`SteamRE/SteamKit`](https://github.com/SteamRE/SteamKit) | .NET library to interact with Steam network, PICS (Product Info), and manifest servers. |
+| **DRM Unpacker** | **Steamless** | [`atom0s/Steamless`](https://github.com/atom0s/Steamless) | Unpacks and strips SteamStub DRM (32-bit and 64-bit) from Portable Executable (`.exe`) files. |
+| **Steam Emulator** | **Goldberg Emulator** | [`Mr_Goldberg/goldberg_emulator`](https://gitlab.com/Mr_Goldberg/goldberg_emulator) | Drop-in `steam_api.dll` / `steam_api64.dll` replacement providing offline licensing, DLC unlocking (`DLC.txt`), and LAN multiplayer. |
+| **Multiplayer Fixes** | **Online-Fix / SteamFix** | `OnlineFix64.dll` / `SteamFix64.dll` | Shims redirecting Steamworks P2P/lobby traffic over Steam's `SpaceWar` (AppID `480`). |
+| **Compatibility Layer**| **Proton-GE** | [`GloriousEggroll/proton-ge-custom`](https://github.com/GloriousEggroll/proton-ge-custom) | High-performance Wine/DXVK/VKD3D distribution optimized for Linux gaming and Steam Deck. |
+| **Steam Deck Sync** | **Steam Shortcuts VDF** | Binary VDF Parser | Injects non-Steam game entries directly into `shortcuts.vdf` with custom grid capsules/heroes. |
+| **Artwork & Covers** | **SteamGridDB API** | [`SteamGridDB`](https://www.steamgriddb.com/api/v2) | Fetches vertical grid covers, hero banners, logos, and icons. |
 
-### 2.2. The Depot Manifest (Protobuf Binary)
-The manifest file (`<depot_id>_<manifest_gid>.manifest`) is a serialized Protocol Buffer structure (`DepotManifestPayload`).
+---
 
-```protobuf
-message DepotManifestPayload {
-  repeated DepotFileMapping files = 1;
-  uint32 depot_id = 2;
-  uint64 total_uncompressed_size = 3;
-  uint64 total_compressed_size = 4;
-  uint64 manifest_gid = 5;
-}
+## 3. End-to-End Orchestration Pipeline
 
-message DepotFileMapping {
-  string filename = 1;          // Relative path (e.g., "bin/game.exe")
-  uint64 size = 2;              // Full uncompressed file size
-  uint32 flags = 3;             // Attributes (e.g. executable, read-only)
-  repeated DepotChunkInfo chunks = 4;
-}
-
-message DepotChunkInfo {
-  bytes sha = 1;                // 20-byte SHA-1 hash of the uncompressed chunk
-  uint32 crc = 2;               // Checksum of compressed chunk
-  uint64 offset = 3;            // Byte offset where this chunk starts in the file
-  uint32 cb_original = 4;       // Uncompressed chunk size (usually ~1 MB)
-  uint32 cb_compressed = 5;     // Compressed chunk size on the CDN
-}
+```
+  [1. Catalog Select] ──> [2. DepotDownloader] ──> [3. Steamless] ──> [4. Goldberg / Fix]
+                                                                             │
+  [6. Launch / Steam Deck] <── [5. Proton-GE / Prefix Setup] <───────────────┘
 ```
 
 ---
 
-## 3. The Download & Assembly Pipeline
-
-### Step 1: Manifest & Depot Key Acquisition
-Steam's official store verifies user licenses before providing manifests and depot keys. To download without an active Steam client session:
-1. **Manifest Relay / Public Indexers:** Fetch decrypted manifest files and depot keys from an indexer (e.g. Ryuu, ManifestHub, or local cached manifests).
-2. **Local Depot Key Configuration:** Store depot keys mapped by `DepotID` (e.g. `{"1091501": "a1b2c3d4e5f6..."}`).
-
----
-
-### Step 2: Content Server Resolution
-Steam distributes chunks across Valve edge servers and third-party CDNs (Akamai, Fastly, Cloudflare).
-
-* **Direct CDN URL Format:**
-  ```text
-  http://content<N>.steampowered.com/depot/<depot_id>/chunk/<chunk_sha1_hex>
-  ```
-  *(where `<chunk_sha1_hex>` is the 40-character lowercase hexadecimal string of `DepotChunkInfo.sha`)*
-
-* **Content Server List:**
-  You can query Valve's Content Server Directory service or use any known Steam CDN edge host:
-  - `content1.steampowered.com`
-  - `content2.steampowered.com`
-  - `edge.steam-dns.top.comcast.net`
-
----
-
-### Step 3: Chunk Processing (Decrypt -> Decompress -> Verify)
-
-For each downloaded chunk payload:
-
-1. **AES-256 Decryption:**
-   - **Algorithm:** AES-256 in ECB mode (or CBC mode with IV derived from the first 16 bytes of the depot key / ECB block).
-   - **Key:** The 32-byte depot key.
-   - **Input:** Raw downloaded chunk bytes.
-2. **Decompression:**
-   - Decompress the decrypted payload.
-   - Steam chunks use either **LZMA** or **Zstandard (Zstd)** depending on the depot version.
-3. **Integrity Check:**
-   - Compute the **SHA-1** hash of the uncompressed data.
-   - Assert: `sha1(uncompressed_bytes) == chunk.sha`.
-
----
-
-### Step 4: Sparse File Assembly
-
-1. Create target directories and pre-allocate target files according to `DepotFileMapping.filename` and `DepotFileMapping.size`.
-2. Write each verified chunk directly into the file at its specified byte offset:
+### Step 1: Catalog & Metadata Aggregation
+1. **Metadata Resolution:** Query the official Steam Store Web API for rich metadata:
+   ```text
+   GET https://store.steampowered.com/api/appdetails?appids=<APP_ID>&cc=us&l=en
    ```
-   file.seek(chunk.offset)
-   file.write(uncompressed_chunk_bytes)
+2. **Cover Art:** Use Steam CDN image endpoints or query SteamGridDB:
+   ```text
+   https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/<APP_ID>/library_600x900.jpg
+   https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/<APP_ID>/header.jpg
    ```
-3. Set file permission flags (e.g. `+x` for executables on Linux).
 
 ---
 
-### Step 5: Post-Download DRM Stripping & Emulation
+### Step 2: Content Downloading (`SteamRE/DepotDownloader`)
+Execute `DepotDownloader` as a background process or embed its core logic:
 
-Because the downloaded files are pristine, original Steam depot files, they require standard DRM emulation to run standalone:
+```bash
+# Standard depot download using manifest and depot key:
+dotnet DepotDownloader.dll \
+  -app <APP_ID> \
+  -depot <DEPOT_ID> \
+  -manifest <MANIFEST_ID> \
+  -depotkey <256_BIT_HEX_DEPOT_KEY> \
+  -dir "/path/to/game/install" \
+  -max-servers 16 \
+  -max-downloads 8 \
+  -validate
+```
 
-1. **SteamStub DRM Stripping:**
-   - Check executable headers for the `.bind` PE section.
-   - Run `Steamless.CLI.exe` (via Wine on Linux or natively on Windows) to unpack the binary.
-2. **Steamworks API Emulation (Goldberg Emulator):**
-   - Replace or place `steam_api64.dll` / `steam_api.dll` with Goldberg Emulator.
-   - Create `steam_settings/steam_appid.txt` containing the target `AppID`.
-   - Add `steam_settings/DLC.txt` with `<dlc_id>=<dlc_name>` to unlock add-on content.
-3. **Multiplayer (Online-Fix / SteamFix):**
-   - Inject SpaceWar (`AppID 480`) overlay DLLs (`OnlineFix64.dll`, `SteamFix64.dll`) and configure Wine DLL overrides (`WINEDLLOVERRIDES="onlinefix64=n,b;winmm=n,b"`) on Linux.
-
----
-
-## 4. Recommended Technology Stack
-
-| Language | Networking | Crypto & Decompress | Protobuf | Recommended Concurrency |
-| :--- | :--- | :--- | :--- | :--- |
-| **Rust** | `reqwest` / `hyper` | `aes`, `lzma-rs`, `zstd`, `sha1` | `prost` | `tokio` (50–100 parallel chunk workers) |
-| **Python** | `httpx` / `aiohttp` | `cryptography`, `zstandard`, `lzma`, `hashlib` | `protobuf` | `asyncio` task pool |
-| **C++20** | `libcurl` / `boost::asio` | `OpenSSL` (EVP), `liblzma`, `libzstd` | `google::protobuf` | Thread pool + async I/O (`io_uring`) |
-| **C# / .NET** | `HttpClient` | `System.Security.Cryptography`, `SharpCompress` | `SteamKit2` | `Task.WhenAll` / `Channel<T>` |
+* **Features to leverage:**
+  - Fast multi-server parallel chunk downloading over HTTP/HTTPS.
+  - Automatic AES-256 decryption, LZMA/Zstd decompression, and SHA-1 chunk validation.
+  - `-filelist` / regex filtering to download only essential depots (e.g., skip unnecessary languages).
+  - Resuming interrupted downloads with `-validate`.
 
 ---
 
-## 5. Minimal Python Prototype Outline
+### Step 3: SteamStub DRM Stripping (`atom0s/Steamless`)
+1. **Detection:** Scan all `.exe` files in the downloaded directory for PE section headers. If any PE section is named `.bind`, SteamStub DRM is active.
+2. **Execution:**
+   - **On Windows:**
+     ```bash
+     Steamless.CLI.exe --quiet "/path/to/game.exe"
+     ```
+   - **On Linux (via Wine Mono):**
+     ```bash
+     WINEDEBUG=-all wine Steamless.CLI.exe --quiet "Z:/path/to/game.exe"
+     ```
+3. **Atomic Swap:** Back up `game.exe` to `game.exe.steamstub.bak` and rename `game.exe.unpacked.exe` to `game.exe`.
+
+---
+
+### Step 4: Steamworks Emulation & DLC Unlocking (`Goldberg Emulator`)
+1. **Locate Steam API Binaries:** Search the game folder for `steam_api.dll` (32-bit) or `steam_api64.dll` (64-bit).
+2. **Backup & Replace:**
+   - Back up original `steam_api64.dll` to `steam_api64.dll.orig`.
+   - Copy Goldberg's `steam_api64.dll` into the executable directory.
+3. **Configuration Structure:** Create `steam_settings/` adjacent to the executable:
+   ```text
+   <game_root>/
+   ├── game.exe
+   ├── steam_api64.dll          # Goldberg emulator DLL
+   └── steam_settings/
+       ├── steam_appid.txt      # Contains target AppID (e.g., 1091500)
+       ├── DLC.txt              # DLC list: <dlc_id>=<dlc_name>
+       ├── force_account_name.txt # Custom player username
+       └── configs.user.ini     # Optional network / overlay settings
+   ```
+
+---
+
+### Step 5: Multiplayer Overlays & Online-Fix (Optional)
+If multiplayer via Steam's SpaceWar (`AppID 480`) is desired:
+1. Copy `OnlineFix64.dll` (or `SteamFix64.dll`) and `winmm.dll` into the game directory.
+2. Configure `OnlineFix.ini` with `FakeAppId=480`.
+3. **Wine DLL Overrides (Linux):** When launching under Wine/Proton, set:
+   ```bash
+   WINEDLLOVERRIDES="onlinefix64=n,b;steamfix64=n,b;winmm=n,b;steam_api64=n,b"
+   ```
+
+---
+
+### Step 6: Proton-GE & Wine Runtime Orchestration
+1. **Autonomous Proton-GE Downloader:**
+   - Query GitHub Releases API for `GloriousEggroll/proton-ge-custom/releases/latest`.
+   - Download and extract `GE-Proton<VERSION>.tar.gz` to `~/.local/share/azdl/runners/`.
+2. **Prefix Initialization & Launch Command:**
+   ```bash
+   export STEAM_COMPAT_CLIENT_INSTALL_PATH="$HOME/.steam/root"
+   export STEAM_COMPAT_DATA_PATH="$HOME/.local/share/azdl/prefixes/<APP_ID>"
+   export WINEDLLOVERRIDES="onlinefix64=n,b;winmm=n,b"
+
+   # Launch through Proton runner:
+   ~/.local/share/azdl/runners/GE-Proton9-25/proton run "/path/to/game/game.exe"
+   ```
+3. **Runtime Dependencies (VC++ & DirectX):**
+   - Automatically download `vc_redist.x64.exe` (`https://aka.ms/vs/17/release/vc_redist.x64.exe`).
+   - Run silent installation in the game's prefix:
+     ```bash
+     WINEPREFIX="$STEAM_COMPAT_DATA_PATH/pfx" wine vc_redist.x64.exe /install /quiet /norestart
+     ```
+
+---
+
+### Step 7: Native Steam Client & Steam Deck Export (`shortcuts.vdf`)
+To allow the game to appear seamlessly in Steam Deck's **Game Mode** or Big Picture:
+1. Locate active user configuration: `~/.steam/root/userdata/<USER_ID>/config/shortcuts.vdf`.
+2. Parse the binary KeyValues VDF format and append a new shortcut entry:
+   ```json
+   {
+     "AppName": "Cyberpunk 2077",
+     "Exe": "\"/usr/bin/azdl\"",
+     "StartDir": "\"/path/to/game\"",
+     "LaunchOptions": "launch --app 1091500",
+     "tags": ["azdl", "Installed"]
+   }
+   ```
+3. Compute the shortcut AppID:
+   $$\text{ShortcutAppID} = (\text{CRC32}(\text{"\"<Exe>\"\"<AppName>\""}) \mid \text{0x80000000}) \ll 32$$
+4. Drop cover art directly into `~/.steam/root/userdata/<USER_ID>/config/grid/`:
+   - Vertical capsule: `<AppID>p.jpg` (600x900)
+   - Hero banner: `<AppID>_hero.jpg` (1920x620)
+   - Logo: `<AppID>_logo.png` (transparent PNG)
+
+---
+
+## 4. Automation Wrapper Example (Python CLI Controller)
+
+A minimal orchestrator illustrating how azdl chains the OSS tools:
 
 ```python
-import asyncio
-import hashlib
-import httpx
-import lzma
-import zstandard as zstd
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+import subprocess
+import os
+import shutil
+from pathlib import Path
 
-async def download_and_process_chunk(client, depot_id: int, chunk_sha: str, depot_key: bytes):
-    url = f"http://content1.steampowered.com/depot/{depot_id}/chunk/{chunk_sha}"
-    response = await client.get(url)
-    encrypted_data = response.content
+class AzdlOrchestrator:
+    def __init__(self, tools_dir: Path, install_dir: Path):
+        self.tools_dir = tools_dir
+        self.install_dir = install_dir
 
-    # 1. AES-256 Decryption
-    cipher = Cipher(algorithms.AES(depot_key), modes.ECB())
-    decryptor = cipher.decryptor()
-    decrypted = decryptor.update(encrypted_data) + decryptor.finalize()
+    def download_depot(self, app_id: int, depot_id: int, manifest_id: int, depot_key: str):
+        """Step 1: Download chunks using DepotDownloader."""
+        cmd = [
+            "dotnet", str(self.tools_dir / "DepotDownloader.dll"),
+            "-app", str(app_id),
+            "-depot", str(depot_id),
+            "-manifest", str(manifest_id),
+            "-depotkey", depot_key,
+            "-dir", str(self.install_dir),
+            "-validate"
+        ]
+        subprocess.run(cmd, check=True)
 
-    # 2. Decompression (Zstd or LZMA)
-    try:
-        decompressed = zstd.ZstdDecompressor().decompress(decrypted)
-    except Exception:
-        decompressed = lzma.decompress(decrypted)
+    def unpack_steamstub(self, exe_path: Path):
+        """Step 2: Strip SteamStub DRM using Steamless CLI."""
+        steamless_cli = self.tools_dir / "Steamless.CLI.exe"
+        cmd = ["wine", str(steamless_cli), "--quiet", str(exe_path)]
+        subprocess.run(cmd, check=True, env={**os.environ, "WINEDEBUG": "-all"})
 
-    # 3. SHA-1 Integrity Verification
-    assert hashlib.sha1(decompressed).hexdigest() == chunk_sha.lower()
+        unpacked = exe_path.with_name(f"{exe_path.stem}.unpacked.exe")
+        if unpacked.exists():
+            shutil.move(exe_path, exe_path.with_suffix(".exe.steamstub.bak"))
+            shutil.move(unpacked, exe_path)
 
-    return decompressed
+    def apply_goldberg(self, game_dir: Path, app_id: int, dlc_dict: dict):
+        """Step 3: Inject Goldberg Steamworks Emulator and DLC configuration."""
+        goldberg_dll = self.tools_dir / "goldberg" / "steam_api64.dll"
+        target_dll = game_dir / "steam_api64.dll"
+        
+        if target_dll.exists():
+            shutil.copy(target_dll, game_dir / "steam_api64.dll.orig")
+        shutil.copy(goldberg_dll, target_dll)
+
+        # Write settings
+        settings_dir = game_dir / "steam_settings"
+        settings_dir.mkdir(exist_ok=True)
+        (settings_dir / "steam_appid.txt").write_text(str(app_id))
+        
+        if dlc_dict:
+            dlc_content = "\n".join(f"{k}={v}" for k, v in dlc_dict.items())
+            (settings_dir / "DLC.txt").write_text(dlc_content)
+
+    def run_game(self, proton_dir: Path, prefix_dir: Path, exe_path: Path):
+        """Step 4: Launch via Proton-GE."""
+        env = os.environ.copy()
+        env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = str(Path.home() / ".steam/root")
+        env["STEAM_COMPAT_DATA_PATH"] = str(prefix_dir)
+        env["WINEDLLOVERRIDES"] = "onlinefix64=n,b;winmm=n,b;steam_api64=n,b"
+        
+        subprocess.run([str(proton_dir / "proton"), "run", str(exe_path)], env=env)
 ```
+
+---
+
+## 5. Recommended Modern Tech Stack for Building azdl
+
+| Layer | Recommended Choice | Rationale |
+| :--- | :--- | :--- |
+| **GUI Framework** | **Tauri (Rust + React / Svelte)** | Extremely lightweight (~15 MB RAM vs ~300 MB Electron), native speed, secure Rust backend for process and file manipulation. |
+| **Alternative GUI** | **Qt 6 (C++20 / QML)** | Native cross-platform performance (used by Arachnel), hardware accelerated UI. |
+| **Backend Core** | **Rust or C# (.NET 8/9)** | Direct interop with `SteamKit2` / `DepotDownloader` libraries without spawning sub-processes. |
+| **Database & Cache** | **SQLite + sled / RocksDB** | Fast local library state, cover art caching, and metadata indexing. |
+| **CLI Mode** | **Clap (Rust) or Click (Python)** | Enables headless downloading and Steam Deck terminal automation scripts. |
 
 ---
 
 ## 6. Implementation Roadmap
 
-- [ ] **Phase 1:** Protobuf manifest schema compiler & parser (`.manifest` -> file/chunk mapping).
-- [ ] **Phase 2:** Multi-threaded HTTP chunk download client with connection pooling and retry logic.
-- [ ] **Phase 3:** AES-256 decryption, LZMA/Zstd decompression, and SHA-1 verification pipeline.
-- [ ] **Phase 4:** Chunk assembler with random-access file writing and progress reporting.
-- [ ] **Phase 5:** Integration with Goldberg Steam Emulator and automated Steamless execution.
+- [ ] **Phase 1 (Downloader Core):** Integrate `DepotDownloader` CLI or wrap `SteamKit2` in a background worker service with progress reporting.
+- [ ] **Phase 2 (DRM & Patch Pipeline):** Implement the PE `.bind` scanner, silent `Steamless.CLI.exe` execution, and Goldberg emulator injector.
+- [ ] **Phase 3 (Runtime & Wine/Proton):** Add Proton-GE auto-updater, prefix bootstrap, and VC++ redist automated installer.
+- [ ] **Phase 4 (Steam Deck Integration):** Build the `shortcuts.vdf` binary writer and automated artwork downloader.
+- [ ] **Phase 5 (User Interface):** Connect the frontend catalog, download queue manager, game settings, and launch controls.
