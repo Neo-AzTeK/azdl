@@ -1,0 +1,382 @@
+/* Material Design 3 Desktop Stylesheet for azdl */
+@import 'm3-svelte/etc/styles.css';
+
+/* Remove m3-svelte's animated focus glow throughout the launcher. */
+:focus-visible {
+  animation: none !important;
+  outline: 2px solid var(--md-sys-color-secondary);
+  outline-offset: 2px;
+}
+
+@function --m3-density(--base) {
+  result: var(--base);
+}
+
+:root {
+  --app-window-bg: #121216;
+  --app-backdrop-blur: none;
+  font-family: 'Google Sans Flex', 'Roboto Flex', Roboto, -apple-system, BlinkMacSystemFont, 'Segoe UI', Oxygen, Ubuntu, Cantarell, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color-scheme: dark;
+  user-select: none;
+  -webkit-user-select: none;
+
+  /* Material Design 3 Shape Tokens */
+  --md-sys-shape-none: 0px;
+  --md-sys-shape-extra-small: 4px;
+  --md-sys-shape-small: 8px;
+  --md-sys-shape-medium: 12px;
+  --md-sys-shape-large: 16px;
+  --md-sys-shape-extra-large: 28px;
+  --md-sys-shape-full: 9999px;
+
+  /* Shape Aliases */
+  --md3-shape-small: var(--md-sys-shape-small);
+  --md3-shape-medium: var(--md-sys-shape-medium);
+  --md3-shape-large: var(--md-sys-shape-large);
+  --md3-shape-full: var(--md-sys-shape-full);
+}
+
+[data-theme='light'] {
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background-color: transparent !important;
+  touch-action: pan-x pan-y;
+  overscroll-behavior: none;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--app-window-bg);
+  backdrop-filter: var(--app-backdrop-blur);
+  -webkit-backdrop-filter: var(--app-backdrop-blur);
+  display: flex;
+  flex-direction: column;
+  color: var(--md-sys-color-on-surface);
+  transition: background-color 280ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* Scrollbars */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--md-sys-color-surface-container-highest);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--md-sys-color-outline);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+/* Material Design 3 Visual Shimmer Effect */
+@keyframes md3-shimmer {
+  0% {
+    transform: translateX(-150%);
+  }
+  100% {
+    transform: translateX(150%);
+  }
+}
+
+.shimmer-active {
+  position: relative;
+  overflow: hidden !important;
+}
+
+.shimmer-active::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(var(--md-sys-color-primary-rgb), 0.08) 25%,
+    rgba(var(--md-sys-color-primary-rgb), 0.32) 50%,
+    rgba(var(--md-sys-color-primary-rgb), 0.08) 75%,
+    transparent 100%
+  );
+  animation: md3-shimmer 2.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* Status Pill Pulse Animation */
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.95);
+    opacity: 0.8;
+  }
+  50% {
+    transform: scale(1.25);
+    opacity: 0.3;
+  }
+  100% {
+    transform: scale(0.95);
+    opacity: 0.8;
+  }
+}
+
+.pulse-indicator {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  background-color: var(--md-sys-color-primary);
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.pulse-indicator::after {
+  content: '';
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background-color: var(--md-sys-color-primary);
+  animation: pulse-ring 2s cubic-bezier(0.2, 0, 0, 1) infinite;
+}
+
+/* Material 3 Select Dropdowns */
+select,
+.md3-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-color: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-small);
+  padding: 8px 36px 8px 14px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' height='20' viewBox='0 -960 960 960' width='20' fill='%23c4c7c5'%3E%3Cpath d='M480-360 280-560h400L480-360Z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 20px 20px;
+  transition: none;
+  outline: none;
+}
+
+[data-theme='light'] select,
+[data-theme='light'] .md3-select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' height='20' viewBox='0 -960 960 960' width='20' fill='%23444746'%3E%3Cpath d='M480-360 280-560h400L480-360Z'/%3E%3C/svg%3E");
+}
+
+select:hover,
+.md3-select:hover {
+  background-color: var(--md-sys-color-surface-container-highest);
+  border-color: var(--md-sys-color-outline);
+}
+
+select:focus,
+.md3-select:focus {
+  border-color: var(--md-sys-color-primary);
+  box-shadow: none;
+}
+
+select:disabled,
+.md3-select:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+  border-color: var(--md-sys-color-outline-variant);
+}
+
+select option,
+.md3-select option {
+  background-color: var(--md-sys-color-surface-container, #1e1f22);
+  color: var(--md-sys-color-on-surface, #e3e3e3);
+  padding: 8px 12px;
+}
+
+/* Material Design 3 Standard Buttons */
+.md3-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 18px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 500;
+  border-radius: var(--md-sys-shape-full);
+  border: 1px solid transparent;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: none;
+  outline: none;
+}
+
+.md3-btn.small {
+  padding: 6px 14px;
+  font-size: 0.78rem;
+}
+
+.md3-btn.large {
+  padding: 12px 24px;
+  font-size: 0.95rem;
+}
+
+.md3-btn.primary {
+  background-color: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+}
+
+.md3-btn.primary:hover:not(:disabled) {
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  filter: brightness(1.08);
+}
+
+.md3-btn.tonal {
+  background-color: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+
+.md3-btn.tonal:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.md3-btn.outlined {
+  background-color: transparent;
+  border-color: var(--md-sys-color-outline);
+  color: var(--md-sys-color-primary);
+}
+
+.md3-btn.outlined:hover:not(:disabled) {
+  background-color: var(--md-sys-color-surface-container-high);
+}
+
+.md3-btn.text {
+  background-color: transparent;
+  color: var(--md-sys-color-primary);
+}
+
+.md3-btn.text:hover:not(:disabled) {
+  background-color: var(--md-sys-color-surface-container-highest);
+}
+
+.md3-btn.danger {
+  background-color: var(--md-sys-color-error, #ef4444);
+  color: var(--md-sys-color-on-error, #ffffff);
+}
+
+.md3-btn.danger:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.md3-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+  box-shadow: none !important;
+  filter: none !important;
+}
+
+/* Material Design 3 Text Inputs */
+.md3-input {
+  background-color: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-small);
+  padding: 8px 14px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  outline: none;
+  transition: none;
+}
+
+.md3-input:hover {
+  background-color: var(--md-sys-color-surface-container-highest);
+  border-color: var(--md-sys-color-outline);
+}
+
+.md3-input:focus {
+  border-color: var(--md-sys-color-primary);
+  box-shadow: none;
+}
+
+.md3-input:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+/* Icon Buttons */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--md-sys-shape-full);
+  background: transparent;
+  border: none;
+  color: var(--md-sys-color-on-surface-variant);
+  cursor: pointer;
+  transition: none;
+  outline: none;
+}
+
+.icon-btn svg {
+  fill: currentColor;
+}
+
+.icon-btn:hover:not(:disabled) {
+  background-color: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
+}
+
+.icon-btn.tonal {
+  background-color: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+}
+
+.icon-btn.tonal:hover:not(:disabled) {
+  background-color: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+
+.icon-btn.danger {
+  color: var(--md-sys-color-error);
+}
+
+.icon-btn.danger:hover:not(:disabled) {
+  background-color: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+}
+
+.icon-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}

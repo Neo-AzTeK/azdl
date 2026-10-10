@@ -1,0 +1,1780 @@
+<script>
+  import { PRESET_SEEDS } from '../theme.js';
+  import { Switch } from 'm3-svelte';
+  import Modal from '../components/Modal.svelte';
+  import ConfirmModal from '../components/ConfirmModal.svelte';
+  import SectionCard from '../components/SectionCard.svelte';
+  import { notify } from '../notifications.js';
+  import {
+    runAction,
+    setWindowTranslucency,
+    updateSettings,
+    addStorageDrive,
+    removeStorageDrive,
+    setDefaultDrive,
+    moveGameToDrive,
+    refreshPluginStore,
+    installStorePlugin,
+    removePlugin,
+    downloadProtonGE,
+    syncSteamShortcuts,
+    openGameFolder,
+  } from '../api.js';
+
+  let {
+    seedColor = $bindable('#10B981'),
+    themeMode = $bindable('dark'), // 'system' | 'dark' | 'light' | 'amoled'
+    translucency = $bindable('none'), // 'none' | 'mica' | 'acrylic' | 'compositor'
+    activeCategory = $bindable('storage'), // 'storage' | 'launch' | 'plugins' | 'appearance' | 'integrations' | 'about'
+    runners = [],
+    dataDir = '',
+    platform = 'linux',
+    plugins = [],
+    pluginStore = [],
+    settings = null,
+    diagnostics = [],
+    library = [],
+    searchQuery = '',
+    onThemeChange,
+    onRefresh,
+    onShowToast,
+  } = $props();
+
+  // Local working copy of settings
+  let localSettings = $state({
+    storage_drives: [],
+    downloads_dir: '',
+    default_runner: 'auto',
+    global_launch_args: '',
+    default_proton_id: '',
+    max_concurrent_downloads: 3,
+    auto_steam_shortcut_sync: false,
+    auto_steam_grid_artwork: true,
+    auto_steamless_unpack: true,
+    auto_online_fix_overlay: true,
+    seed_color: seedColor,
+    theme_mode: themeMode,
+    translucency: translucency,
+  });
+
+  $effect(() => {
+    if (settings) {
+      localSettings = {
+        ...localSettings,
+        ...settings,
+      };
+    }
+  });
+
+  // Storage UI state
+  let newDrivePath = $state('');
+  let newDriveLabel = $state('');
+  let moveGameId = $state('');
+  let moveTargetDriveId = $state('');
+  let movingGameId = $state(null);
+  let individualTargetDrives = $state({});
+
+  // Plugins UI state
+  let pluginSearchQuery = $state('');
+  let isRefreshingStore = $state(false);
+  let installingPluginId = $state(null);
+  let lastRefreshedCategory = $state(null);
+
+  const settingsCategories = [
+    { id: 'storage', label: 'Storage & Drives', icon: 'M2 20h20v-4H2v4zm2-3h2v2H4v-2zM2 4v4h20V4H2zm4 3H4V5h2v2zm-4 7h20v-4H2v4zm2-3h2v2H4v-2z', keywords: ['storage', 'drive', 'disk', 'folder', 'migrate', 'path', 'games'] },
+    { id: 'launch', label: 'Launch & Runners', icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z', keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'arguments', 'dxvk', 'prefix'] },
+    { id: 'plugins', label: 'Plugins & Sources', icon: 'M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7 1.49 0 2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5s-1.12-2.5-2.5-2.5z', keywords: ['plugin', 'store', 'source', 'catalog', 'feed', 'json', 'url', 'store'] },
+    { id: 'appearance', label: 'Material You Theming', icon: 'M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.23 19.64 10.57 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z', keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light', 'mica', 'acrylic', 'translucency'] },
+    { id: 'integrations', label: 'Integrations & Fixes', icon: 'M7.5 5.6L10 7 8.6 4.5 10 2 7.5 3.4 5 2l1.4 2.5L5 7zm12 9.8L17 14l1.4 2.5L17 19l2.5-1.4L22 19l-1.4-2.5L22 14zM22 2l-2.5 1.4L17 2l1.4 2.5L17 7l2.5-1.4L22 7l-1.4-2.5zm-7.63 5.29c-.39-.39-1.02-.39-1.41 0L1.29 18.96c-.39.39-.39 1.02 0 1.41l2.34 2.34c.39.39 1.02.39 1.41 0L16.7 11.05c.39-.39.39-1.02 0-1.41l-2.33-2.35zm-1.03 5.49l-2.12-2.12 2.44-2.44 2.12 2.12-2.44 2.44z', keywords: ['integration', 'steam', 'shortcut', 'grid', 'steamless', 'onlinefix', 'overlay'] },
+    { id: 'about', label: 'About & Diagnostics', icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z', keywords: ['about', 'diagnostics', 'doctor', 'version', 'system', 'bwrap', 'unrar', 'bsdtar'] },
+  ];
+
+  function doesCategoryMatch(cat, query) {
+    if (!query || !query.trim()) return false;
+    const q = query.toLowerCase().trim();
+    if (cat.label.toLowerCase().includes(q)) return true;
+    if (cat.keywords.some(k => k.includes(q))) return true;
+    if (cat.id === 'plugins' && filteredPlugins.length > 0 && q.length > 1) return true;
+    return false;
+  }
+
+  $effect(() => {
+    if (searchQuery !== undefined && searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      const currentMatch = settingsCategories.find(c => c.id === activeCategory && doesCategoryMatch(c, q));
+      if (!currentMatch) {
+        const firstMatch = settingsCategories.find(c => doesCategoryMatch(c, q));
+        if (firstMatch) {
+          activeCategory = firstMatch.id;
+        }
+      }
+    }
+  });
+
+  // Auto-refresh plugin store when navigating to the Plugins & Sources category
+  $effect(() => {
+    if (activeCategory === 'plugins' && lastRefreshedCategory !== 'plugins') {
+      lastRefreshedCategory = 'plugins';
+      handleRefreshStore();
+    } else if (activeCategory !== 'plugins') {
+      lastRefreshedCategory = activeCategory;
+    }
+  });
+
+  // Plugin Modals state
+  let showAddStoreModal = $state(false);
+  let newStoreUrl = $state('');
+  let isAddingStore = $state(false);
+
+  let allPlugins = $derived.by(() => {
+    const list = [...pluginStore];
+    for (const inst of plugins) {
+      if (!list.some((p) => p.id === inst.id)) {
+        list.push({
+          id: inst.id,
+          name: inst.name || inst.id,
+          description: 'Locally installed plugin bundle.',
+          version: inst.version || '1.0.0',
+          recommended: false,
+        });
+      }
+    }
+    return list;
+  });
+
+  let filteredPlugins = $derived(
+    allPlugins.filter((p) => {
+      if (!pluginSearchQuery.trim()) return true;
+      const q = pluginSearchQuery.toLowerCase();
+      return (
+        (p.name || '').toLowerCase().includes(q) ||
+        (p.id || '').toLowerCase().includes(q) ||
+        (p.description || '').toLowerCase().includes(q)
+      );
+    })
+  );
+
+  // Launch UI state
+  let isDownloadingProton = $state(false);
+
+  // Integrations UI state
+  let isSyncingSteam = $state(false);
+
+  // Appearance UI state
+  let customHexInput = $state(seedColor);
+
+  let confirmDialog = $state({
+    open: false,
+    title: '',
+    message: '',
+    confirmText: 'Confirm',
+    isDestructive: true,
+    action: null,
+  });
+
+  function triggerConfirm({ title, message, confirmText = 'Confirm', isDestructive = true, action }) {
+    confirmDialog = {
+      open: true,
+      title,
+      message,
+      confirmText,
+      isDestructive,
+      action,
+    };
+  }
+
+  // --- Theme Handlers ---
+  function handleSelectSeed(hex) {
+    seedColor = hex;
+    customHexInput = hex;
+    localSettings.seed_color = hex;
+    saveLocalSettings();
+    if (onThemeChange) onThemeChange();
+  }
+
+  function handleApplyCustomHex() {
+    if (/^#[0-9A-Fa-f]{6}$/.test(customHexInput)) {
+      seedColor = customHexInput;
+      localSettings.seed_color = customHexInput;
+      saveLocalSettings();
+      if (onThemeChange) onThemeChange();
+    }
+  }
+
+  function handleSelectMode(mode) {
+    themeMode = mode;
+    localSettings.theme_mode = mode;
+    saveLocalSettings();
+    if (onThemeChange) onThemeChange();
+  }
+
+  async function handleSelectTranslucency(effect) {
+    translucency = effect;
+    localSettings.translucency = effect;
+    saveLocalSettings();
+    try {
+      await setWindowTranslucency(effect);
+    } catch (e) {
+      console.error('Failed to set window translucency:', e);
+    }
+    if (onThemeChange) onThemeChange();
+  }
+
+  async function saveLocalSettings() {
+    try {
+      await updateSettings(localSettings);
+      if (onRefresh) await onRefresh(false);
+    } catch (e) {
+      notify(`Failed to save settings: ${e}`, 'error');
+    }
+  }
+
+  // --- Storage Actions ---
+  async function handleAddDrive() {
+    if (!newDrivePath.trim()) {
+      notify('Drive path is required', 'error');
+      return;
+    }
+    try {
+      await addStorageDrive(newDriveLabel.trim(), newDrivePath.trim());
+      newDrivePath = '';
+      newDriveLabel = '';
+      notify('Storage drive added successfully', 'info');
+      if (onRefresh) await onRefresh();
+    } catch (e) {
+      notify(`Error adding drive: ${e}`, 'error');
+    }
+  }
+
+  function requestRemoveDrive(driveId, label) {
+    triggerConfirm({
+      title: 'Remove Storage Drive',
+      message: `Are you sure you want to remove ${label || driveId} from your storage locations?`,
+      confirmText: 'Remove Drive',
+      isDestructive: true,
+      action: async () => {
+        try {
+          await removeStorageDrive(driveId);
+          notify('Storage drive removed', 'info');
+          if (onRefresh) await onRefresh();
+        } catch (e) {
+          notify(`Error removing drive: ${e}`, 'error');
+        }
+      },
+    });
+  }
+
+  async function handleSetDefaultDrive(driveId) {
+    try {
+      await setDefaultDrive(driveId);
+      notify('Default storage drive updated', 'info');
+      if (onRefresh) await onRefresh();
+    } catch (e) {
+      notify(`Error setting default drive: ${e}`, 'error');
+    }
+  }
+
+  async function handleMoveGame() {
+    if (!moveGameId || !moveTargetDriveId) {
+      notify('Please select a game and a target drive', 'error');
+      return;
+    }
+    try {
+      await moveGameToDrive(moveGameId, moveTargetDriveId);
+      notify(`Game successfully moved to target drive`, 'info');
+      moveGameId = '';
+      if (onRefresh) await onRefresh();
+    } catch (e) {
+      notify(`Error moving game: ${e}`, 'error');
+    }
+  }
+
+  // --- Launch Actions ---
+  async function handleDownloadProton() {
+    isDownloadingProton = true;
+    notify('Downloading latest Proton-GE release...', 'info');
+    try {
+      const res = await downloadProtonGE();
+      notify(`Proton-GE installed: ${res?.runner || 'Done'}`, 'info');
+      if (onRefresh) await onRefresh();
+    } catch (e) {
+      notify(`Failed to download Proton-GE: ${e}`, 'error');
+    } finally {
+      isDownloadingProton = false;
+    }
+  }
+
+  // --- Plugin Actions ---
+  async function handleRefreshStore() {
+    isRefreshingStore = true;
+    try {
+      await refreshPluginStore();
+      if (onRefresh) await onRefresh();
+    } catch (e) {
+      notify(`Failed to refresh plugin store: ${e}`, 'error');
+    } finally {
+      isRefreshingStore = false;
+    }
+  }
+
+  async function handleAddStore() {
+    if (!newStoreUrl.trim()) {
+      notify('Store URL is required', 'error');
+      return;
+    }
+    isAddingStore = true;
+    try {
+      const res = await runAction({
+        action: 'plugin-store-add',
+        location: newStoreUrl.trim(),
+      });
+      notify(`Store added (${res?.count ?? 0} plugins cached)`, 'info');
+      newStoreUrl = '';
+      showAddStoreModal = false;
+      await handleRefreshStore();
+      if (onRefresh) await onRefresh();
+    } catch (e) {
+      notify(`Error adding store: ${e}`, 'error');
+    } finally {
+      isAddingStore = false;
+    }
+  }
+
+  async function handleInstallStorePlugin(id) {
+    installingPluginId = id;
+    try {
+      await installStorePlugin(id);
+      notify(`Plugin ${id} installed successfully`, 'info');
+      if (onRefresh) await onRefresh();
+    } catch (e) {
+      notify(`Failed to install plugin: ${e}`, 'error');
+    } finally {
+      installingPluginId = null;
+    }
+  }
+
+  function requestUninstallPlugin(id, name) {
+    triggerConfirm({
+      title: 'Uninstall Plugin',
+      message: `Are you sure you want to uninstall '${name || id}'?`,
+      confirmText: 'Uninstall',
+      isDestructive: true,
+      action: async () => {
+        try {
+          await removePlugin(id);
+          notify(`Plugin ${id} uninstalled`, 'info');
+          if (onRefresh) await onRefresh();
+        } catch (e) {
+          notify(`Failed to uninstall plugin: ${e}`, 'error');
+        }
+      },
+    });
+  }
+
+  async function handleMoveIndividualGame(gameId, targetDriveId) {
+    if (!gameId || !targetDriveId || movingGameId) return;
+    movingGameId = gameId;
+    try {
+      await moveGameToDrive(gameId, targetDriveId);
+      notify('Game successfully moved to selected drive!', 'success');
+      if (onRefresh) await onRefresh();
+    } catch (e) {
+      notify(`Failed to move game: ${e}`, 'error');
+    } finally {
+      movingGameId = null;
+    }
+  }
+
+  function requestUninstallGame(gameId, title) {
+    triggerConfirm({
+      title: 'Uninstall Game',
+      message: `Are you sure you want to completely uninstall and delete ${title || 'this game'}? All installed game files and local data will be permanently removed.`,
+      confirmText: 'Uninstall',
+      isDestructive: true,
+      action: async () => {
+        try {
+          await runAction({ action: 'game-remove', id: gameId });
+          notify('Game uninstalled and files removed', 'info');
+          if (onRefresh) await onRefresh();
+        } catch (e) {
+          notify(`Failed to remove game: ${e}`, 'error');
+        }
+      },
+    });
+  }
+
+  // --- Steam Shortcuts Sync ---
+  async function handleSyncSteam() {
+    isSyncingSteam = true;
+    try {
+      const res = await syncSteamShortcuts();
+      notify(`Added ${res?.synced ?? 0} games to Steam library`, 'info');
+    } catch (e) {
+      notify(`Error adding games to Steam library: ${e}`, 'error');
+    } finally {
+      isSyncingSteam = false;
+    }
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
+</script>
+
+<div class="settings-container">
+  <!-- LEFT: MATERIAL 3 SIDENAV CATEGORY LIST -->
+  <aside class="settings-sidenav">
+    <div class="sidenav-header">
+      <span class="sidenav-title">Settings</span>
+    </div>
+
+    <nav class="sidenav-menu">
+      {#each settingsCategories as cat}
+        {@const isMatch = doesCategoryMatch(cat, searchQuery)}
+        <button
+          class="nav-item"
+          class:active={activeCategory === cat.id}
+          class:search-matched={isMatch}
+          onclick={() => (activeCategory = cat.id)}
+        >
+          <svg class="nav-icon" viewBox="0 0 24 24"><path d={cat.icon} /></svg>
+          <span class="nav-label">{cat.label}</span>
+          {#if isMatch && searchQuery.trim()}
+            <span class="match-dot" title="Matches search query"></span>
+          {/if}
+        </button>
+      {/each}
+    </nav>
+  </aside>
+
+  <!-- RIGHT: DYNAMIC CATEGORY SETTINGS VIEW -->
+  <main class="settings-panel">
+    <!-- 1. STORAGE & DRIVES (TWO MAIN CONTAINERS: DRIVES & GAMES) -->
+    {#if activeCategory === 'storage'}
+      <div class="panel-header">
+        <h2>Storage & Drives Management</h2>
+        <span class="subtext">Manage installation paths and relocate installed games across drives.</span>
+      </div>
+
+      <!-- CONTAINER 1: DRIVES (TO MANAGE INSTALLATION PATHS) -->
+      <SectionCard
+        title="Drives (Installation Paths)"
+        icon="M2 20h20v-4H2v4zm2-3h2v2H4v-2zM2 4v4h20V4H2zm4 3H4V5h2v2zm-4 7h20v-4H2v4zm2-3h2v2H4v-2z"
+        badge="{localSettings.storage_drives.length} Configured"
+        description="Root storage locations where game downloads and prefixes are stored."
+      >
+        <div class="drives-list">
+          {#each localSettings.storage_drives as drive}
+            <div class="drive-card" class:default-drive={drive.is_default}>
+              <div class="drive-info">
+                <div class="drive-title-row">
+                  <span class="drive-label">{drive.label}</span>
+                  {#if drive.is_default}
+                    <span class="badge default-badge">
+                      <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
+                      Default Library
+                    </span>
+                  {/if}
+                </div>
+                <code class="drive-path">{drive.path}</code>
+              </div>
+
+              <div class="drive-actions">
+                {#if !drive.is_default}
+                  <button class="md3-btn tonal small" onclick={() => handleSetDefaultDrive(drive.id)}>
+                    Set Default
+                  </button>
+                  <button class="icon-btn danger" onclick={() => requestRemoveDrive(drive.id, drive.label)} title="Remove Drive">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                  </button>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </div>
+
+        <!-- Add New Drive Form -->
+        <div class="add-drive-box">
+          <h4>Add Storage Location</h4>
+          <div class="form-row">
+            <input
+              type="text"
+              class="md3-input"
+              placeholder="Drive Label (e.g. Games NVMe)"
+              bind:value={newDriveLabel}
+            />
+            <input
+              type="text"
+              class="md3-input flex-2"
+              placeholder="Absolute Path (e.g. /mnt/games, D:\Games)"
+              bind:value={newDrivePath}
+            />
+            <button class="md3-btn secondary" onclick={handleAddDrive}>
+              <svg class="btn-icon" viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+              Add Drive
+            </button>
+          </div>
+        </div>
+      </SectionCard>
+
+      <!-- CONTAINER 2: GAMES (TO MANAGE GAME INSTALLATIONS & EASY MOVING) -->
+      <SectionCard
+        title="Games (Manage Game Installations)"
+        icon="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm4-3c-.83 0-1.5-.67-1.5-1.5S18.67 9 19.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"
+        badge="{library.length} Installed"
+        description="Installed games across your drives. Seamlessly relocate files, explore folders, or uninstall."
+      >
+        {#if library.length === 0}
+          <div class="empty-state-card">
+            <p class="desc">No installed games in your library yet.</p>
+          </div>
+        {:else}
+          <div class="games-management-table">
+            {#each library as game}
+              <div class="game-management-row">
+                <div class="game-main-info">
+                  <span class="game-row-title">{game.title}</span>
+                  <code class="game-row-path" title={game.install_dir}>{game.install_dir}</code>
+                </div>
+
+                <div class="game-move-controls">
+                  <select
+                    class="md3-select small-select"
+                    bind:value={individualTargetDrives[game.id]}
+                  >
+                    <option value="" disabled selected>Select destination drive...</option>
+                    {#each localSettings.storage_drives as d}
+                      <option value={d.id}>{d.label} ({d.path})</option>
+                    {/each}
+                  </select>
+
+                  <button
+                    class="md3-btn tonal small"
+                    onclick={() => handleMoveIndividualGame(game.id, individualTargetDrives[game.id])}
+                    disabled={!individualTargetDrives[game.id] || movingGameId === game.id}
+                  >
+                    {movingGameId === game.id ? 'Moving...' : 'Move Game'}
+                  </button>
+
+                  <button
+                    class="icon-btn tonal"
+                    onclick={() => openGameFolder(game.install_dir)}
+                    title="Open Installation Folder"
+                  >
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                      <path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/>
+                    </svg>
+                  </button>
+
+                  <button
+                    class="icon-btn danger"
+                    onclick={() => requestUninstallGame(game.id, game.title)}
+                    title="Uninstall game"
+                  >
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                  </button>
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </SectionCard>
+
+    <!-- 2. LAUNCH & RUNNERS (CLEAR & UNAMBIGUOUS) -->
+    {:else if activeCategory === 'launch'}
+      <div class="panel-header">
+        <div class="panel-header-row">
+          <div>
+            <h2>Launch & Compatibility Runners</h2>
+            <span class="subtext">Orchestrate runtime compatibility for Windows executables and game prefixes.</span>
+          </div>
+          <div class="platform-chip" title="Detected Host: {platform}">
+            {#if platform === 'linux'}
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                <path d="M12 2a4 4 0 0 0-4 4c0 .77.22 1.48.58 2.09C6.43 9.42 5 11.54 5 14c0 3.31 2.69 6 6 6h2c3.31 0 6-2.69 6-6 0-2.46-1.43-4.58-3.58-5.91.36-.61.58-1.32.58-2.09a4 4 0 0 0-4-4z"/>
+              </svg>
+              <span>Linux</span>
+            {:else}
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                <path d="M3 5.48L10.37 4.46V11.53H3V5.48ZM10.37 12.44V19.54L3 18.52V12.44H10.37ZM11.49 4.31L21 3V11.53H11.49V4.31ZM21 12.44V21L11.49 19.69V12.44H21Z"/>
+              </svg>
+              <span>Windows</span>
+            {/if}
+          </div>
+        </div>
+      </div>
+
+      <!-- CARD 1: WINDOWS COMPATIBILITY RUNNER WITH INTEGRATED PREFIX ISOLATION -->
+      <SectionCard
+        title="Windows Compatibility Runner (Wine / Proton)"
+        icon="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"
+        description="Select which runner executes Windows PE binaries (.exe) and Steam manifests on your system:"
+      >
+        <div class="form-row">
+          <select
+            class="md3-select flex-2"
+            bind:value={localSettings.default_runner}
+            onchange={saveLocalSettings}
+          >
+            <option value="auto">Proton Auto (Discovers latest Proton-GE or Valve Proton — Recommended)</option>
+            {#if platform === 'linux'}
+              {#each runners.filter(r => r.runner_type === 'proton') as p}
+                <option value={p.id}>{p.name}</option>
+              {/each}
+              <option value="wine">System Wine</option>
+            {/if}
+          </select>
+
+          {#if platform === 'linux'}
+            <button class="md3-btn primary" onclick={handleDownloadProton} disabled={isDownloadingProton}>
+              <svg class="btn-icon" viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+              <span>{isDownloadingProton ? 'Downloading...' : 'Download Latest Proton-GE'}</span>
+            </button>
+          {/if}
+        </div>
+
+        <div class="prefix-inline-note">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+            <path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v2h-2zm0 0"/>
+          </svg>
+          <span>
+            <strong>Dedicated Prefix Isolation:</strong> Windows games run inside isolated prefixes (<code>~/.local/share/azdl/prefixes/&lt;game_id&gt;</code>) to avoid library collisions, isolate saves, and allow per-game <code>WINEDLLOVERRIDES</code> staging for multiplayer fix DLLs with automated rollback.
+          </span>
+        </div>
+      </SectionCard>
+
+      <!-- CARD 2: GLOBAL LAUNCH ARGUMENTS -->
+      <SectionCard
+        title="Global Launch Arguments"
+        icon="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"
+        description="Parameters appended to every game invocation (e.g. gamemoderun %command%, DXVK_HUD=1):"
+      >
+        <div class="form-row">
+          <input
+            type="text"
+            class="md3-input flex-2"
+            placeholder="e.g. --fullscreen -novid"
+            bind:value={localSettings.global_launch_args}
+          />
+          <button class="md3-btn secondary" onclick={saveLocalSettings}>Save Arguments</button>
+        </div>
+      </SectionCard>
+
+    <!-- 3. PLUGINS & SOURCES (STORE & INSTALLED ONLY) -->
+    {:else if activeCategory === 'plugins'}
+      <div class="panel-header">
+        <h2>Plugins & Sources</h2>
+        <span class="subtext">Browse community plugins, install store packages, or manage installed extensions.</span>
+      </div>
+
+      <div class="plugins-toolbar">
+        <div class="plugin-search-box">
+          <input
+            type="text"
+            class="md3-input plugin-search-input"
+            placeholder="Search store and local plugins..."
+            bind:value={pluginSearchQuery}
+          />
+        </div>
+
+        <div class="toolbar-actions">
+          <button class="md3-btn tonal small" onclick={() => (showAddStoreModal = true)}>
+            <svg class="btn-icon" viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+            Add Store
+          </button>
+        </div>
+      </div>
+
+      {#if filteredPlugins.length === 0}
+        <div class="empty-state-card">
+          <p class="desc">No plugins found matching your search.</p>
+        </div>
+      {:else}
+        <div class="plugin-cards-grid">
+          {#each filteredPlugins as p}
+            {@const installedMatch = plugins.find((inst) => inst.id === p.id)}
+            {@const isInstalled = !!installedMatch}
+            <div class="plugin-card" class:installed-card={isInstalled}>
+              <div class="plugin-card-header">
+                <div class="plugin-title-row">
+                  <span class="plugin-title">{p.name}</span>
+                  <span class="plugin-id-sub">{p.id}</span>
+                </div>
+                <div class="plugin-badges">
+                  {#if isInstalled}
+                    <span class="badge installed-badge">Installed</span>
+                  {/if}
+                  {#if p.recommended}
+                    <span class="badge recommended-badge">Recommended</span>
+                  {/if}
+                </div>
+              </div>
+              <p class="plugin-desc">{p.description || 'Native Arachnel v4 plugin.'}</p>
+              <div class="plugin-footer">
+                <span class="plugin-version">
+                  v{installedMatch ? installedMatch.version : p.version}
+                </span>
+                <div class="card-action-group">
+                  {#if isInstalled}
+                    <button
+                      class="md3-btn danger small"
+                      onclick={() => requestUninstallPlugin(p.id, p.name)}
+                      title="Uninstall plugin"
+                    >
+                      Uninstall
+                    </button>
+                  {:else}
+                    <button
+                      class="md3-btn primary small"
+                      onclick={() => handleInstallStorePlugin(p.id)}
+                      disabled={installingPluginId === p.id}
+                    >
+                      {installingPluginId === p.id ? 'Installing...' : 'Install'}
+                    </button>
+                  {/if}
+                </div>
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
+
+    <!-- 5. APPEARANCE & MATERIAL YOU -->
+    {:else if activeCategory === 'appearance'}
+      <div class="panel-header">
+        <h2>Material You Personalization</h2>
+        <span class="subtext">Dynamic algorithmic palette generation, theme modes, and window glass translucency.</span>
+      </div>
+
+      <SectionCard
+        title="Seed Color Palette"
+        icon="M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.22 19.62 10.56 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z"
+        description="Material Design 3 algorithmic tone generator extracts primary, secondary, and surface hues."
+      >
+        <div class="seed-swatches">
+          {#each PRESET_SEEDS as seed}
+            <button
+              class="swatch-btn"
+              class:selected={seedColor.toLowerCase() === seed.hex.toLowerCase()}
+              style:background-color={seed.hex}
+              onclick={() => handleSelectSeed(seed.hex)}
+              title={seed.label}
+            >
+              {#if seedColor.toLowerCase() === seed.hex.toLowerCase()}
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="white">
+                  <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                </svg>
+              {/if}
+            </button>
+          {/each}
+        </div>
+
+        <div class="custom-color-row">
+          <label for="custom-hex">Custom Seed Hex:</label>
+          <input
+            id="custom-hex"
+            type="text"
+            class="md3-input"
+            placeholder="#10B981"
+            bind:value={customHexInput}
+            onchange={handleApplyCustomHex}
+          />
+          <input
+            type="color"
+            class="color-picker-input"
+            value={seedColor}
+            oninput={(e) => handleSelectSeed(e.target.value)}
+          />
+        </div>
+      </SectionCard>
+
+      <SectionCard
+        title="Theme Mode"
+        icon="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-5.4-5.4c0-1.81.89-3.42 2.26-4.4-.44-.06-.9-.1-1.36-.1z"
+        description="Select display appearance mode for high contrast, dark, light, or OLED deep blacks."
+      >
+        <div class="mode-toggles">
+          <button
+            class="mode-btn"
+            class:active={themeMode === 'system'}
+            onclick={() => handleSelectMode('system')}
+          >
+            <span>System</span>
+          </button>
+          <button
+            class="mode-btn"
+            class:active={themeMode === 'dark'}
+            onclick={() => handleSelectMode('dark')}
+          >
+            <span>Dark</span>
+          </button>
+          <button
+            class="mode-btn"
+            class:active={themeMode === 'amoled'}
+            onclick={() => handleSelectMode('amoled')}
+          >
+            <span>AMOLED Pure Black</span>
+          </button>
+          <button
+            class="mode-btn"
+            class:active={themeMode === 'light'}
+            onclick={() => handleSelectMode('light')}
+          >
+            <span>Light</span>
+          </button>
+        </div>
+      </SectionCard>
+
+      <SectionCard
+        title="Window Translucency & Vibrancy"
+        icon="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z"
+        description="Desktop background blur and window glass effects matching your compositor."
+      >
+        <div class="mode-toggles">
+          <button
+            class="mode-btn"
+            class:active={translucency === 'none'}
+            onclick={() => handleSelectTranslucency('none')}
+          >
+            Opaque
+          </button>
+          {#if platform === 'windows'}
+            <button
+              class="mode-btn"
+              class:active={translucency === 'mica'}
+              onclick={() => handleSelectTranslucency('mica')}
+            >
+              Mica
+            </button>
+            <button
+              class="mode-btn"
+              class:active={translucency === 'acrylic'}
+              onclick={() => handleSelectTranslucency('acrylic')}
+            >
+              Acrylic
+            </button>
+          {:else}
+            <button
+              class="mode-btn"
+              class:active={translucency === 'compositor'}
+              onclick={() => handleSelectTranslucency('compositor')}
+            >
+              Compositor Translucency
+            </button>
+          {/if}
+        </div>
+      </SectionCard>
+
+    <!-- 7. INTEGRATIONS & FIXES -->
+    {:else if activeCategory === 'integrations'}
+      <div class="panel-header">
+        <h2>Integrations & Runtime Patches</h2>
+        <span class="subtext">Steam shortcuts injection, DRM stripping, and Online-Fix multiplayer overlay settings.</span>
+      </div>
+
+      <SectionCard
+        title="Add Games to Steam Library"
+        icon="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"
+        description="Export installed games into Steam's shortcuts.vdf configuration so they appear in your Steam library."
+      >
+        <div class="action-toolbar">
+          <button class="md3-btn primary" onclick={handleSyncSteam} disabled={isSyncingSteam}>
+            <svg class="btn-icon" viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
+            <span>{isSyncingSteam ? 'Adding...' : 'Add All Games to Steam Library'}</span>
+          </button>
+        </div>
+
+        <div class="switch-row">
+          <div>
+            <strong>Auto-add games to Steam library on install</strong>
+            <p class="desc">Keep Steam library automatically up to date when new games finish installation.</p>
+          </div>
+          <label class="switch-container" aria-label="Auto-add games to Steam library">
+            <Switch
+              bind:checked={localSettings.auto_steam_shortcut_sync}
+              onchange={saveLocalSettings}
+            />
+          </label>
+        </div>
+
+        <div class="switch-row">
+          <div>
+            <strong>Auto-download Steam Grid artwork</strong>
+            <p class="desc">Fetch official 600x900 covers and headers for non-Steam shortcuts.</p>
+          </div>
+          <label class="switch-container" aria-label="Auto-download Steam Grid artwork">
+            <Switch
+              bind:checked={localSettings.auto_steam_grid_artwork}
+              onchange={saveLocalSettings}
+            />
+          </label>
+        </div>
+      </SectionCard>
+
+      <SectionCard
+        title="DRM Stripping & Multiplayer Overlays"
+        icon="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"
+        description="Automated Steamless unpacker staging and WINEDLLOVERRIDES multiplayer hooks."
+      >
+        <div class="switch-row">
+          <div>
+            <strong>SteamStub Auto-Unpack (Steamless)</strong>
+            <p class="desc">Automatically strip SteamStub DRM wrappers on import, preserving <code>.steamstub.bak</code> backups.</p>
+          </div>
+          <label class="switch-container" aria-label="SteamStub Auto-Unpack">
+            <Switch
+              bind:checked={localSettings.auto_steamless_unpack}
+              onchange={saveLocalSettings}
+            />
+          </label>
+        </div>
+
+        <div class="switch-row">
+          <div>
+            <strong>Auto-Enable Online-Fix Overlays</strong>
+            <p class="desc">Set Wine DLL overrides (<code>WINEDLLOVERRIDES="OnlineFix64=n,b"</code>) and preserve clean unpatched states via <code>.arachnel-off</code> renames.</p>
+          </div>
+          <label class="switch-container" aria-label="Auto-Enable Online-Fix Overlays">
+            <Switch
+              bind:checked={localSettings.auto_online_fix_overlay}
+              onchange={saveLocalSettings}
+            />
+          </label>
+        </div>
+      </SectionCard>
+
+    <!-- 8. ABOUT & DIAGNOSTICS -->
+    {:else if activeCategory === 'about'}
+      <div class="panel-header">
+        <h2>About & System Diagnostics</h2>
+        <span class="subtext">Engine versioning, system dependencies, and environment health checks.</span>
+      </div>
+
+      <SectionCard
+        title="Application Environment"
+        icon="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"
+        description="Host runtime environment details, engine version, and active data directories."
+      >
+        <div class="info-grid">
+          <div class="info-item">
+            <span class="info-label">Application:</span>
+            <span class="info-val">azdl v0.1.0 (Rust 2024 / Tauri v2 / Svelte 5 MD3)</span>
+          </div>
+          <div class="info-item">
+            <span class="info-label">Data Directory:</span>
+            <code class="info-val">{dataDir || 'Default user data path'}</code>
+          </div>
+          <div class="info-item">
+            <span class="info-label">Operating System:</span>
+            <span class="info-val">{platform === 'windows' ? 'Microsoft Windows (x86_64)' : 'Linux (Proton / Wine)'}</span>
+          </div>
+        </div>
+      </SectionCard>
+
+      <SectionCard
+        title="System Dependencies Health"
+        icon="M19 3H5c-1.1 0-1.99.9-1.99 2L3 19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-1 11h-4v4h-4v-4H6v-4h4V6h4v4h4v4z"
+        badge="{diagnostics.filter(d => d.available).length}/{diagnostics.length} Available"
+        description="Verify availability of runtime dependencies (Wine, Proton, Steam, 7z, UnRAR)."
+      >
+        <div class="diagnostics-grid">
+          {#each diagnostics as diag}
+            <div class="diag-card" class:available={diag.available} class:missing={!diag.available}>
+              <div class="diag-header">
+                {#if diag.available}
+                  <svg class="diag-status-icon success" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+                {:else}
+                  <svg class="diag-status-icon {diag.required ? 'error' : 'warning'}" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+                {/if}
+                <span class="diag-name">{diag.name}</span>
+                {#if diag.required}
+                  <span class="badge required-badge">Required</span>
+                {/if}
+              </div>
+              <p class="diag-desc">{diag.description}</p>
+              {#if diag.path}
+                <code class="diag-path">{diag.path}</code>
+              {/if}
+              {#if diag.version}
+                <span class="diag-version">{diag.version}</span>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      </SectionCard>
+    {/if}
+  </main>
+
+  <!-- MODAL: ADD STORE -->
+  <Modal
+    open={showAddStoreModal}
+    title="Add Plugin Store"
+    subtitle="Provide the HTTPS URL to a remote plugins.json index or catalog repository feed."
+    onClose={() => (showAddStoreModal = false)}
+  >
+    {#snippet children()}
+      <div class="form-group">
+        <label for="store-url-input">Store URL (HTTPS)</label>
+        <input
+          id="store-url-input"
+          type="text"
+          class="md3-input"
+          placeholder="https://example.com/plugins.json"
+          bind:value={newStoreUrl}
+        />
+      </div>
+    {/snippet}
+    {#snippet actions()}
+      <button class="md3-btn text" onclick={() => (showAddStoreModal = false)}>
+        Cancel
+      </button>
+      <button
+        class="md3-btn primary"
+        onclick={handleAddStore}
+        disabled={!newStoreUrl.trim() || isAddingStore}
+      >
+        {isAddingStore ? 'Adding...' : 'Add Store'}
+      </button>
+    {/snippet}
+  </Modal>
+
+  <ConfirmModal
+    bind:open={confirmDialog.open}
+    title={confirmDialog.title}
+    message={confirmDialog.message}
+    confirmText={confirmDialog.confirmText}
+    isDestructive={confirmDialog.isDestructive}
+    onConfirm={confirmDialog.action}
+  />
+</div>
+
+<style>
+  .settings-container {
+    display: flex;
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+    background: var(--md-sys-color-surface);
+  }
+
+  /* SIDENAV */
+  .settings-sidenav {
+    width: 260px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--md-sys-color-outline-variant);
+    background: var(--md-sys-color-surface-container-low);
+    display: flex;
+    flex-direction: column;
+    padding: 18px 12px;
+    gap: 8px;
+  }
+
+  .sidenav-header {
+    padding: 8px 14px 16px;
+  }
+
+  .sidenav-title {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--md-sys-color-on-surface);
+    letter-spacing: -0.01em;
+  }
+
+  .sidenav-menu {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    overflow-y: auto;
+  }
+
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border-radius: var(--md-sys-shape-full);
+    border: none;
+    background: transparent;
+    color: var(--md-sys-color-on-surface-variant);
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.18s cubic-bezier(0.2, 0, 0, 1), color 0.18s cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .nav-item:hover {
+    background: var(--md-sys-color-surface-container-high);
+    color: var(--md-sys-color-on-surface);
+  }
+
+  .nav-item.active {
+    background: var(--md-sys-color-secondary-container);
+    color: var(--md-sys-color-on-secondary-container);
+    font-weight: 600;
+  }
+
+  .nav-item.search-matched:not(.active) {
+    background: rgba(var(--md-sys-color-primary-rgb, 16, 185, 129), 0.08);
+    color: var(--md-sys-color-primary);
+  }
+
+  .match-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--md-sys-color-primary);
+    margin-left: auto;
+    flex-shrink: 0;
+  }
+
+  .nav-icon {
+    width: 20px;
+    height: 20px;
+    fill: currentColor;
+    flex-shrink: 0;
+  }
+
+  /* MAIN SETTINGS PANEL */
+  .settings-panel {
+    flex: 1;
+    overflow-y: auto;
+    padding: 28px 36px 64px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+
+  .panel-header {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .panel-header h2 {
+    font-size: 1.55rem;
+    font-weight: 700;
+    color: var(--md-sys-color-on-surface);
+    margin: 0;
+  }
+
+  .subtext {
+    font-size: 0.85rem;
+    color: var(--md-sys-color-on-surface-variant);
+  }
+
+  .desc {
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--md-sys-color-on-surface-variant);
+    line-height: 1.45;
+  }
+
+  .action-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  /* FORMS & INPUTS */
+  .form-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .flex-2 {
+    flex: 2;
+  }
+
+  .md3-input, .md3-select {
+    padding: 10px 14px;
+    background: var(--md-sys-color-surface-container-high);
+    border: 1px solid var(--md-sys-color-outline-variant);
+    border-radius: var(--md-sys-shape-small);
+    color: var(--md-sys-color-on-surface);
+    font-size: 0.85rem;
+    outline: none;
+    transition: none;
+  }
+
+  .md3-input:focus, .md3-select:focus {
+    border-color: var(--md-sys-color-primary);
+  }
+
+  /* BUTTONS */
+  .md3-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    border-radius: var(--md-sys-shape-full);
+    border: none;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity 0.15s ease, background 0.18s cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .md3-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .md3-btn.primary {
+    background: var(--md-sys-color-primary);
+    color: var(--md-sys-color-on-primary);
+  }
+
+  .md3-btn.secondary {
+    background: var(--md-sys-color-secondary);
+    color: var(--md-sys-color-on-secondary);
+  }
+
+  .md3-btn.tonal {
+    background: var(--md-sys-color-secondary-container);
+    color: var(--md-sys-color-on-secondary-container);
+  }
+
+  .md3-btn.danger {
+    background: var(--md-sys-color-error-container);
+    color: var(--md-sys-color-on-error-container);
+  }
+
+  .md3-btn.small {
+    padding: 6px 12px;
+    font-size: 0.78rem;
+  }
+
+  .icon-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: var(--md-sys-shape-full);
+    border: none;
+    background: transparent;
+    color: var(--md-sys-color-on-surface-variant);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+
+  .icon-btn svg {
+    fill: currentColor;
+  }
+
+  .icon-btn:hover {
+    background: var(--md-sys-color-surface-container-high);
+  }
+
+  .icon-btn.tonal {
+    background: var(--md-sys-color-surface-container-high);
+    color: var(--md-sys-color-on-surface);
+  }
+
+  .icon-btn.tonal:hover {
+    background: var(--md-sys-color-secondary-container);
+    color: var(--md-sys-color-on-secondary-container);
+  }
+
+  .icon-btn.danger {
+    color: var(--md-sys-color-error);
+  }
+
+  .icon-btn.danger:hover {
+    background: var(--md-sys-color-error-container);
+    color: var(--md-sys-color-on-error-container);
+  }
+
+  .btn-icon {
+    width: 18px;
+    height: 18px;
+    fill: currentColor;
+  }
+
+  /* DRIVES LIST */
+  .drives-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .drive-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    background: var(--md-sys-color-surface-container-high);
+    border: 1px solid var(--md-sys-color-outline-variant);
+    border-radius: var(--md-sys-shape-medium);
+  }
+
+  .drive-title-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .drive-label {
+    font-weight: 600;
+    color: var(--md-sys-color-on-surface);
+  }
+
+  .drive-path {
+    font-size: 0.75rem;
+    color: var(--md-sys-color-on-surface-variant);
+  }
+
+  .drive-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* BADGES */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 3px 10px;
+    border-radius: var(--md-sys-shape-full);
+  }
+
+  .default-badge {
+    background: var(--md-sys-color-primary-container);
+    color: var(--md-sys-color-on-primary-container);
+  }
+
+  .recommended-badge {
+    background: var(--md-sys-color-secondary-container);
+    color: var(--md-sys-color-on-secondary-container);
+  }
+
+  .required-badge {
+    background: var(--md-sys-color-error-container);
+    color: var(--md-sys-color-on-error-container);
+  }
+
+
+  /* SUBTABS */
+  /* PLUGINS TOOLBAR & GRID */
+  .plugins-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+  }
+
+  .plugin-search-box {
+    flex: 1;
+    min-width: 260px;
+  }
+
+  .plugin-search-input {
+    width: 100%;
+  }
+
+  .toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .empty-state-card {
+    padding: 32px 20px;
+    text-align: center;
+    background: var(--md-sys-color-surface-container-high);
+    border-radius: var(--md-sys-shape-medium);
+  }
+
+  .plugin-cards-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+  }
+
+  .plugin-card {
+    background: var(--md-sys-color-surface-container-high);
+    border: 1px solid var(--md-sys-color-outline-variant);
+    border-radius: var(--md-sys-shape-large);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    transition: border-color 0.18s ease;
+  }
+
+  .plugin-card.installed-card {
+    border-color: rgba(var(--md-sys-color-primary-rgb, 16, 185, 129), 0.35);
+  }
+
+  .plugin-card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .plugin-title-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .plugin-title {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--md-sys-color-on-surface);
+  }
+
+  .plugin-id-sub {
+    font-size: 0.72rem;
+    color: var(--md-sys-color-on-surface-variant);
+    font-family: monospace;
+  }
+
+  .plugin-badges {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .installed-badge {
+    background: var(--md-sys-color-primary-container);
+    color: var(--md-sys-color-on-primary-container);
+  }
+
+  .plugin-desc {
+    font-size: 0.8rem;
+    color: var(--md-sys-color-on-surface-variant);
+    margin: 0;
+    flex: 1;
+    line-height: 1.45;
+  }
+
+  .plugin-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 4px;
+    gap: 8px;
+  }
+
+  .plugin-version {
+    font-size: 0.75rem;
+    color: var(--md-sys-color-on-surface-variant);
+    font-family: monospace;
+  }
+
+  .card-action-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+
+  /* APPEARANCE SWATCHES */
+  .seed-swatches {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .swatch-btn {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform 0.18s cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .swatch-btn:hover {
+    transform: scale(1.1);
+  }
+
+  .swatch-btn.selected {
+    border-color: var(--md-sys-color-on-surface);
+  }
+
+  .custom-color-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.85rem;
+  }
+
+  .color-picker-input {
+    width: 40px;
+    height: 40px;
+    border: none;
+    border-radius: var(--md-sys-shape-small);
+    cursor: pointer;
+    background: transparent;
+  }
+
+  .mode-toggles {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .mode-btn {
+    padding: 10px 18px;
+    border-radius: var(--md-sys-shape-full);
+    border: 1px solid var(--md-sys-color-outline-variant);
+    background: var(--md-sys-color-surface-container-high);
+    color: var(--md-sys-color-on-surface);
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.18s ease, color 0.18s ease;
+  }
+
+  .mode-btn.active {
+    background: var(--md-sys-color-primary);
+    color: var(--md-sys-color-on-primary);
+    border-color: var(--md-sys-color-primary);
+  }
+
+  /* SWITCH ROWS & MATERIAL 3 SWITCHES */
+  .switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--md-sys-color-outline-variant);
+    gap: 16px;
+  }
+
+  .switch-row:last-child {
+    border-bottom: none;
+  }
+
+  .switch-container {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  /* DIAGNOSTICS & ABOUT */
+  .info-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+  }
+
+  .info-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .info-label {
+    font-size: 0.75rem;
+    color: var(--md-sys-color-on-surface-variant);
+  }
+
+  .info-val {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--md-sys-color-on-surface);
+  }
+
+  .diagnostics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 12px;
+  }
+
+  .diag-card {
+    background: var(--md-sys-color-surface-container-high);
+    border: 1px solid var(--md-sys-color-outline-variant);
+    border-radius: var(--md-sys-shape-medium);
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .diag-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .diag-status-icon {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+  }
+
+  .diag-status-icon.success {
+    fill: var(--md-sys-color-primary);
+  }
+
+  .diag-status-icon.warning {
+    fill: var(--md-sys-color-tertiary);
+  }
+
+  .diag-status-icon.error {
+    fill: var(--md-sys-color-error);
+  }
+
+  .diag-name {
+    font-weight: 600;
+    font-size: 0.88rem;
+    color: var(--md-sys-color-on-surface);
+  }
+
+  .diag-desc {
+    font-size: 0.78rem;
+    color: var(--md-sys-color-on-surface-variant);
+    margin: 0;
+    line-height: 1.4;
+  }
+
+  .diag-path {
+    font-size: 0.72rem;
+    color: var(--md-sys-color-on-surface-variant);
+  }
+
+  .diag-version {
+    font-size: 0.72rem;
+    color: var(--md-sys-color-on-surface-variant);
+    font-style: italic;
+  }
+
+  /* Storage & Drives Styling */
+  .add-drive-box {
+    background: var(--md-sys-color-surface-container);
+    border: 1px solid var(--md-sys-color-outline-variant);
+    border-radius: var(--md-sys-shape-medium);
+    padding: 16px;
+    margin-top: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .add-drive-box h4 {
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: var(--md-sys-color-on-surface);
+    margin: 0;
+  }
+
+  .games-management-table {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .game-management-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    background: var(--md-sys-color-surface-container);
+    border: 1px solid var(--md-sys-color-outline-variant);
+    border-radius: var(--md-sys-shape-medium);
+    padding: 12px 16px;
+    flex-wrap: wrap;
+  }
+
+  .game-main-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 200px;
+    flex: 1;
+  }
+
+  .game-row-title {
+    font-weight: 600;
+    font-size: 0.92rem;
+    color: var(--md-sys-color-on-surface);
+  }
+
+  .game-row-path {
+    font-size: 0.76rem;
+    color: var(--md-sys-color-on-surface-variant);
+    background: var(--md-sys-color-surface-container-high);
+    padding: 2px 6px;
+    border-radius: var(--md-sys-shape-small);
+    word-break: break-all;
+  }
+
+  .game-move-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .small-select {
+    min-width: 200px;
+    max-width: 300px;
+    font-size: 0.82rem;
+  }
+
+  .panel-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .platform-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: var(--md-sys-shape-full);
+    background: var(--md-sys-color-secondary-container);
+    color: var(--md-sys-color-on-secondary-container);
+    font-size: 0.8rem;
+    font-weight: 600;
+  }
+
+  .platform-chip svg {
+    fill: currentColor;
+  }
+
+  .prefix-inline-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    background: var(--md-sys-color-surface-container-high);
+    border-radius: var(--md-sys-shape-medium);
+    padding: 12px 14px;
+    font-size: 0.82rem;
+    color: var(--md-sys-color-on-surface-variant);
+    line-height: 1.45;
+  }
+
+  .prefix-inline-note svg {
+    flex-shrink: 0;
+    margin-top: 2px;
+    fill: var(--md-sys-color-primary);
+  }
+
+</style>
