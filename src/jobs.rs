@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -892,7 +892,7 @@ pub fn start_background(data_dir: &Path, id: &str) -> Result<u32> {
     clear_pause(data_dir, id)?;
     let log = File::create(job_path(data_dir, id)?.with_extension("log"))?;
     let program = std::env::current_exe()?;
-    let child = Command::new(program)
+    let child = clean_command(program)
         .args(["jobs", "work", id])
         .env("AZDL_DATA_DIR", fs::canonicalize(data_dir)?)
         .stdin(Stdio::null())

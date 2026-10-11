@@ -242,6 +242,113 @@ fn steam_artwork_from_appdetails(
     })
 }
 
+pub fn cache_artwork_image(
+    data_dir: &Path,
+    app_id_or_key: &str,
+    kind: &str,
+    url: &str,
+) -> Option<PathBuf> {
+    if url.starts_with("azdl-art://") {
+        return None;
+    }
+    let safe_key: String = app_id_or_key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe_key.is_empty() {
+        return None;
+    }
+    let target_dir = data_dir.join("artwork-cache").join(&safe_key);
+    let extension = if url.to_ascii_lowercase().contains(".png") {
+        "png"
+    } else {
+        "jpg"
+    };
+    let target_file = target_dir.join(format!("{kind}.{extension}"));
+    if target_file.is_file()
+        && target_file
+            .metadata()
+            .map(|m| m.len() > 100)
+            .unwrap_or(false)
+    {
+        return Some(target_file);
+    }
+    let _ = std::fs::create_dir_all(&target_dir);
+    let temp_file = target_dir.join(format!(".{kind}.tmp-{}", std::process::id()));
+    let status = azdl::clean_command("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--location",
+            "--max-time",
+            "10",
+            "--proto",
+            "=https",
+            "--output",
+        ])
+        .arg(&temp_file)
+        .arg(url)
+        .status()
+        .ok()?;
+    if status.success()
+        && temp_file.is_file()
+        && temp_file.metadata().map(|m| m.len() > 100).unwrap_or(false)
+    {
+        let _ = std::fs::rename(&temp_file, &target_file);
+        Some(target_file)
+    } else {
+        let _ = std::fs::remove_file(&temp_file);
+        None
+    }
+}
+
+pub fn get_cached_artwork_path(data_dir: &Path, key: &str, kind: &str) -> Option<PathBuf> {
+    let safe_key: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe_key.is_empty() {
+        return None;
+    }
+    let dir = data_dir.join("artwork-cache").join(&safe_key);
+    for ext in ["jpg", "png", "webp", "jpeg"] {
+        let file = dir.join(format!("{kind}.{ext}"));
+        if file.is_file() && file.metadata().map(|m| m.len() > 100).unwrap_or(false) {
+            return Some(file);
+        }
+    }
+    None
+}
+
+pub fn get_cached_artwork_uri(data_dir: &Path, key: &str, kind: &str) -> Option<String> {
+    let path = get_cached_artwork_path(data_dir, key, kind)?;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+    let safe_key: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(format!("azdl-art://localhost/{safe_key}/{kind}.{ext}"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunningGameInfo {
     pub id: String,
@@ -750,19 +857,61 @@ mod commands {
                         .or_else(|| parse_steam_id(&game.id))
                 });
 
-                let banner_url = game
+                let raw_banner_url = game
                     .banner_url
                     .clone()
                     .or_else(|| catalog_match.and_then(|cg| cg.banner_url.clone()))
                     .or_else(|| meta_entry.as_ref().and_then(|m| m.banner_url.clone()));
 
-                let cover_url = game
+                let raw_cover_url = game
                     .cover_url
                     .clone()
                     .or_else(|| catalog_match.and_then(|cg| cg.cover_url.clone()))
                     .or_else(|| meta_entry.as_ref().and_then(|m| m.cover_url.clone()));
 
-                if (banner_url.is_none() || cover_url.is_none()) && meta_entry.is_none() {
+                let disk_banner = steam_id
+                    .as_deref()
+                    .and_then(|sid| get_cached_artwork_uri(&state.data_dir, sid, "banner"))
+                    .or_else(|| get_cached_artwork_uri(&state.data_dir, &game.id, "banner"));
+
+                let disk_cover = steam_id
+                    .as_deref()
+                    .and_then(|sid| get_cached_artwork_uri(&state.data_dir, sid, "cover"))
+                    .or_else(|| get_cached_artwork_uri(&state.data_dir, &game.id, "cover"));
+
+                let banner_url = disk_banner.or(raw_banner_url.clone());
+                let cover_url = disk_cover.or(raw_cover_url.clone());
+
+                if let Some(url) = raw_banner_url.clone()
+                    && get_cached_artwork_path(
+                        &state.data_dir,
+                        steam_id.as_deref().unwrap_or(&game.id),
+                        "banner",
+                    )
+                    .is_none()
+                {
+                    let data_dir = state.data_dir.clone();
+                    let key = steam_id.clone().unwrap_or_else(|| game.id.clone());
+                    std::thread::spawn(move || {
+                        cache_artwork_image(&data_dir, &key, "banner", &url);
+                    });
+                }
+                if let Some(url) = raw_cover_url.clone()
+                    && get_cached_artwork_path(
+                        &state.data_dir,
+                        steam_id.as_deref().unwrap_or(&game.id),
+                        "cover",
+                    )
+                    .is_none()
+                {
+                    let data_dir = state.data_dir.clone();
+                    let key = steam_id.clone().unwrap_or_else(|| game.id.clone());
+                    std::thread::spawn(move || {
+                        cache_artwork_image(&data_dir, &key, "cover", &url);
+                    });
+                }
+
+                if (raw_banner_url.is_none() || raw_cover_url.is_none()) && meta_entry.is_none() {
                     let title_clone = game.title.clone();
                     let lookup_query = steam_id.clone().unwrap_or_else(|| title_clone.clone());
                     let pending_key = title_clone.to_lowercase();
@@ -782,6 +931,24 @@ mod commands {
                                         cover_url: None,
                                     },
                                 );
+                                if let Some(app_id) = entry.steam_app_id {
+                                    if let Some(ref b) = entry.banner_url {
+                                        cache_artwork_image(
+                                            &state_clone.data_dir,
+                                            &app_id.to_string(),
+                                            "banner",
+                                            b,
+                                        );
+                                    }
+                                    if let Some(ref c) = entry.cover_url {
+                                        cache_artwork_image(
+                                            &state_clone.data_dir,
+                                            &app_id.to_string(),
+                                            "cover",
+                                            c,
+                                        );
+                                    }
+                                }
                                 if let Ok(mut cache) = state_clone.metadata_cache.lock() {
                                     insert_metadata_cache(&mut cache, task_key.clone(), entry);
                                     save_metadata_cache(&state_clone.data_dir, &cache);
@@ -1179,6 +1346,19 @@ mod commands {
         if let Ok(mut cache) = state.metadata_cache.lock() {
             insert_metadata_cache(&mut cache, key, entry.clone());
             save_metadata_cache(&state.data_dir, &cache);
+        }
+        if let Some(app_id) = entry.steam_app_id {
+            let data_dir = state.data_dir.clone();
+            let b_url = entry.banner_url.clone();
+            let c_url = entry.cover_url.clone();
+            std::thread::spawn(move || {
+                if let Some(url) = b_url {
+                    cache_artwork_image(&data_dir, &app_id.to_string(), "banner", &url);
+                }
+                if let Some(url) = c_url {
+                    cache_artwork_image(&data_dir, &app_id.to_string(), "cover", &url);
+                }
+            });
         }
         serde_json::to_value(&entry).map_err(|e| e.to_string())
     }
@@ -2047,7 +2227,7 @@ mod commands {
                 let mut spawned_pid: Option<u32> = None;
 
                 if !is_test_env && let Ok(current_exe) = std::env::current_exe() {
-                    match std::process::Command::new(&current_exe)
+                    match azdl::clean_command(&current_exe)
                         .arg("worker-install")
                         .arg(&qualified_id)
                         .arg(plugin_id.as_deref().unwrap_or(""))
@@ -2890,7 +3070,42 @@ fn ensure_desktop_integration() {
     }
 
     let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("azdl-desktop"));
-    let exec_str = current_exe.to_string_lossy();
+    let exec_str = if let Ok(appimage) = std::env::var("APPIMAGE") {
+        appimage
+    } else {
+        current_exe.to_string_lossy().to_string()
+    };
+
+    let apps_dir = data_home.join("applications");
+    let _ = std::fs::create_dir_all(&apps_dir);
+
+    let desktop_configs = [
+        ("azdl-desktop.desktop", "azdl-desktop", "azdl-desktop"),
+        ("azdl.desktop", "azdl", "azdl"),
+        (
+            "io.azdl.launcher.desktop",
+            "io.azdl.launcher",
+            "io.azdl.launcher",
+        ),
+    ];
+
+    for (file_name, wm_class, icon_name) in desktop_configs {
+        let content = format!(
+            "[Desktop Entry]\n\
+            Name=azdl\n\
+            GenericName=Game Launcher\n\
+            Comment=Modern game launcher and runtime orchestrator\n\
+            Exec={exec_str} %U\n\
+            Icon={icon_name}\n\
+            Terminal=false\n\
+            Type=Application\n\
+            Categories=Game;Utility;\n\
+            StartupWMClass={wm_class}\n\
+            MimeType=x-scheme-handler/azdl;\n"
+        );
+        let target = apps_dir.join(file_name);
+        let _ = std::fs::write(&target, &content);
+    }
 
     let desktop_content = format!(
         "[Desktop Entry]\n\
@@ -2905,18 +3120,6 @@ fn ensure_desktop_integration() {
         StartupWMClass=azdl-desktop\n\
         MimeType=x-scheme-handler/azdl;\n"
     );
-
-    let apps_dir = data_home.join("applications");
-    let _ = std::fs::create_dir_all(&apps_dir);
-    let app_desktop_files = [
-        "azdl-desktop.desktop",
-        "azdl.desktop",
-        "io.azdl.launcher.desktop",
-    ];
-    for file_name in app_desktop_files {
-        let target = apps_dir.join(file_name);
-        let _ = std::fs::write(&target, &desktop_content);
-    }
 
     let desktop_dir = azdl::clean_command("xdg-user-dir")
         .arg("DESKTOP")
@@ -3058,6 +3261,9 @@ fn main() {
     #[cfg(target_os = "linux")]
     ensure_webkit_environment();
 
+    #[cfg(target_os = "linux")]
+    ensure_desktop_integration();
+
     let data_dir = data_dir().expect("Failed to resolve azdl data directory");
     let metadata_cache = load_metadata_cache(&data_dir);
     let state = AppState {
@@ -3076,11 +3282,82 @@ fn main() {
     };
 
     tauri::Builder::default()
+        .register_uri_scheme_protocol("azdl-art", move |_app, request| {
+            let path_str = request.uri().path().trim_start_matches('/');
+            let data_dir = match azdl::data_dir() {
+                Ok(d) => d,
+                Err(_) => {
+                    return tauri::http::Response::builder()
+                        .status(500)
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(Vec::new())
+                        .unwrap();
+                }
+            };
+            let cache_root = data_dir.join("artwork-cache");
+            let _ = std::fs::create_dir_all(&cache_root);
+            let target_file = cache_root.join(path_str);
+            let canonical_target = match std::fs::canonicalize(&target_file) {
+                Ok(p) => p,
+                Err(_) => {
+                    return tauri::http::Response::builder()
+                        .status(404)
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(Vec::new())
+                        .unwrap();
+                }
+            };
+            let canonical_root = match std::fs::canonicalize(&cache_root) {
+                Ok(p) => p,
+                Err(_) => {
+                    return tauri::http::Response::builder()
+                        .status(404)
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(Vec::new())
+                        .unwrap();
+                }
+            };
+            if !canonical_target.starts_with(&canonical_root) || !canonical_target.is_file() {
+                return tauri::http::Response::builder()
+                    .status(403)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(Vec::new())
+                    .unwrap();
+            }
+            let content_type = if canonical_target
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("png"))
+                .unwrap_or(false)
+            {
+                "image/png"
+            } else if canonical_target
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("webp"))
+                .unwrap_or(false)
+            {
+                "image/webp"
+            } else {
+                "image/jpeg"
+            };
+            match std::fs::read(&canonical_target) {
+                Ok(bytes) => tauri::http::Response::builder()
+                    .status(200)
+                    .header("Content-Type", content_type)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .header("Cache-Control", "public, max-age=31536000, immutable")
+                    .body(bytes)
+                    .unwrap(),
+                Err(_) => tauri::http::Response::builder()
+                    .status(500)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(Vec::new())
+                    .unwrap(),
+            }
+        })
         .manage(state)
         .setup(|app| {
-            #[cfg(target_os = "linux")]
-            ensure_desktop_integration();
-
             use tauri::Manager;
             if let Some(window) = app.get_webview_window("main") {
                 let icon_bytes = include_bytes!("../icons/icon.png");
@@ -3149,6 +3426,27 @@ mod tests {
             cover_url: Some("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/3892270/library_600x900.jpg".into()),
         };
         assert!(is_guessed_steam_artwork(&guessed));
+    }
+
+    #[test]
+    fn test_disk_artwork_caching_and_uri() {
+        let root = scratch();
+        let target_dir = root.join("artwork-cache/361420");
+        fs::create_dir_all(&target_dir).unwrap();
+        let banner_file = target_dir.join("banner.jpg");
+        fs::write(&banner_file, b"fake image bytes exceeding one hundred bytes padding padding padding padding padding padding padding padding padding padding padding padding padding padding").unwrap();
+
+        assert_eq!(
+            get_cached_artwork_path(&root, "361420", "banner"),
+            Some(banner_file)
+        );
+        assert_eq!(
+            get_cached_artwork_uri(&root, "361420", "banner"),
+            Some("azdl-art://localhost/361420/banner.jpg".to_string())
+        );
+        assert_eq!(get_cached_artwork_uri(&root, "361420", "cover"), None);
+
+        let _ = fs::remove_dir_all(&root);
     }
     use commands::*;
     use std::fs;

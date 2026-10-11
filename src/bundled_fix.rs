@@ -150,14 +150,14 @@ pub fn ensure_steamidra_fix(game: &Game, data_dir: &Path) -> Result<bool> {
         || !game
             .origin
             .as_ref()
-            .is_some_and(|origin| origin.qualified_id.starts_with("steamidra:steam-"))
+            .is_some_and(|origin| origin.qualified_id.starts_with("steamidra:"))
     {
         return Ok(false);
     }
-    let managed_root = data_dir.join("games");
-    let managed_install = fs::canonicalize(managed_root.join(&game.id));
-    let game_install = fs::canonicalize(&game.install_dir);
-    if !matches!((managed_install, game_install), (Ok(managed), Ok(actual)) if managed == actual) {
+    let Ok(game_install) = fs::canonicalize(&game.install_dir) else {
+        return Ok(false);
+    };
+    if !game_install.is_dir() {
         return Ok(false);
     }
     let plugin = data_dir.join("plugins").join("steamidra");

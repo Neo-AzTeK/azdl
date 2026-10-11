@@ -25,6 +25,12 @@ pub fn sanitize_command(cmd: &mut Command) -> &mut Command {
     {
         sanitize_unix_command(cmd);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     cmd
 }
 

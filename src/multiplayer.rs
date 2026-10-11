@@ -431,7 +431,70 @@ fn prepare_fix_files_for_locations(
         ensure_winmm_config(directory, bits, &mut warnings);
         plant_freetp_promo_block(directory);
     }
+    ensure_fix_payload_files(locations, &directories, &mut warnings);
     Ok(warnings)
+}
+
+const FIX_PAYLOAD_FILES: &[&str] = &[
+    "OnlineFix64.dll",
+    "OnlineFix.dll",
+    "SteamOverlay64.dll",
+    "SteamOverlay32.dll",
+    "StubDRM64.dll",
+    "StubDRM32.dll",
+    "dlllist.txt",
+    "SteamFix64.dll",
+    "SteamFix32.dll",
+    "winmm.dll",
+    "OnlineFix.ini",
+];
+
+fn ensure_fix_payload_files(
+    locations: &FixLocations,
+    directories: &BTreeSet<PathBuf>,
+    warnings: &mut Vec<String>,
+) {
+    if locations.disabled_overlay {
+        return;
+    }
+    for file_name in FIX_PAYLOAD_FILES {
+        let mut source_file = None;
+        for dir in &locations.directories {
+            if let Some(path) = active_regular_file(dir, file_name) {
+                source_file = Some(path);
+                break;
+            }
+        }
+        let Some(source_path) = source_file else {
+            continue;
+        };
+        let Some(source_dir) = source_path.parent() else {
+            continue;
+        };
+
+        for target_dir in directories {
+            if !target_dir.is_dir() {
+                continue;
+            }
+            if !target_dir.starts_with(source_dir) || target_dir == source_dir {
+                continue;
+            }
+            let target_path = target_dir.join(file_name);
+            if target_path.exists() {
+                continue;
+            }
+            let disabled_target = target_dir.join(format!("{file_name}.arachnel-off"));
+            if disabled_target.exists() {
+                continue;
+            }
+            if let Err(error) = fs::copy(&source_path, &target_path) {
+                warnings.push(format!(
+                    "Could not propagate {file_name} to {}: {error}",
+                    target_dir.display()
+                ));
+            }
+        }
+    }
 }
 
 fn plant_freetp_promo_block(directory: &Path) {
@@ -591,7 +654,7 @@ pub fn steam_running() -> bool {
 
 #[cfg(windows)]
 pub fn steam_running() -> bool {
-    std::process::Command::new("tasklist")
+    crate::clean_command("tasklist")
         .args(["/FI", "IMAGENAME eq steam.exe", "/NH"])
         .output()
         .map(|out| {
@@ -909,6 +972,55 @@ mod tests {
 
         let status = prepare_fix_launch(game, &Runner::Wine).unwrap();
         assert_eq!(status, Some("Steam Fix marker detected".into()));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn propagates_root_fix_to_nested_shipping_binary_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-fix-propagate-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let nested = root.join("Astro/Binaries/Win64");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(root.join("Astro.exe"), b"launcher").unwrap();
+        fs::write(nested.join("Astro-Win64-Shipping.exe"), b"game").unwrap();
+        fs::write(root.join("OnlineFix.ini"), b"FakeAppId=480\n").unwrap();
+        fs::write(root.join("OnlineFix64.dll"), b"online fix 64").unwrap();
+        fs::write(root.join("winmm.dll"), b"winmm proxy").unwrap();
+
+        let mut library = Library::default();
+        add_game(
+            &mut library,
+            "astroneer",
+            "ASTRONEER",
+            &root,
+            Path::new("Astro.exe"),
+        )
+        .unwrap();
+        let game = &library.games["astroneer"];
+        assert_eq!(detect_fix(game).unwrap(), FixKind::OnlineFix);
+
+        let warnings = prepare_fix_files(game, &Runner::Wine, &root).unwrap();
+        assert!(warnings.is_empty());
+
+        assert!(nested.join("OnlineFix64.dll").is_file());
+        assert_eq!(
+            fs::read(nested.join("OnlineFix64.dll")).unwrap(),
+            b"online fix 64"
+        );
+        assert!(nested.join("OnlineFix.ini").is_file());
+        assert!(nested.join("winmm.dll").is_file());
+        assert!(nested.join("steam_appid.txt").is_file());
+        assert_eq!(
+            fs::read_to_string(nested.join("steam_appid.txt")).unwrap(),
+            "480\n"
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
