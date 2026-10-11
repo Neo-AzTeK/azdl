@@ -239,6 +239,20 @@ export async function downloadProtonGE() {
   return await runAction({ action: 'proton-download' });
 }
 
+export async function isSteamRunning() {
+  if (isDesktop()) {
+    return await invoke('is_steam_running');
+  }
+  return false;
+}
+
+export async function startSteam() {
+  if (isDesktop()) {
+    return await invoke('start_steam');
+  }
+  return true;
+}
+
 export async function syncSteamShortcuts() {
   return await runAction({ action: 'steam-shortcuts-sync' });
 }

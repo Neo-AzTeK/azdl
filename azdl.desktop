@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=azdl
+GenericName=Game Launcher
+Comment=Modern game launcher and runtime orchestrator
+Exec=/home/mixcraftio/Code/Repos/Crack/azdl/target/release/azdl-desktop %U
+Icon=azdl
+Terminal=false
+Type=Application
+Categories=Game;Utility;
+StartupWMClass=azdl-desktop
+MimeType=x-scheme-handler/azdl;

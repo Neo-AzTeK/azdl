@@ -17,7 +17,7 @@ fn main() {
     if !node_modules.exists() {
         println!("cargo:warning=node_modules missing in frontend, running npm install...");
         let install_status = Command::new(npm)
-            .arg("install")
+            .args(["install", "--legacy-peer-deps"])
             .current_dir(frontend_dir)
             .status();
 

@@ -7,8 +7,9 @@
   import CatalogView from './views/CatalogView.svelte';
   import SettingsView from './views/SettingsView.svelte';
   import GamePageView from './views/GamePageView.svelte';
+  import ConfirmModal from './components/ConfirmModal.svelte';
 
-  import { getState, getRunners, launchGame, stopGame, onBusyChange } from './api.js';
+  import { getState, getRunners, launchGame, stopGame, onBusyChange, isSteamRunning, startSteam } from './api.js';
   import { applyTheme, onSystemThemeChange } from './theme.js';
   import { notifications, dismissNotification, notify } from './notifications.js';
   import { reconcileData } from './state.js';
@@ -222,13 +223,55 @@
     viewedGame = null;
   }
 
-  async function handleLaunch(gameId) {
+  let showSteamPromptModal = $state(false);
+  let pendingSteamLaunchGame = $state(null);
+
+  async function executeLaunch(gameId) {
     try {
       await launchGame(gameId);
       await refreshState();
     } catch (e) {
       showToast(`Launch error: ${e}`, 'error');
     }
+  }
+
+  async function handleLaunch(gameId) {
+    const game = (appState.library || []).find((g) => g.id === gameId);
+    const needsOnlineFix = game && (game.fix === 'Online-Fix' || game.fix === 'SteamFix');
+    if (needsOnlineFix) {
+      try {
+        const running = await isSteamRunning();
+        if (!running) {
+          pendingSteamLaunchGame = game;
+          showSteamPromptModal = true;
+          return;
+        }
+      } catch (err) {
+        console.warn('Steam running check failed:', err);
+      }
+    }
+    await executeLaunch(gameId);
+  }
+
+  async function handleStartSteamAndLaunch() {
+    if (!pendingSteamLaunchGame) return;
+    const targetGame = pendingSteamLaunchGame;
+    try {
+      showToast('Launching Steam in background...', 'info');
+      await startSteam();
+      await new Promise((r) => setTimeout(r, 1200));
+    } catch (e) {
+      showToast(`Failed to start Steam: ${e}`, 'warning');
+    }
+    await executeLaunch(targetGame.id);
+    pendingSteamLaunchGame = null;
+  }
+
+  async function handleLaunchWithoutSteam() {
+    if (!pendingSteamLaunchGame) return;
+    const targetGame = pendingSteamLaunchGame;
+    pendingSteamLaunchGame = null;
+    await executeLaunch(targetGame.id);
   }
 
   async function handleStop(gameId) {
@@ -281,6 +324,7 @@
         <CatalogView
           jobs={appState.jobs}
           tasks={appState.tasks}
+          plugins={appState.plugins}
           searchQuery={tabSearches.catalog}
           onSelectGame={(game) => handleSelectGame(game, 'catalog')}
           onRefresh={refreshState}
@@ -343,6 +387,20 @@
       {/each}
     </div>
   {/if}
+
+  <!-- Online-Fix Steam Launch Prompt Modal -->
+  <ConfirmModal
+    bind:open={showSteamPromptModal}
+    title="Steam Is Not Running"
+    message="{pendingSteamLaunchGame?.title || 'This game'} uses an Online-Fix / SteamFix multiplayer runtime that requires Steam running in the background. Would you like azdl to start Steam for you?"
+    confirmText="Start Steam & Launch"
+    altText="Launch Without Steam"
+    cancelText="Cancel"
+    isDestructive={false}
+    onConfirm={handleStartSteamAndLaunch}
+    onAlt={handleLaunchWithoutSteam}
+    onCancel={() => { pendingSteamLaunchGame = null; }}
+  />
 </div>
 
 <style>

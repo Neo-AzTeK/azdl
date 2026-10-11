@@ -40,7 +40,7 @@ struct OverlayDirectory {
 fn skip_directory(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        ".depotdownloader" | "staging" | "engine" | "intermediate" | "saved" | "thirdparty"
+        ".depotdownloader" | "staging" | "intermediate" | "saved" | ".git"
     )
 }
 

@@ -311,75 +311,139 @@ export async function fetchArtwork(query) {
 }
 
 /**
- * Derives ordered thumbnail candidates for a game item
+ * Derives separated HQ and fallback thumbnail candidate lists for a game item
  */
-export function getCandidateThumbnails(game, resolvedArtwork = null) {
-  if (!game) return [];
-  const list = [];
+export function getThumbnailCandidates(game, resolvedArtwork = null) {
+  if (!game) return { hq: [], fallback: [] };
+  const hq = [];
+  const fallback = [];
 
-  const add = (url) => {
+  const addHq = (url) => {
     if (url && typeof url === 'string') {
       const clean = url.trim();
-      if (clean && !list.includes(clean)) {
-        list.push(clean);
+      if (clean && !hq.includes(clean)) {
+        hq.push(clean);
       }
     }
   };
 
-  // 1. Regular size banners / headers provided directly by game / catalog
-  add(game.banner_url);
-  add(game.header_image);
-  add(game.large_capsule_image);
-  add(game.capsule_url);
+  const addFallback = (url) => {
+    if (url && typeof url === 'string') {
+      const clean = url.trim();
+      if (clean && !fallback.includes(clean) && !hq.includes(clean)) {
+        fallback.push(clean);
+      }
+    }
+  };
 
-  // 2. Resolved artwork banner & capsule
-  if (resolvedArtwork?.banner_url) add(resolvedArtwork.banner_url);
-  if (resolvedArtwork?.capsule_url) add(resolvedArtwork.capsule_url);
+  // 1. Regular size banners / headers provided directly by game / catalog (HQ)
+  addHq(game.banner_url);
+  addHq(game.header_image);
+  addHq(game.large_capsule_image);
+  addHq(game.capsule_url);
 
-  // 3. Direct Steam CDN regular-size header & large capsule
+  // 2. Resolved artwork banner & capsule (HQ)
+  if (resolvedArtwork?.banner_url) addHq(resolvedArtwork.banner_url);
+  if (resolvedArtwork?.capsule_url) addHq(resolvedArtwork.capsule_url);
+
+  // 3. Direct Steam CDN regular-size header & large capsule (HQ)
   const appId = extractSteamAppId(game) || resolvedArtwork?.steam_app_id;
   if (appId) {
-    add(`https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`);
-    add(`https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/header.jpg`);
-    add(`https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`);
-    add(`https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/capsule_616x353.jpg`);
-    add(`https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/capsule_616x353.jpg`);
-    add(`https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${appId}/capsule_616x353.jpg`);
+    addHq(`https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`);
+    addHq(`https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/header.jpg`);
+    addHq(`https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${appId}/header.jpg`);
+    addHq(`https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/capsule_616x353.jpg`);
+    addHq(`https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/capsule_616x353.jpg`);
+    addHq(`https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${appId}/capsule_616x353.jpg`);
   }
 
-  // 4. Smaller capsules & alternate sizes if regular size is unavailable
-  add(game.tiny_image);
-  add(game.small_capsule_image);
-  add(game.capsule_image);
-  add(game.thumbnail_url);
+  // 4. Smaller capsules & alternate sizes if regular size is unavailable (Fallback)
+  addFallback(game.tiny_image);
+  addFallback(game.small_capsule_image);
+  addFallback(game.capsule_image);
+  addFallback(game.thumbnail_url);
 
   if (appId) {
-    add(`https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/capsule_231x87.jpg`);
-    add(`https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/capsule_231x87.jpg`);
-    add(`https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${appId}/capsule_231x87.jpg`);
-    add(`https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/capsule_184x69.jpg`);
-    add(`https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/capsule_184x69.jpg`);
+    addFallback(`https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/capsule_231x87.jpg`);
+    addFallback(`https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/capsule_231x87.jpg`);
+    addFallback(`https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/${appId}/capsule_231x87.jpg`);
+    addFallback(`https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/capsule_184x69.jpg`);
+    addFallback(`https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/capsule_184x69.jpg`);
   }
 
-  // 5. Vertical portrait cover art & hero capsule
-  add(game.cover_url);
-  if (resolvedArtwork?.cover_url) add(resolvedArtwork.cover_url);
-  if (resolvedArtwork?.hero_url) add(resolvedArtwork.hero_url);
+  // 5. Vertical portrait cover art & hero capsule (Fallback)
+  addFallback(game.cover_url);
+  if (resolvedArtwork?.cover_url) addFallback(resolvedArtwork.cover_url);
+  if (resolvedArtwork?.hero_url) addFallback(resolvedArtwork.hero_url);
 
   if (appId) {
-    add(`https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/library_600x900.jpg`);
-    add(`https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/library_600x900.jpg`);
-    add(`https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/hero_capsule.jpg`);
-    add(`https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/hero_capsule.jpg`);
+    addFallback(`https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/library_600x900.jpg`);
+    addFallback(`https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/library_600x900.jpg`);
+    addFallback(`https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/hero_capsule.jpg`);
+    addFallback(`https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/hero_capsule.jpg`);
   }
 
   // 6. Generated background page art as ultimate fallback
   if (appId) {
-    add(`https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/page_bg_generated_v6b.jpg`);
-    add(`https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/page_bg_generated_v6b.jpg`);
+    addFallback(`https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/page_bg_generated_v6b.jpg`);
+    addFallback(`https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appId}/page_bg_generated_v6b.jpg`);
   }
 
-  return list;
+  // If no HQ candidate was found, but fallback candidates exist, promote the first fallback candidate to HQ
+  // so single-artwork games still have a primary image to load.
+  if (hq.length === 0 && fallback.length > 0) {
+    hq.push(fallback.shift());
+  }
+
+  return { hq, fallback };
+}
+
+/**
+ * Derives ordered thumbnail candidates for a game item
+ */
+export function getCandidateThumbnails(game, resolvedArtwork = null) {
+  const { hq, fallback } = getThumbnailCandidates(game, resolvedArtwork);
+  return [...hq, ...fallback];
+}
+
+/**
+ * Derives the active HQ and fallback URLs for dual concurrent loading
+ */
+export function getActiveThumbnailPair(game, resolvedArtwork = null, failedUrls = new Set()) {
+  const { hq, fallback } = getThumbnailCandidates(game, resolvedArtwork);
+  const activeHqUrl = hq.find((url) => !failedUrls.has(url)) || null;
+  const activeFallbackUrl = fallback.find((url) => !failedUrls.has(url) && url !== activeHqUrl) || null;
+  return {
+    activeHqUrl,
+    activeFallbackUrl,
+  };
+}
+
+/**
+ * Determines which thumbnail should be displayed given concurrent loading states
+ */
+export function getActiveDisplayThumbnail({
+  activeHqUrl = null,
+  activeFallbackUrl = null,
+  isHqLoaded = false,
+  isFallbackLoaded = false,
+}) {
+  if (isHqLoaded && activeHqUrl) {
+    return {
+      url: activeHqUrl,
+      type: 'hq',
+    };
+  }
+  if (isFallbackLoaded && activeFallbackUrl) {
+    return {
+      url: activeFallbackUrl,
+      type: 'fallback',
+    };
+  }
+  return {
+    url: null,
+    type: 'none',
+  };
 }
 
 /**

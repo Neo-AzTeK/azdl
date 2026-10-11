@@ -532,6 +532,30 @@ mod commands {
         }
     }
 
+    fn parse_size_str_to_bytes(s: &str) -> Option<u64> {
+        let s = s.trim();
+        let num_part: String = s
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        let num: f64 = num_part.parse().ok()?;
+        let rest = s[num_part.len()..].trim().to_ascii_uppercase();
+        let multiplier: f64 = if rest.starts_with("TB") {
+            1024.0 * 1024.0 * 1024.0 * 1024.0
+        } else if rest.starts_with("GB") {
+            1024.0 * 1024.0 * 1024.0
+        } else if rest.starts_with("MB") {
+            1024.0 * 1024.0
+        } else if rest.starts_with("KB") {
+            1024.0
+        } else if rest.starts_with('B') {
+            1.0
+        } else {
+            1024.0 * 1024.0
+        };
+        Some((num * multiplier) as u64)
+    }
+
     fn pending_installs(
         data_dir: &Path,
         library: &Library,
@@ -643,6 +667,11 @@ mod commands {
             .values()
             .map(|game| {
                 let patch = active_patch(&state.data_dir, &game.id).ok().flatten();
+                let custom_patch = patch.filter(|p| {
+                    !p.entries
+                        .iter()
+                        .any(|e| e.path == Path::new(".azdl-bundled-fix"))
+                });
                 let fix = detect_fix_cached(state, game).map(|kind| match kind {
                     azdl::multiplayer::FixKind::OnlineFix => "Online-Fix",
                     azdl::multiplayer::FixKind::SteamFix => "SteamFix",
@@ -791,7 +820,7 @@ mod commands {
                     "genres": genres,
                     "addons_count": addons_count,
                     "last_played": game.last_played_unix,
-                    "patch": patch.map(|p| if p.enabled { "enabled" } else { "disabled" }),
+                    "patch": custom_patch.map(|p| if p.enabled { "enabled" } else { "disabled" }),
                     "cover_url": cover_url,
                     "banner_url": banner_url,
                     "fix": fix,
@@ -846,10 +875,16 @@ mod commands {
                     s => format!("{:?}", s),
                 };
 
-                let install_json = j.install.as_ref().map(|p| {
-                    let cat = cached_cat.as_ref().and_then(|cat| {
+                let cat = j.install.as_ref().and_then(|p| {
+                    cached_cat.as_ref().and_then(|cat| {
                         cat.iter().find(|cg| cg.id == p.game_id || cg.title.eq_ignore_ascii_case(&p.title))
-                    });
+                    })
+                });
+                let estimated_bytes = cat
+                    .and_then(|cg| cg.file_size.as_deref())
+                    .and_then(parse_size_str_to_bytes);
+
+                let install_json = j.install.as_ref().map(|p| {
                     let meta = state.metadata_cache.lock().ok().and_then(|c| {
                         c.get(&p.title.to_lowercase())
                             .or_else(|| c.get(&p.game_id.to_lowercase()))
@@ -874,14 +909,20 @@ mod commands {
                         "kind": format!("{:?}", p.kind),
                         "banner_url": banner,
                         "cover_url": cover,
+                        "file_size": cat.and_then(|cg| cg.file_size.clone()),
                     })
                 });
+
+                let total_bytes = j.total_bytes.or(estimated_bytes);
 
                 json!({
                     "id": j.id,
                     "kind": format!("{:?}", j.kind),
                     "status": status_str,
                     "bytes": j.downloaded_bytes(),
+                    "total_bytes": total_bytes,
+                    "total": total_bytes,
+                    "estimated_bytes": estimated_bytes,
                     "target": j.target,
                     "error": j.error,
                     "install": install_json,
@@ -908,6 +949,11 @@ mod commands {
                     cat.iter()
                         .find(|cg| cg.id == t.id || cg.title.eq_ignore_ascii_case(&t.title))
                 });
+                let estimated_bytes = cat
+                    .and_then(|cg| cg.file_size.as_deref())
+                    .and_then(parse_size_str_to_bytes);
+                let total_bytes = estimated_bytes;
+
                 let meta = state.metadata_cache.lock().ok().and_then(|c| {
                     c.get(&t.title.to_lowercase())
                         .or_else(|| c.get(&t.id.to_lowercase()))
@@ -934,6 +980,9 @@ mod commands {
                     "kind": "Torrent",
                     "status": status_str,
                     "bytes": t.downloaded_bytes(&state.data_dir),
+                    "total_bytes": total_bytes,
+                    "total": total_bytes,
+                    "estimated_bytes": estimated_bytes,
                     "target": t.download_dir(&state.data_dir),
                     "error": t.error,
                     "install": Some(json!({
@@ -942,6 +991,7 @@ mod commands {
                         "kind": "Archive",
                         "banner_url": banner,
                         "cover_url": cover,
+                        "file_size": cat.and_then(|cg| cg.file_size.clone()),
                     })),
                     "install_state": t.install_state.map(|s| format!("{:?}", s)),
                     "install_error": None::<String>,
@@ -1725,9 +1775,8 @@ mod commands {
                     .games
                     .get(&id)
                     .ok_or_else(|| format!("Game {id} not found"))?;
-                let cli = azdl::steamless::find_steamless_cli(data_dir).ok_or_else(|| {
-                    "Steamless.CLI.exe not found. Configure AZDL_STEAMLESS_PATH.".to_string()
-                })?;
+                let _cli =
+                    azdl::steamless::ensure_steamless_cli(data_dir).map_err(|e| e.to_string())?;
                 let task_id = format!("steamstub-{id}");
                 {
                     let mut tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
@@ -1742,13 +1791,14 @@ mod commands {
                     });
                 }
                 let state_clone = state.clone();
-                let exe = game.executable.clone();
+                let game_clone = game.clone();
+                let data_dir_buf = data_dir.to_path_buf();
                 let id_clone = id.clone();
                 let task_id_clone = task_id.clone();
                 std::thread::Builder::new()
                     .name(format!("azdl-stub-{id}"))
                     .spawn(move || {
-                        let _ = azdl::steamless::strip_executable(&exe, &cli);
+                        let _ = azdl::steamless::unpack_game(&game_clone, &data_dir_buf);
                         if let Ok(mut cache) = state_clone.steamstub_cache.lock() {
                             cache.remove(&id_clone);
                         }
@@ -1766,8 +1816,10 @@ mod commands {
                     .games
                     .get(&id)
                     .ok_or_else(|| format!("Game {id} not found"))?;
-                azdl::steamless::rollback_executable(&game.executable)
-                    .map_err(|e| e.to_string())?;
+                azdl::steamless::rollback_game(game).map_err(|e| e.to_string())?;
+                if let Ok(mut cache) = state.steamstub_cache.lock() {
+                    cache.remove(&id);
+                }
                 Ok(json!({ "success": true }))
             }
             "ea-heal" => {
@@ -2725,6 +2777,17 @@ mod commands {
             .await
             .map_err(|e| e.to_string())?
     }
+
+    #[tauri::command]
+    pub fn is_steam_running() -> bool {
+        azdl::multiplayer::steam_running()
+    }
+
+    #[tauri::command]
+    pub fn start_steam() -> Result<bool, String> {
+        azdl::steam::launch_steam().map_err(|e| e.to_string())?;
+        Ok(true)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2739,6 +2802,170 @@ fn ensure_webkit_environment() {
             }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_desktop_integration() {
+    let home = match std::env::var("HOME") {
+        Ok(h) => PathBuf::from(h),
+        Err(_) => return,
+    };
+
+    let data_home = std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".local/share"));
+
+    let icon_512: &[u8] = include_bytes!("../icons/icon.png");
+    let icon_256: &[u8] = include_bytes!("../icons/128x128@2x.png");
+    let icon_128: &[u8] = include_bytes!("../icons/128x128.png");
+    let icon_32: &[u8] = include_bytes!("../icons/32x32.png");
+    let icon_svg: &[u8] = include_bytes!("../icons/icon.svg");
+
+    let hicolor_root = data_home.join("icons/hicolor");
+    let sizes: [(&str, &[u8]); 4] = [
+        ("512x512", icon_512),
+        ("256x256", icon_256),
+        ("128x128", icon_128),
+        ("32x32", icon_32),
+    ];
+
+    let icon_names = ["azdl", "azdl-desktop", "io.azdl.launcher"];
+
+    for (size, bytes) in sizes {
+        let app_dir = hicolor_root.join(size).join("apps");
+        let _ = std::fs::create_dir_all(&app_dir);
+        for name in icon_names {
+            let target = app_dir.join(format!("{name}.png"));
+            let needs_write = match std::fs::metadata(&target) {
+                Ok(m) => m.len() != bytes.len() as u64,
+                Err(_) => true,
+            };
+            if needs_write {
+                let _ = std::fs::write(&target, bytes);
+            }
+        }
+    }
+
+    let scalable_dir = hicolor_root.join("scalable/apps");
+    let _ = std::fs::create_dir_all(&scalable_dir);
+    for name in icon_names {
+        let target = scalable_dir.join(format!("{name}.svg"));
+        let needs_write = match std::fs::metadata(&target) {
+            Ok(m) => m.len() != icon_svg.len() as u64,
+            Err(_) => true,
+        };
+        if needs_write {
+            let _ = std::fs::write(&target, icon_svg);
+        }
+    }
+
+    let pixmaps_dir = data_home.join("pixmaps");
+    let _ = std::fs::create_dir_all(&pixmaps_dir);
+    for name in icon_names {
+        let target_png = pixmaps_dir.join(format!("{name}.png"));
+        if !target_png.exists() {
+            let _ = std::fs::write(&target_png, icon_256);
+        }
+        let target_svg = pixmaps_dir.join(format!("{name}.svg"));
+        if !target_svg.exists() {
+            let _ = std::fs::write(&target_svg, icon_svg);
+        }
+    }
+
+    let index_theme = hicolor_root.join("index.theme");
+    if !index_theme.exists() {
+        let system_index = Path::new("/usr/share/icons/hicolor/index.theme");
+        if system_index.exists() {
+            let _ = std::fs::copy(system_index, &index_theme);
+        }
+    }
+
+    let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("azdl-desktop"));
+    let exec_str = current_exe.to_string_lossy();
+
+    let desktop_content = format!(
+        "[Desktop Entry]\n\
+        Name=azdl\n\
+        GenericName=Game Launcher\n\
+        Comment=Modern game launcher and runtime orchestrator\n\
+        Exec={exec_str} %U\n\
+        Icon=azdl\n\
+        Terminal=false\n\
+        Type=Application\n\
+        Categories=Game;Utility;\n\
+        StartupWMClass=azdl-desktop\n\
+        MimeType=x-scheme-handler/azdl;\n"
+    );
+
+    let apps_dir = data_home.join("applications");
+    let _ = std::fs::create_dir_all(&apps_dir);
+    let app_desktop_files = [
+        "azdl-desktop.desktop",
+        "azdl.desktop",
+        "io.azdl.launcher.desktop",
+    ];
+    for file_name in app_desktop_files {
+        let target = apps_dir.join(file_name);
+        let _ = std::fs::write(&target, &desktop_content);
+    }
+
+    let desktop_dir = std::process::Command::new("xdg-user-dir")
+        .arg("DESKTOP")
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(PathBuf::from(s));
+                }
+            }
+            None
+        })
+        .unwrap_or_else(|| {
+            let bureau = home.join("Bureau");
+            if bureau.is_dir() {
+                bureau
+            } else {
+                home.join("Desktop")
+            }
+        });
+
+    if desktop_dir.is_dir() {
+        let desktop_file = desktop_dir.join("azdl.desktop");
+        let _ = std::fs::write(&desktop_file, &desktop_content);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&desktop_file, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    // Also update desktop file in repository root if executable is running from target/
+    if let Some(target_dir) = current_exe.parent().and_then(|p| p.parent())
+        && target_dir.file_name().and_then(|n| n.to_str()) == Some("target")
+        && let Some(repo_root) = target_dir.parent()
+        && repo_root.join("Cargo.toml").is_file()
+    {
+        let repo_desktop = repo_root.join("azdl.desktop");
+        let _ = std::fs::write(&repo_desktop, &desktop_content);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&repo_desktop, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let _ = std::process::Command::new("update-desktop-database")
+        .arg(&apps_dir)
+        .status();
+
+    let _ = std::process::Command::new("kbuildsycoca6").status();
+
+    let _ = std::process::Command::new("gtk-update-icon-cache")
+        .args(["-f", "-q"])
+        .arg(&hicolor_root)
+        .status();
 }
 
 fn run_worker_install(
@@ -2841,6 +3068,20 @@ fn main() {
 
     tauri::Builder::default()
         .manage(state)
+        .setup(|app| {
+            #[cfg(target_os = "linux")]
+            ensure_desktop_integration();
+
+            use tauri::Manager;
+            if let Some(window) = app.get_webview_window("main") {
+                let icon_bytes = include_bytes!("../icons/icon.png");
+                if let Ok(icon) = tauri::image::Image::from_bytes(icon_bytes) {
+                    let _ = window.set_icon(icon);
+                }
+            }
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
             commands::get_runners,
@@ -2857,6 +3098,8 @@ fn main() {
             commands::window_minimize,
             commands::window_toggle_maximize,
             commands::window_close,
+            commands::is_steam_running,
+            commands::start_steam,
         ])
         .run(tauri::generate_context!())
         .expect("error while running azdl tauri application");

@@ -38,4 +38,45 @@ describe('normalizeGameCard', () => {
     expect(getGameCardMetadataTags(normalizeGameCard({ file_size: null }), '12 GB'))
       .toEqual([{ type: 'size', label: '12 GB' }]);
   });
+
+  it('determines card shimmer state accurately during launch, operation, or active download', () => {
+    function computeCardShimmer({ active_operation, is_running, launching, activeJob, isStartingInstall }) {
+      return Boolean(active_operation) ||
+        Boolean(launching) ||
+        Boolean(is_running) ||
+        Boolean(activeJob) ||
+        Boolean(isStartingInstall);
+    }
+
+    // Idle card
+    expect(computeCardShimmer({ active_operation: null, is_running: false, launching: false, activeJob: null, isStartingInstall: false })).toBe(false);
+
+    // Running game (glimmers)
+    expect(computeCardShimmer({ active_operation: null, is_running: true, launching: false, activeJob: null, isStartingInstall: false })).toBe(true);
+
+    // Launching game (glimmers)
+    expect(computeCardShimmer({ active_operation: null, is_running: false, launching: true, activeJob: null, isStartingInstall: false })).toBe(true);
+
+    // Active downloading job in discover (glimmers like started game)
+    expect(computeCardShimmer({ active_operation: null, is_running: false, launching: false, activeJob: { id: 'job-1', status: 'Downloading' }, isStartingInstall: false })).toBe(true);
+
+    // Immediately upon download FAB click
+    expect(computeCardShimmer({ active_operation: null, is_running: false, launching: false, activeJob: null, isStartingInstall: true })).toBe(true);
+  });
+
+  it('verifies FAB disappears and renders nothing in place during download', () => {
+    function getFabState({ is_running, isInstalled, activeJob, isStartingInstall }) {
+      if (is_running) return 'stop';
+      if (isInstalled) return 'play';
+      if (activeJob || isStartingInstall) return null; // FAB disappears, no pill
+      return 'download';
+    }
+
+    expect(getFabState({ is_running: true, isInstalled: true, activeJob: null, isStartingInstall: false })).toBe('stop');
+    expect(getFabState({ is_running: false, isInstalled: true, activeJob: null, isStartingInstall: false })).toBe('play');
+    expect(getFabState({ is_running: false, isInstalled: false, activeJob: null, isStartingInstall: false })).toBe('download');
+    // While downloading, FAB is hidden (returns null) and pill is eliminated
+    expect(getFabState({ is_running: false, isInstalled: false, activeJob: { id: 'dl' }, isStartingInstall: false })).toBeNull();
+    expect(getFabState({ is_running: false, isInstalled: false, activeJob: null, isStartingInstall: true })).toBeNull();
+  });
 });

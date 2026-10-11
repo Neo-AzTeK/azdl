@@ -25,6 +25,12 @@
     normalizeQuery,
     subscribeArtwork,
   } from '../covers.js';
+  import {
+    parseSizeToBytes,
+    estimateJobTotalBytes,
+    calculateJobProgressPercent,
+  } from '../transfers.js';
+  import { getSteamStorageSize } from '../steam_storage.js';
 
   let {
     game,
@@ -248,7 +254,7 @@
   let exeCandidates = $state([]);
 
   // Sub-tabs for installed game management
-  let activeDetailTab = $state('overview'); // 'overview' | 'multiplayer' | 'config' | 'diagnostics'
+  let activeDetailTab = $state('overview'); // 'overview' | 'patches' | 'config' | 'diagnostics'
 
   // Scroll and header translucency state
   let isScrolled = $state(false);
@@ -280,12 +286,32 @@
     return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
   }
 
+  let steamStorageBytes = $state(null);
+
+  $effect(() => {
+    if (steamAppId && !steamStorageBytes) {
+      getSteamStorageSize(steamAppId).then((size) => {
+        if (size) {
+          const parsed = parseSizeToBytes(size);
+          if (parsed) steamStorageBytes = parsed;
+        }
+      });
+    }
+  });
+
+  let effectiveJobTotalBytes = $derived.by(() => {
+    if (!activeJob) return 0;
+    if (activeJob.total_bytes && activeJob.total_bytes > 0) return activeJob.total_bytes;
+    if (activeJob.total && activeJob.total > 0) return activeJob.total;
+    if (steamStorageBytes && steamStorageBytes > 0) return steamStorageBytes;
+    const fromGame = parseSizeToBytes(game?.file_size || game?.storage_size || steamData?.storage_size);
+    if (fromGame && fromGame > 0) return fromGame;
+    return estimateJobTotalBytes(activeJob, game);
+  });
+
   function getJobProgressPercent(job) {
     if (!job) return 0;
-    if (job.total_bytes && job.total_bytes > 0) {
-      return Math.min(100, Math.round((job.bytes / job.total_bytes) * 100));
-    }
-    return 0;
+    return calculateJobProgressPercent(job, effectiveJobTotalBytes);
   }
 
   // Derive media items (Steam screenshots, movies, hero, fallback)
@@ -485,7 +511,8 @@
 
   async function handleStartInstall() {
     if (isInstalling || activeJob) return;
-    if (game.source_id === 'steam' && (!selectedPluginId || plugins.length === 0)) {
+    const defaultPluginId = selectedPluginId || plugins[0]?.id;
+    if (game.source_id === 'steam' && (!defaultPluginId || plugins.length === 0)) {
       if (onOpenPlugins) {
         onOpenPlugins();
       }
@@ -497,7 +524,6 @@
     const targetDrive = drives.find((d) => d.id === selectedDriveId);
 
     const installId = game.qualified_id || game.id;
-    setBanner('info', `Starting installation for ${game.title}...`);
 
     try {
       const res = await runAction({
@@ -506,16 +532,12 @@
         title: game.title,
         banner_url: game.banner_url || game.header_image || game.large_capsule_image || null,
         cover_url: game.cover_url || null,
-        plugin_id: game.source_id === 'steam' ? selectedPluginId : undefined,
+        plugin_id: game.source_id === 'steam' ? defaultPluginId : undefined,
         location: targetDrive?.path || undefined,
       });
 
       if (res && res.already_working) {
         setBanner('info', `Installation is already in progress for ${game.title}.`);
-      } else if (res && res.steam_app_id) {
-        setBanner('info', `Download requested for ${game.title}.`);
-      } else {
-        setBanner('success', `Installation started for ${game.title}. Track progress below.`);
       }
       if (onRefresh) onRefresh();
     } catch (err) {
@@ -639,7 +661,7 @@
   function navigateToDetailTab(tabName, targetId = 'game-detail-tabs') {
     showMoreMenu = false;
     activeDetailTab = tabName;
-    if (tabName === 'multiplayer' || targetId === 'section-diagnostics') {
+    if (tabName === 'patches' || targetId === 'section-diagnostics') {
       refreshDiagnostics();
     }
     setTimeout(() => {
@@ -697,9 +719,10 @@
           {@const progress = getJobProgressPercent(activeJob)}
           <div class="active-job-banner">
             <div class="job-meta-header">
-              <span class="job-pulse-dot"></span>
               <span class="job-status-label">{formatJobStatusLabel(activeJob.status, activeJob.install_state)}</span>
-              <span class="job-bytes-label">{formatBytes(activeJob.bytes || 0)}</span>
+              <span class="job-bytes-label">
+                {formatBytes(activeJob.bytes || 0)}{effectiveJobTotalBytes > 0 ? ` / ${formatBytes(effectiveJobTotalBytes)}` : ''}
+              </span>
               {#if progress > 0}
                 <span class="job-percent-label">{progress}%</span>
               {/if}
@@ -707,8 +730,8 @@
             <div class="job-track-bar">
               <div
                 class="job-fill-bar"
-                class:indeterminate={progress === 0}
-                style="width: {progress > 0 ? progress + '%' : '30%'}"
+                class:indeterminate={progress === 0 && effectiveJobTotalBytes === 0}
+                style="width: {progress > 0 ? progress + '%' : (effectiveJobTotalBytes > 0 ? '1%' : '30%')}"
               ></div>
             </div>
           </div>
@@ -826,17 +849,13 @@
                       <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
                       <span>Move to Another Drive</span>
                     </button>
-                    <button class="menu-item" onclick={() => { showMoreMenu = false; handleAction({ action: 'steam-shortcuts-sync' }, 'Added game to Steam library'); }}>
-                      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
-                      <span>Add Game to Steam Library</span>
-                    </button>
                     <button class="menu-item" onclick={() => navigateToDetailTab('config')}>
                       <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
                       <span>Launch Options & Config</span>
                     </button>
-                    <button class="menu-item" onclick={() => navigateToDetailTab('multiplayer', 'section-diagnostics')}>
-                      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19 3H5c-1.1 0-1.99.9-1.99 2L3 19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-1 11h-4v4h-4v-4H6v-4h4V6h4v4h4v4z"/></svg>
-                      <span>Diagnostics & Fixes</span>
+                    <button class="menu-item" onclick={() => navigateToDetailTab('patches', 'section-patches')}>
+                      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>
+                      <span>Patches</span>
                     </button>
                     <div class="menu-divider"></div>
                     <button class="menu-item danger" onclick={() => { showMoreMenu = false; handleUninstall(); }}>
@@ -904,7 +923,7 @@
               bind:tab={activeDetailTab}
               items={[
                 { name: 'Overview', value: 'overview' },
-                { name: 'Fixes & Multiplayer', value: 'multiplayer' },
+                { name: 'Patches', value: 'patches' },
                 { name: 'Launch & Runner', value: 'config' },
               ]}
             />
@@ -930,10 +949,10 @@
           </section>
         {/if}
 
-        <!-- TAB: FIXES & MULTIPLAYER (INSTALLED) -->
-        {#if isInstalled && activeDetailTab === 'multiplayer'}
-          <section class="steam-section-card">
-            <h3 class="section-heading">Multiplayer & Runtime Fix Overlays</h3>
+        <!-- TAB: PATCHES (INSTALLED) -->
+        {#if isInstalled && activeDetailTab === 'patches'}
+          <section id="section-patches" class="steam-section-card">
+            <h3 class="section-heading">Patches & Runtime Overlays</h3>
             <p class="section-subtext">
               Reversible SteamFix, Online-Fix, and SteamStub DRM stripping overlays.
             </p>
@@ -942,56 +961,140 @@
               <!-- Overlay DLLs -->
               <div class="tool-card">
                 <div class="tool-header">
-                  <h4>Online-Fix / SteamFix Overlay</h4>
-                  <span class="tool-pill">
-                    {installedRecord.fix && installedRecord.fix !== 'None' ? installedRecord.fix : 'Clean'}
-                  </span>
+                  <div class="tool-header-left">
+                    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+                    </svg>
+                    <h4>Online-Fix / SteamFix Overlay</h4>
+                  </div>
+                  {#if installedRecord.fix && installedRecord.fix !== 'None'}
+                    <span class="tool-pill active">{installedRecord.fix}</span>
+                  {:else}
+                    <span class="tool-pill inactive">Clean / Inactive</span>
+                  {/if}
                 </div>
                 <p class="tool-desc">
                   Toggle multiplayer fix DLLs and FakeAppId via reversible <code>.arachnel-off</code> renames.
                 </p>
                 <button
-                  class="md3-btn tonal"
+                  class="md3-btn"
+                  class:primary={!installedRecord.fix || installedRecord.fix === 'None'}
+                  class:tonal={installedRecord.fix && installedRecord.fix !== 'None'}
                   onclick={() => handleAction({ action: 'overlay-toggle' }, 'Toggled DLL overlay')}
                 >
-                  Toggle DLL Overlay
+                  <svg class="btn-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                    <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
+                  </svg>
+                  <span>{installedRecord.fix && installedRecord.fix !== 'None' ? 'Disable DLL Overlay' : 'Enable DLL Overlay'}</span>
                 </button>
               </div>
 
               <!-- Steamless DRM -->
               <div class="tool-card">
                 <div class="tool-header">
-                  <h4>Steamless DRM Stripper</h4>
-                  <span class="tool-pill">
-                    {installedRecord.steamstub ? 'SteamStub Protected' : 'Clean'}
-                  </span>
+                  <div class="tool-header-left">
+                    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>
+                    </svg>
+                    <h4>Steamless DRM Stripper</h4>
+                  </div>
+                  {#if installedRecord.steamstub?.applied}
+                    <span class="tool-pill success">Unpacked (.steamstub.bak)</span>
+                  {:else if installedRecord.steamstub?.stub_present}
+                    <span class="tool-pill warning">SteamStub Protected</span>
+                  {:else}
+                    <span class="tool-pill inactive">Clean / No DRM</span>
+                  {/if}
                 </div>
                 <p class="tool-desc">
                   Strip SteamStub DRM from PE binaries with automated <code>.steamstub.bak</code> backups.
                 </p>
-                <button
-                  class="md3-btn tonal"
-                  onclick={() => handleAction({ action: 'steamless-toggle' }, 'Steamless operation executed')}
-                >
-                  Unpack / Rollback SteamStub
-                </button>
+                {#if installedRecord.steamstub?.applied}
+                  <button
+                    class="md3-btn tonal"
+                    onclick={() => handleAction({ action: 'steamstub-rollback' }, 'Restored original SteamStub executable')}
+                  >
+                    <svg class="btn-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                      <path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/>
+                    </svg>
+                    <span>Rollback Original Binary</span>
+                  </button>
+                {:else}
+                  <button
+                    class="md3-btn"
+                    class:primary={installedRecord.steamstub?.stub_present}
+                    class:tonal={!installedRecord.steamstub?.stub_present}
+                    disabled={!installedRecord.steamstub?.stub_present}
+                    onclick={() => handleAction({ action: 'steamstub-unpack' }, 'SteamStub DRM unpacked')}
+                  >
+                    <svg class="btn-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                      <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14l-5-5 1.41-1.41L12 14.17l7.59-7.59L21 8l-9 9z"/>
+                    </svg>
+                    <span>{installedRecord.steamstub?.stub_present ? 'Strip SteamStub DRM' : 'No SteamStub DRM Detected'}</span>
+                  </button>
+                {/if}
               </div>
 
-              <!-- Steam API Provisioning -->
-              <div class="tool-card">
-                <div class="tool-header">
-                  <h4>Missing Steam API Provisioning</h4>
+              <!-- EA Activation Patch (if applicable) -->
+              {#if installedRecord.ea_heal_available || installedRecord.ea_heal_applied}
+                <div class="tool-card">
+                  <div class="tool-header">
+                    <div class="tool-header-left">
+                      <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H7c0-2.76 2.24-5 5-5s5 2.24 5 5c0 1.04-.42 1.99-1.07 2.75z"/>
+                      </svg>
+                      <h4>EA Activation Patch</h4>
+                    </div>
+                    <span class="tool-pill" class:active={installedRecord.ea_heal_applied} class:inactive={!installedRecord.ea_heal_applied}>
+                      {installedRecord.ea_heal_applied ? 'Patched' : 'Original'}
+                    </span>
+                  </div>
+                  <p class="tool-desc">
+                    Bypasses EA Desktop / Origin activation checks and restores original entitlement binaries.
+                  </p>
+                  {#if installedRecord.ea_heal_applied}
+                    <button
+                      class="md3-btn tonal"
+                      onclick={() => handleAction({ action: 'ea-rollback' }, 'EA activation restored')}
+                    >
+                      <span>Rollback EA Patch</span>
+                    </button>
+                  {:else}
+                    <button
+                      class="md3-btn primary"
+                      onclick={() => handleAction({ action: 'ea-heal' }, 'EA activation patched')}
+                    >
+                      <span>Apply Activation Patch</span>
+                    </button>
+                  {/if}
                 </div>
-                <p class="tool-desc">
-                  Scans game tree and provisions missing 32-bit or 64-bit <code>steam_api.dll</code> binaries.
-                </p>
-                <button
-                  class="md3-btn tonal"
-                  onclick={() => handleAction({ action: 'steam-api-provision' }, 'Steam API DLL provisioned')}
-                >
-                  Provision steam_api.dll
-                </button>
-              </div>
+              {/if}
+
+              <!-- Standalone Game Patch (if present) -->
+              {#if installedRecord.patch}
+                <div class="tool-card">
+                  <div class="tool-header">
+                    <div class="tool-header-left">
+                      <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14l-5-5 1.41-1.41L12 14.17l7.59-7.59L21 8l-9 9z"/>
+                      </svg>
+                      <h4>Standalone Game Patch</h4>
+                    </div>
+                    <span class="tool-pill" class:active={installedRecord.patch === 'enabled'} class:inactive={installedRecord.patch !== 'enabled'}>
+                      {installedRecord.patch === 'enabled' ? 'Active' : 'Disabled'}
+                    </span>
+                  </div>
+                  <p class="tool-desc">
+                    Toggle standalone game patch files and mod payloads staged in this game directory.
+                  </p>
+                  <button
+                    class="md3-btn tonal"
+                    onclick={() => handleAction({ action: 'patch-toggle' }, 'Toggled game patch')}
+                  >
+                    <span>{installedRecord.patch === 'enabled' ? 'Disable Patch' : 'Enable Patch'}</span>
+                  </button>
+                </div>
+              {/if}
             </div>
           </section>
 
@@ -1752,19 +1855,39 @@
   }
 
   .tool-card {
-    background: var(--md-sys-color-surface-container-high);
+    background: var(--md-sys-color-surface-container);
     border-radius: var(--md-sys-shape-medium);
     padding: 16px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 12px;
     border: 1px solid var(--md-sys-color-outline-variant);
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+  }
+
+  .tool-card:hover {
+    background: var(--md-sys-color-surface-container-high);
   }
 
   .tool-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 12px;
+  }
+
+  .tool-header-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .tool-header-icon {
+    width: 20px;
+    height: 20px;
+    color: var(--md-sys-color-primary);
+    flex-shrink: 0;
   }
 
   .tool-header h4 {
@@ -1772,6 +1895,9 @@
     font-size: 14px;
     font-weight: 700;
     color: var(--md-sys-color-on-surface);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .tool-pill {
@@ -1781,13 +1907,38 @@
     border-radius: var(--md-sys-shape-small);
     background: var(--md-sys-color-secondary-container);
     color: var(--md-sys-color-on-secondary-container);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .tool-pill.active,
+  .tool-pill.success {
+    background: var(--md-sys-color-primary-container);
+    color: var(--md-sys-color-on-primary-container);
+  }
+
+  .tool-pill.warning {
+    background: var(--md-sys-color-tertiary-container);
+    color: var(--md-sys-color-on-tertiary-container);
+  }
+
+  .tool-pill.inactive {
+    background: var(--md-sys-color-surface-container-highest);
+    color: var(--md-sys-color-on-surface-variant);
   }
 
   .tool-desc {
     font-size: 12px;
     color: var(--md-sys-color-on-surface-variant);
+    line-height: 1.5;
     margin: 0;
     flex: 1;
+  }
+
+  .tool-card .md3-btn {
+    width: 100%;
+    justify-content: center;
+    margin-top: auto;
   }
 
   /* Config Form */

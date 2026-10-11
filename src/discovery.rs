@@ -70,11 +70,11 @@ fn excluded(name: &str) -> bool {
         .any(|ending| stem == *ending || stem.ends_with(ending))
 }
 
-fn native_executable(path: &Path, metadata: &fs::Metadata) -> Result<bool> {
+fn native_executable(path: &Path, _metadata: &fs::Metadata) -> Result<bool> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o111 == 0 {
+        if _metadata.permissions().mode() & 0o111 == 0 {
             return Ok(false);
         }
     }

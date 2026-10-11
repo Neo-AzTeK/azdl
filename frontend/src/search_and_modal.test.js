@@ -130,7 +130,7 @@ describe('Settings Category Search Matching', () => {
     { id: 'launch', label: 'Launch & Runners', keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'arguments', 'dxvk', 'prefix'] },
     { id: 'plugins', label: 'Plugins & Sources', keywords: ['plugin', 'store', 'source', 'catalog', 'feed', 'json', 'url', 'generator', 'make'] },
     { id: 'appearance', label: 'Material You Theming', keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light', 'mica', 'acrylic', 'translucency'] },
-    { id: 'integrations', label: 'Integrations & Fixes', keywords: ['integration', 'steam', 'shortcut', 'grid', 'steamless', 'onlinefix', 'overlay'] },
+    { id: 'patches', label: 'Patches', keywords: ['patch', 'patches', 'steamless', 'onlinefix', 'overlay', 'drm', 'steamstub', 'fix'] },
     { id: 'about', label: 'About & Diagnostics', keywords: ['about', 'diagnostics', 'doctor', 'version', 'system', 'bwrap', 'unrar', 'bsdtar'] },
   ];
 
@@ -363,28 +363,19 @@ describe('UI Cleanliness, Horizontal Cards & Library Component Invariants', () =
     expect(libBadges.map(b => b.type)).toEqual(['runner', 'fix']);
   });
 
-  it('updates Steam shortcuts wording to Add Game to Steam Library across play bar and settings', () => {
+  it('verifies removal of Add Game to Steam Library and rename of quick action to Patches', () => {
     const playBarMoreOptions = [
       'Open Installation Folder',
       'Move to Another Drive',
-      'Add Game to Steam Library',
       'Launch Options & Config',
-      'Diagnostics & Fixes',
+      'Patches',
       'Uninstall Game',
     ];
 
-    expect(playBarMoreOptions).toContain('Add Game to Steam Library');
+    expect(playBarMoreOptions).not.toContain('Add Game to Steam Library');
     expect(playBarMoreOptions).not.toContain('Sync with Steam');
-
-    const settingsSection = {
-      title: 'Add Games to Steam Library',
-      buttonText: 'Add All Games to Steam Library',
-      switchLabel: 'Auto-add games to Steam library on install',
-    };
-
-    expect(settingsSection.title).toBe('Add Games to Steam Library');
-    expect(settingsSection.buttonText).toBe('Add All Games to Steam Library');
-    expect(settingsSection.switchLabel).toBe('Auto-add games to Steam library on install');
+    expect(playBarMoreOptions).not.toContain('Diagnostics & Fixes');
+    expect(playBarMoreOptions).toContain('Patches');
   });
 
   it('verifies game page header cleanliness: no "Installed" pill, no "Ready to play", no blinking dot', () => {
@@ -523,7 +514,7 @@ describe('UI Cleanliness, Horizontal Cards & Library Component Invariants', () =
       'launch',
       'plugins',
       'appearance',
-      'integrations',
+      'patches',
       'about',
     ];
     expect(settingsManagedDomains).not.toContain('transfers');

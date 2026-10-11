@@ -1,0 +1,270 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.1.0 or v0.1.0)"
+        required: true
+        default: "0.1.0"
+        type: string
+      create_release:
+        description: "Publish as GitHub Release (uncheck to only build and test artifacts)"
+        required: false
+        default: true
+        type: boolean
+      prerelease:
+        description: "Mark as pre-release"
+        required: false
+        default: false
+        type: boolean
+      draft:
+        description: "Create draft release"
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Prepare Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      create_release: ${{ steps.version.outputs.create_release }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      draft: ${{ steps.version.outputs.draft }}
+    steps:
+      - id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            RAW_VER="${{ inputs.version }}"
+            CREATE_REL="${{ inputs.create_release }}"
+            PREREL="${{ inputs.prerelease }}"
+            DRAFT="${{ inputs.draft }}"
+          else
+            RAW_VER="${{ github.ref_name }}"
+            CREATE_REL="true"
+            PREREL="false"
+            DRAFT="false"
+          fi
+
+          # Strip leading 'v' for pure semver
+          CLEAN_VER="${RAW_VER#v}"
+          TAG="v${CLEAN_VER}"
+
+          echo "version=${CLEAN_VER}" >> $GITHUB_OUTPUT
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "create_release=${CREATE_REL}" >> $GITHUB_OUTPUT
+          echo "prerelease=${PREREL}" >> $GITHUB_OUTPUT
+          echo "draft=${DRAFT}" >> $GITHUB_OUTPUT
+
+          echo "Building azdl version: ${CLEAN_VER} (Tag: ${TAG})"
+
+  build:
+    name: Build (${{ matrix.platform }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            platform: windows-x64
+            target: x86_64-pc-windows-msvc
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+          cache-dependency-path: "frontend/package-lock.json"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup Rust cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libasound2-dev \
+            libfuse2 \
+            xdg-utils
+
+      - name: Update version in tauri.conf.json (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sed -i -E 's/"version": "[^"]+"/"version": "'"${{ needs.prepare.outputs.version }}"'"/' src-tauri/tauri.conf.json
+
+      - name: Update version in tauri.conf.json (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ver = "${{ needs.prepare.outputs.version }}"
+          (Get-Content src-tauri\tauri.conf.json) -replace '"version": "[^"]+"', "`"version`": `"$ver`"" | Set-Content src-tauri\tauri.conf.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --legacy-peer-deps
+
+      - name: Build frontend assets
+        working-directory: frontend
+        run: npm run build
+
+      - name: Build CLI executable (azdl)
+        run: cargo build --release -p azdl --target ${{ matrix.target }}
+
+      - name: Build and bundle Desktop application (Tauri)
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: "./src-tauri"
+          args: --target ${{ matrix.target }}
+
+      - name: Package Linux artifacts
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p dist-release
+          TAG="${{ needs.prepare.outputs.tag }}"
+
+          # Copy installers from bundle directory
+          if [ -d "target/${{ matrix.target }}/release/bundle/deb" ]; then
+            cp target/${{ matrix.target }}/release/bundle/deb/*.deb dist-release/ 2>/dev/null || true
+          fi
+          if [ -d "target/${{ matrix.target }}/release/bundle/appimage" ]; then
+            cp target/${{ matrix.target }}/release/bundle/appimage/*.AppImage dist-release/ 2>/dev/null || true
+          fi
+
+          # Fallback check root target if target folder differs
+          if [ -d "target/release/bundle/deb" ]; then
+            cp target/release/bundle/deb/*.deb dist-release/ 2>/dev/null || true
+          fi
+          if [ -d "target/release/bundle/appimage" ]; then
+            cp target/release/bundle/appimage/*.AppImage dist-release/ 2>/dev/null || true
+          fi
+
+          # Package portable tar.gz bundle
+          mkdir -p staging/azdl
+          CLI_BIN="target/${{ matrix.target }}/release/azdl"
+          [ -f "$CLI_BIN" ] || CLI_BIN="target/release/azdl"
+          cp "$CLI_BIN" staging/azdl/
+
+          GUI_BIN="target/${{ matrix.target }}/release/azdl-desktop"
+          [ -f "$GUI_BIN" ] || GUI_BIN="target/release/azdl-desktop"
+          cp "$GUI_BIN" staging/azdl/
+
+          [ -f "azdl.desktop" ] && cp "azdl.desktop" staging/azdl/
+          [ -d "src-tauri/icons" ] && cp -r "src-tauri/icons" staging/azdl/
+
+          tar -czf "dist-release/azdl-${TAG}-linux-x86_64-portable.tar.gz" -C staging azdl
+
+          ls -la dist-release/
+
+      - name: Package Windows artifacts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist-release
+          $tag = "${{ needs.prepare.outputs.tag }}"
+
+          # Copy NSIS installer
+          $nsisPath = "target\${{ matrix.target }}\release\bundle\nsis"
+          if (-not (Test-Path $nsisPath)) { $nsisPath = "target\release\bundle\nsis" }
+          if (Test-Path $nsisPath) {
+            Copy-Item "$nsisPath\*.exe" -Destination dist-release\ -ErrorAction SilentlyContinue
+          }
+
+          # Copy MSI installer
+          $msiPath = "target\${{ matrix.target }}\release\bundle\msi"
+          if (-not (Test-Path $msiPath)) { $msiPath = "target\release\bundle\msi" }
+          if (Test-Path $msiPath) {
+            Copy-Item "$msiPath\*.msi" -Destination dist-release\ -ErrorAction SilentlyContinue
+          }
+
+          # Package portable zip bundle
+          New-Item -ItemType Directory -Force -Path staging\azdl
+          $cliBin = "target\${{ matrix.target }}\release\azdl.exe"
+          if (-not (Test-Path $cliBin)) { $cliBin = "target\release\azdl.exe" }
+          Copy-Item $cliBin staging\azdl\
+
+          $guiBin = "target\${{ matrix.target }}\release\azdl-desktop.exe"
+          if (-not (Test-Path $guiBin)) { $guiBin = "target\release\azdl-desktop.exe" }
+          Copy-Item $guiBin staging\azdl\
+
+          Compress-Archive -Path "staging\azdl\*" -DestinationPath "dist-release\azdl-$tag-windows-x64-portable.zip"
+
+          Get-ChildItem dist-release\
+
+      - name: Upload platform artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.platform }}
+          path: dist-release/*
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: [prepare, build]
+    if: needs.prepare.outputs.create_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: artifacts-*
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        working-directory: release-assets
+        shell: bash
+        run: |
+          rm -f SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: "azdl ${{ needs.prepare.outputs.tag }}"
+          draft: ${{ needs.prepare.outputs.draft == 'true' }}
+          prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          files: |
+            release-assets/*

@@ -7,7 +7,14 @@
     fetchArtwork,
     normalizeQuery,
     subscribeArtwork,
+    extractSteamAppId,
   } from '../covers.js';
+  import {
+    parseSizeToBytes,
+    calculateJobProgressPercent,
+    getEffectiveJobTotal,
+  } from '../transfers.js';
+  import { getSteamStorageSize } from '../steam_storage.js';
 
   let { jobs = [], onRefresh = null } = $props();
 
@@ -91,17 +98,34 @@
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
+  let estimatedSizes = $state({});
+
+  $effect(() => {
+    for (const job of activeJobs) {
+      if (!job.total_bytes && !job.total && !estimatedSizes[job.id]) {
+        const appId = extractSteamAppId(job);
+        if (appId) {
+          getSteamStorageSize(appId).then((size) => {
+            if (size) {
+              const parsed = parseSizeToBytes(size);
+              if (parsed) {
+                estimatedSizes = { ...estimatedSizes, [job.id]: parsed };
+              }
+            }
+          });
+        }
+      }
+    }
+  });
+
+  function getEffectiveTotal(job) {
+    return getEffectiveJobTotal(job, null, estimatedSizes);
+  }
+
   function getJobProgressPercent(job) {
     if (!job) return 0;
-    if (job.progress != null && !isNaN(job.progress)) {
-      return Math.min(100, Math.max(0, Math.round(job.progress)));
-    }
-    const total = job.total_bytes || job.total;
-    const downloaded = job.bytes || job.progress_bytes;
-    if (total && total > 0 && downloaded != null) {
-      return Math.min(100, Math.max(0, Math.round((downloaded / total) * 100)));
-    }
-    return 0;
+    const total = getEffectiveTotal(job);
+    return calculateJobProgressPercent(job, total);
   }
 
   async function handleJobAction(action, id) {
@@ -157,11 +181,12 @@
   >
     {#if activeJobs.length > 0}
       {@const topPct = getJobProgressPercent(activeJobs[0])}
+      {@const topTotal = getEffectiveTotal(activeJobs[0])}
       <div class="drawer-header-progress">
         <div
           class="drawer-header-progress-fill"
-          class:indeterminate={topPct === 0}
-          style="width: {topPct > 0 ? topPct : 100}%"
+          class:indeterminate={topPct === 0 && !topTotal}
+          style="width: {topPct > 0 ? topPct + '%' : (topTotal ? '1%' : '100%')}"
         ></div>
       </div>
     {/if}
@@ -275,13 +300,13 @@
                 <!-- Material 3 Transfer Progress Bar -->
                 {#if isJobActive(job.status) || isJobPaused(job.status)}
                   {@const pct = getJobProgressPercent(job)}
-                  {@const total = job.total_bytes || job.total}
+                  {@const total = getEffectiveTotal(job)}
                   <div class="job-progress-wrap">
                     <div class="job-progress-track">
                       <div
                         class="job-progress-fill"
-                        class:indeterminate={!total && isJobActive(job.status)}
-                        style="width: {total ? pct : 100}%"
+                        class:indeterminate={!total && pct === 0 && isJobActive(job.status)}
+                        style="width: {pct > 0 ? pct + '%' : (total ? '1%' : '100%')}"
                       ></div>
                     </div>
                   </div>
@@ -291,8 +316,8 @@
                   <span class="job-status status-{displayStatus.toLowerCase()}">
                     {displayStatus}
                   </span>
-                  {#if (job.total_bytes && job.total_bytes > 0) || (job.total && job.total > 0)}
-                    {@const total = job.total_bytes || job.total}
+                  {#if getEffectiveTotal(job) > 0}
+                    {@const total = getEffectiveTotal(job)}
                     {@const pct = getJobProgressPercent(job)}
                     <span class="job-progress-fraction">
                       <strong>{pct}%</strong> ({formatBytes(job.bytes)} / {formatBytes(total)})

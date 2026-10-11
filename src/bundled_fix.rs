@@ -102,6 +102,13 @@ fn target_directories(game: &Game, bits: u8) -> Result<BTreeSet<PathBuf>> {
             .strip_prefix(&root)?
             .to_path_buf(),
     );
+    for candidate in crate::steamless::collect_exe_candidates(&root) {
+        if let Some(parent) = candidate.parent()
+            && let Ok(rel) = parent.strip_prefix(&root)
+        {
+            targets.insert(rel.to_path_buf());
+        }
+    }
     let steam_api = if bits == 64 {
         "steam_api64.dll"
     } else {

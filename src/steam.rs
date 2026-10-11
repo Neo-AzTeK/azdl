@@ -320,6 +320,16 @@ pub fn request_install(app_id: u32) -> Result<()> {
     Ok(())
 }
 
+/// Launch the official Steam desktop client in the background.
+pub fn launch_steam() -> Result<()> {
+    Command::new(steam_command())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

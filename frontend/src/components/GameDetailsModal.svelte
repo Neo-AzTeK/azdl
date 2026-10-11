@@ -476,18 +476,6 @@
               >
                 Remove Desktop Shortcut
               </button>
-              <button
-                class="shortcut-btn"
-                onclick={() => handleAction({ action: 'steam-shortcut-create' }, 'Added Steam shortcut with grid art')}
-              >
-                Inject into Steam
-              </button>
-              <button
-                class="shortcut-btn"
-                onclick={() => handleAction({ action: 'steam-shortcut-remove' }, 'Removed from Steam')}
-              >
-                Remove Steam Shortcut
-              </button>
             </div>
           </div>
         </div>

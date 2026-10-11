@@ -9,6 +9,8 @@
   import {
     extractSteamAppId,
     getCandidateThumbnails,
+    getActiveThumbnailPair,
+    getActiveDisplayThumbnail,
     getResolvedArtwork,
     fetchArtwork,
     normalizeQuery,
@@ -21,14 +23,29 @@
     onSelect = null,
     onLaunch = null,
     onStop = null,
+    onInstall = null,
   } = $props();
 
+  let isStartingInstall = $state(false);
   let launching = $state(false);
+  let currentGameId = $state(null);
   let failedUrls = $state(new Set());
+  let loadedHqUrl = $state(null);
+  let loadedFallbackUrl = $state(null);
   let resolvedArt = $state(null);
   let artworkLookupKey = $state('');
   let steamStorageSize = $state(null);
   let cardGame = $derived(normalizeGameCard(game));
+
+  $effect(() => {
+    const id = game?.id || game?.qualified_id;
+    if (id !== currentGameId) {
+      currentGameId = id;
+      failedUrls = new Set();
+      loadedHqUrl = null;
+      loadedFallbackUrl = null;
+    }
+  });
 
   $effect(() => {
     const titleOrId = game?.title || game?.id;
@@ -40,7 +57,7 @@
 
   $effect(() => {
     const titleOrId = game?.title || game?.id;
-    if (!titleOrId || activeThumbnail || artworkLookupKey === normalizeQuery(titleOrId)) return;
+    if (!titleOrId || activeHqUrl || artworkLookupKey === normalizeQuery(titleOrId)) return;
     const key = normalizeQuery(titleOrId);
     artworkLookupKey = key;
     fetchArtwork(titleOrId).then((art) => {
@@ -84,7 +101,11 @@
   }
 
   let isShimmering = $derived(
-    Boolean(game.active_operation) || launching
+    Boolean(game.active_operation) ||
+    launching ||
+    Boolean(game.is_running) ||
+    Boolean(activeJob) ||
+    isStartingInstall
   );
 
   let operationLabel = $derived(
@@ -95,43 +116,81 @@
         : null
   );
 
-  let progress = $derived.by(() => {
-    if (!activeJob) return 0;
-    if (activeJob.progress != null) return Math.round(activeJob.progress);
-    if (activeJob.total && activeJob.bytes) {
-      return Math.min(100, Math.round((activeJob.bytes / activeJob.total) * 100));
-    }
-    return 0;
-  });
 
-  // Candidate thumbnail URLs in priority order (including SteamGrid CDN)
+
+  // Candidate thumbnail URLs in priority order
   let candidateUrls = $derived(getCandidateThumbnails(cardGame, resolvedArt));
 
-  // First non-failed URL
-  let activeThumbnail = $derived.by(() => {
-    for (const url of candidateUrls) {
-      if (!failedUrls.has(url)) {
-        return url;
-      }
-    }
-    return null;
-  });
+  // Active pair for concurrent HQ and fallback loading
+  let thumbnailPair = $derived(getActiveThumbnailPair(cardGame, resolvedArt, failedUrls));
+  let activeHqUrl = $derived(thumbnailPair.activeHqUrl);
+  let activeFallbackUrl = $derived(thumbnailPair.activeFallbackUrl);
 
-  function handleImgError(url) {
+  let isHqLoaded = $derived(Boolean(activeHqUrl && loadedHqUrl === activeHqUrl));
+  let isFallbackLoaded = $derived(Boolean(activeFallbackUrl && loadedFallbackUrl === activeFallbackUrl));
+
+  let activeDisplay = $derived(getActiveDisplayThumbnail({
+    activeHqUrl,
+    activeFallbackUrl,
+    isHqLoaded,
+    isFallbackLoaded,
+  }));
+
+  // Current active thumbnail URL (HQ if loaded, else fallback if loaded, else null)
+  let activeThumbnail = $derived(activeDisplay.url);
+
+  function handleHqLoaded(url) {
+    if (url && url === activeHqUrl) {
+      loadedHqUrl = url;
+    }
+  }
+
+  function handleFallbackLoaded(url) {
+    if (url && url === activeFallbackUrl) {
+      loadedFallbackUrl = url;
+    }
+  }
+
+  function handleHqError(url) {
     if (url) {
       failedUrls.add(url);
       failedUrls = new Set(failedUrls);
+      if (loadedHqUrl === url) {
+        loadedHqUrl = null;
+      }
     }
   }
 
-  function formatJobTitle(job) {
-    if (!job || !job.status) return 'Downloading';
-    const s = job.status.toLowerCase();
-    if (s === 'running') {
-      return (job.install_state || '').toLowerCase() === 'installing' ? 'Installing' : 'Downloading';
+  function handleFallbackError(url) {
+    if (url) {
+      failedUrls.add(url);
+      failedUrls = new Set(failedUrls);
+      if (loadedFallbackUrl === url) {
+        loadedFallbackUrl = null;
+      }
     }
-    return job.status;
   }
+
+  function imageLoader(node, callbacks) {
+    function check() {
+      if (node.complete && (node.currentSrc || node.src)) {
+        if (node.naturalWidth > 0) {
+          callbacks?.onLoad?.();
+        } else if (node.naturalWidth === 0) {
+          callbacks?.onError?.();
+        }
+      }
+    }
+    queueMicrotask(check);
+    return {
+      update(newCallbacks) {
+        callbacks = newCallbacks;
+        queueMicrotask(check);
+      },
+    };
+  }
+
+
 
   async function handlePlay(e) {
     e.stopPropagation();
@@ -158,9 +217,16 @@
     }
   }
 
-  function handleCatalogAction(e) {
+  async function handleCatalogAction(e) {
     e.stopPropagation();
-    if (onSelect) {
+    if (onInstall) {
+      isStartingInstall = true;
+      try {
+        await onInstall(game);
+      } finally {
+        isStartingInstall = false;
+      }
+    } else if (onSelect) {
       onSelect(game);
     }
   }
@@ -177,16 +243,41 @@
 >
   <!-- Card Artwork Cover Container (16:9 horizontal landscape aspect ratio) -->
   <div class="cover-container">
-    {#if activeThumbnail}
+    {#if activeFallbackUrl}
       <img
-        src={activeThumbnail}
+        src={activeFallbackUrl}
         alt={cardGame.title}
-        class="cover-img banner-fit"
+        class="cover-img banner-fit fallback-layer"
+        class:is-visible={isFallbackLoaded}
         loading="lazy"
         decoding="async"
-        onerror={(event) => handleImgError(event.currentTarget.currentSrc || event.currentTarget.src)}
+        onload={() => handleFallbackLoaded(activeFallbackUrl)}
+        onerror={(event) => handleFallbackError(event.currentTarget.currentSrc || event.currentTarget.src || activeFallbackUrl)}
+        use:imageLoader={{
+          onLoad: () => handleFallbackLoaded(activeFallbackUrl),
+          onError: () => handleFallbackError(activeFallbackUrl),
+        }}
       />
-    {:else}
+    {/if}
+
+    {#if activeHqUrl}
+      <img
+        src={activeHqUrl}
+        alt={cardGame.title}
+        class="cover-img banner-fit hq-layer"
+        class:is-visible={isHqLoaded}
+        loading="lazy"
+        decoding="async"
+        onload={() => handleHqLoaded(activeHqUrl)}
+        onerror={(event) => handleHqError(event.currentTarget.currentSrc || event.currentTarget.src || activeHqUrl)}
+        use:imageLoader={{
+          onLoad: () => handleHqLoaded(activeHqUrl),
+          onError: () => handleHqError(activeHqUrl),
+        }}
+      />
+    {/if}
+
+    {#if !activeDisplay.url}
       <div class="cover-placeholder">
         <div class="placeholder-content">
           <svg viewBox="0 0 24 24" width="36" height="36" fill="currentColor" class="placeholder-icon">
@@ -222,18 +313,15 @@
           onclick={handlePlay}
           aria-label="Play game"
         />
-      {:else if activeJob}
-        <div class="card-job-pill" title={formatJobTitle(activeJob)}>
-          <span class="job-pulse-dot"></span>
-          <span>{progress > 0 ? progress + '%' : '...'}</span>
-        </div>
+      {:else if activeJob || isStartingInstall}
+        <!-- Downloading: FAB disappears, nothing in its place -->
       {:else}
         <FAB
           size="small"
           color="primary"
           icon={iconDownload}
           onclick={handleCatalogAction}
-          aria-label="Get game"
+          aria-label="Download game"
         />
       {/if}
     </div>
@@ -291,19 +379,41 @@
   }
 
   .cover-img {
+    position: absolute;
+    top: 0;
+    left: 0;
     width: 100%;
     height: 100%;
     object-fit: cover;
     display: block;
+    opacity: 0;
+    transition: opacity 0.2s ease-in;
+    pointer-events: none;
   }
 
   .cover-img.banner-fit {
     object-position: center;
   }
 
+  .fallback-layer {
+    z-index: 1;
+  }
+
+  .hq-layer {
+    z-index: 2;
+  }
+
+  .cover-img.is-visible {
+    opacity: 1;
+  }
+
   .cover-placeholder {
+    position: absolute;
+    top: 0;
+    left: 0;
     width: 100%;
     height: 100%;
+    z-index: 0;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -384,26 +494,7 @@
     color: var(--md-sys-color-on-error) !important;
   }
 
-  .card-job-pill {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    background: var(--md-sys-color-surface-container-highest);
-    border: 1px solid var(--md-sys-color-outline-variant);
-    color: var(--md-sys-color-primary);
-    font-size: 11px;
-    font-weight: 700;
-    padding: 4px 10px;
-    border-radius: var(--md-sys-shape-full, 9999px);
-    box-shadow: var(--md-sys-elevation-2);
-  }
 
-  .job-pulse-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--md-sys-color-primary);
-  }
 
   /* Card Info Area */
   .card-info {

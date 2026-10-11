@@ -133,6 +133,20 @@ fn fix_locations(game: &Game) -> Result<FixLocations> {
         overlay_directories = status.directories;
         directories.extend(overlay_directories.iter().cloned());
     }
+    for candidate in crate::steamless::collect_exe_candidates(&root) {
+        let mut curr = candidate.parent();
+        while let Some(dir) = curr {
+            if dir.starts_with(&root) {
+                directories.insert(dir.to_path_buf());
+                if dir == root {
+                    break;
+                }
+                curr = dir.parent();
+            } else {
+                break;
+            }
+        }
+    }
     Ok(FixLocations {
         directories: directories.into_iter().collect(),
         overlay_directories,
@@ -391,6 +405,11 @@ fn prepare_fix_files_for_locations(
             .ok_or("game executable has no parent")?
             .to_path_buf(),
     );
+    for candidate in crate::steamless::collect_exe_candidates(&root) {
+        if let Some(parent) = candidate.parent() {
+            directories.insert(parent.to_path_buf());
+        }
+    }
     for directory in &locations.directories {
         let marker = markers(directory)?;
         if marker.online || marker.steam {
@@ -570,7 +589,19 @@ pub fn steam_running() -> bool {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+pub fn steam_running() -> bool {
+    std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq steam.exe", "/NH"])
+        .output()
+        .map(|out| {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout.to_ascii_lowercase().contains("steam.exe")
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn steam_running() -> bool {
     false
 }

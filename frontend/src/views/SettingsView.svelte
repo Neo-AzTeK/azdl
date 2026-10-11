@@ -17,7 +17,6 @@
     installStorePlugin,
     removePlugin,
     downloadProtonGE,
-    syncSteamShortcuts,
     openGameFolder,
   } from '../api.js';
 
@@ -25,7 +24,7 @@
     seedColor = $bindable('#10B981'),
     themeMode = $bindable('dark'), // 'system' | 'dark' | 'light' | 'amoled'
     translucency = $bindable('none'), // 'none' | 'mica' | 'acrylic' | 'compositor'
-    activeCategory = $bindable('storage'), // 'storage' | 'launch' | 'plugins' | 'appearance' | 'integrations' | 'about'
+    activeCategory = $bindable('storage'), // 'storage' | 'launch' | 'plugins' | 'appearance' | 'patches' | 'about'
     runners = [],
     dataDir = '',
     platform = 'linux',
@@ -48,8 +47,6 @@
     global_launch_args: '',
     default_proton_id: '',
     max_concurrent_downloads: 3,
-    auto_steam_shortcut_sync: false,
-    auto_steam_grid_artwork: true,
     auto_steamless_unpack: true,
     auto_online_fix_overlay: true,
     seed_color: seedColor,
@@ -85,7 +82,7 @@
     { id: 'launch', label: 'Launch & Runners', icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z', keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'arguments', 'dxvk', 'prefix'] },
     { id: 'plugins', label: 'Plugins & Sources', icon: 'M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7 1.49 0 2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5s-1.12-2.5-2.5-2.5z', keywords: ['plugin', 'store', 'source', 'catalog', 'feed', 'json', 'url', 'store'] },
     { id: 'appearance', label: 'Material You Theming', icon: 'M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.23 19.64 10.57 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z', keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light', 'mica', 'acrylic', 'translucency'] },
-    { id: 'integrations', label: 'Integrations & Fixes', icon: 'M7.5 5.6L10 7 8.6 4.5 10 2 7.5 3.4 5 2l1.4 2.5L5 7zm12 9.8L17 14l1.4 2.5L17 19l2.5-1.4L22 19l-1.4-2.5L22 14zM22 2l-2.5 1.4L17 2l1.4 2.5L17 7l2.5-1.4L22 7l-1.4-2.5zm-7.63 5.29c-.39-.39-1.02-.39-1.41 0L1.29 18.96c-.39.39-.39 1.02 0 1.41l2.34 2.34c.39.39 1.02.39 1.41 0L16.7 11.05c.39-.39.39-1.02 0-1.41l-2.33-2.35zm-1.03 5.49l-2.12-2.12 2.44-2.44 2.12 2.12-2.44 2.44z', keywords: ['integration', 'steam', 'shortcut', 'grid', 'steamless', 'onlinefix', 'overlay'] },
+    { id: 'patches', label: 'Patches', icon: 'M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z', keywords: ['patch', 'patches', 'steamless', 'onlinefix', 'overlay', 'drm', 'steamstub', 'fix'] },
     { id: 'about', label: 'About & Diagnostics', icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z', keywords: ['about', 'diagnostics', 'doctor', 'version', 'system', 'bwrap', 'unrar', 'bsdtar'] },
   ];
 
@@ -156,9 +153,6 @@
 
   // Launch UI state
   let isDownloadingProton = $state(false);
-
-  // Integrations UI state
-  let isSyncingSteam = $state(false);
 
   // Appearance UI state
   let customHexInput = $state(seedColor);
@@ -401,19 +395,6 @@
         }
       },
     });
-  }
-
-  // --- Steam Shortcuts Sync ---
-  async function handleSyncSteam() {
-    isSyncingSteam = true;
-    try {
-      const res = await syncSteamShortcuts();
-      notify(`Added ${res?.synced ?? 0} games to Steam library`, 'info');
-    } catch (e) {
-      notify(`Error adding games to Steam library: ${e}`, 'error');
-    } finally {
-      isSyncingSteam = false;
-    }
   }
 
   function formatBytes(bytes) {
@@ -871,49 +852,12 @@
 
     <!-- 7. INTEGRATIONS & FIXES -->
     {:else if activeCategory === 'integrations'}
+    <!-- 7. PATCHES -->
+    {:else if activeCategory === 'patches'}
       <div class="panel-header">
-        <h2>Integrations & Runtime Patches</h2>
-        <span class="subtext">Steam shortcuts injection, DRM stripping, and Online-Fix multiplayer overlay settings.</span>
+        <h2>Patches</h2>
+        <span class="subtext">SteamStub DRM stripping and Online-Fix multiplayer runtime overlays.</span>
       </div>
-
-      <SectionCard
-        title="Add Games to Steam Library"
-        icon="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"
-        description="Export installed games into Steam's shortcuts.vdf configuration so they appear in your Steam library."
-      >
-        <div class="action-toolbar">
-          <button class="md3-btn primary" onclick={handleSyncSteam} disabled={isSyncingSteam}>
-            <svg class="btn-icon" viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
-            <span>{isSyncingSteam ? 'Adding...' : 'Add All Games to Steam Library'}</span>
-          </button>
-        </div>
-
-        <div class="switch-row">
-          <div>
-            <strong>Auto-add games to Steam library on install</strong>
-            <p class="desc">Keep Steam library automatically up to date when new games finish installation.</p>
-          </div>
-          <label class="switch-container" aria-label="Auto-add games to Steam library">
-            <Switch
-              bind:checked={localSettings.auto_steam_shortcut_sync}
-              onchange={saveLocalSettings}
-            />
-          </label>
-        </div>
-
-        <div class="switch-row">
-          <div>
-            <strong>Auto-download Steam Grid artwork</strong>
-            <p class="desc">Fetch official 600x900 covers and headers for non-Steam shortcuts.</p>
-          </div>
-          <label class="switch-container" aria-label="Auto-download Steam Grid artwork">
-            <Switch
-              bind:checked={localSettings.auto_steam_grid_artwork}
-              onchange={saveLocalSettings}
-            />
-          </label>
-        </div>
-      </SectionCard>
 
       <SectionCard
         title="DRM Stripping & Multiplayer Overlays"
@@ -1172,12 +1116,6 @@
     font-size: 0.82rem;
     color: var(--md-sys-color-on-surface-variant);
     line-height: 1.45;
-  }
-
-  .action-toolbar {
-    display: flex;
-    align-items: center;
-    gap: 12px;
   }
 
   /* FORMS & INPUTS */

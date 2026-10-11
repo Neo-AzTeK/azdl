@@ -7,9 +7,11 @@
     message = 'Are you sure you want to proceed?',
     confirmText = 'Confirm',
     cancelText = 'Cancel',
+    altText = null,
     isDestructive = true,
     onConfirm = null,
     onCancel = null,
+    onAlt = null,
   } = $props();
 
   let busy = $state(false);
@@ -20,6 +22,19 @@
     try {
       if (onConfirm) {
         await onConfirm();
+      }
+      open = false;
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function handleAlt() {
+    if (busy) return;
+    busy = true;
+    try {
+      if (onAlt) {
+        await onAlt();
       }
       open = false;
     } finally {
@@ -71,6 +86,17 @@
       >
         {cancelText}
       </button>
+
+      {#if altText}
+        <button
+          type="button"
+          class="md3-btn tonal"
+          onclick={handleAlt}
+          disabled={busy}
+        >
+          {altText}
+        </button>
+      {/if}
 
       <button
         type="button"

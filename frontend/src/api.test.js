@@ -45,6 +45,11 @@ describe('API - Browser Fallback Mode', () => {
     const res = await api.runAction({ action: 'test' });
     expect(res).toEqual({ success: true });
   });
+
+  it('returns fallback false for isSteamRunning and true for startSteam', async () => {
+    expect(await api.isSteamRunning()).toBe(false);
+    expect(await api.startSteam()).toBe(true);
+  });
 });
 
 describe('API - Desktop Mode IPC Bridge', () => {
@@ -147,6 +152,18 @@ describe('API - Desktop Mode IPC Bridge', () => {
 
     await api.windowClose();
     expect(mockInvoke).toHaveBeenCalledWith('window_close');
+  });
+
+  it('invokes is_steam_running and start_steam in desktop mode', async () => {
+    mockInvoke.mockResolvedValueOnce(true);
+    const running = await api.isSteamRunning();
+    expect(mockInvoke).toHaveBeenCalledWith('is_steam_running');
+    expect(running).toBe(true);
+
+    mockInvoke.mockResolvedValueOnce(true);
+    const started = await api.startSteam();
+    expect(mockInvoke).toHaveBeenCalledWith('start_steam');
+    expect(started).toBe(true);
   });
 
   it('invokes storage and settings action helpers correctly', async () => {

@@ -176,40 +176,50 @@ fn find_activation_dlls(
 /// Ensures required Steam API DLLs exist in the executable's directory.
 /// Resolves issues where 64-bit Unity/Mono games call steam_api.dll while shipping steam_api64.dll.
 pub fn ensure_steam_api_dll(install_dir: &Path, executable_path: &Path) -> Result<Option<String>> {
-    if !install_dir.is_dir() || !executable_path.is_file() {
+    if !install_dir.is_dir() {
         return Ok(None);
     }
 
-    let Some(bits) = pe_image_bits(executable_path) else {
+    let mut check_paths = Vec::new();
+    if executable_path.is_file() {
+        check_paths.push(executable_path.to_path_buf());
+    }
+    for c in crate::steamless::collect_exe_candidates(install_dir) {
+        if !check_paths.contains(&c) {
+            check_paths.push(c);
+        }
+    }
+    if check_paths.is_empty() {
         return Ok(None);
-    };
-
-    let Some(exe_dir) = executable_path.parent() else {
-        return Ok(None);
-    };
-
-    let targets = if bits == 64 {
-        vec!["steam_api64.dll", "steam_api.dll"]
-    } else {
-        vec!["steam_api.dll"]
-    };
+    }
 
     let mut provided = Vec::new();
     let mut source_used = None;
 
-    for target_name in targets {
-        let target_path = exe_dir.join(target_name);
-        if target_path.exists() {
+    for exe in check_paths {
+        let Some(bits) = pe_image_bits(&exe) else {
             continue;
-        }
-
-        // Search within install_dir for matching-bitness steam_api DLL
-        if let Some(source) = find_steam_api_dll(install_dir, bits, 4000)?
-            && source != target_path
-        {
-            fs::copy(&source, &target_path)?;
-            provided.push(target_name);
-            source_used = Some(source);
+        };
+        let Some(exe_dir) = exe.parent() else {
+            continue;
+        };
+        let targets = if bits == 64 {
+            vec!["steam_api64.dll", "steam_api.dll"]
+        } else {
+            vec!["steam_api.dll"]
+        };
+        for target_name in targets {
+            let target_path = exe_dir.join(target_name);
+            if target_path.exists() {
+                continue;
+            }
+            if let Some(source) = find_steam_api_dll(install_dir, bits, 4000)?
+                && source != target_path
+            {
+                fs::copy(&source, &target_path)?;
+                provided.push(target_name);
+                source_used = Some(source);
+            }
         }
     }
 

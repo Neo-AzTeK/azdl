@@ -34,6 +34,9 @@
       "icons/128x128@2x.png",
       "icons/icon.png",
       "icons/icon.ico"
-    ]
+    ],
+    "shortDescription": "Modern game launcher and runtime orchestrator",
+    "longDescription": "Modern plug-and-play game launcher and runtime orchestrator with automated catalog aggregation, prefix isolation, DRM stripping, and patch management.",
+    "category": "Game"
   }
 }

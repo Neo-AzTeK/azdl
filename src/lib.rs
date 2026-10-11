@@ -725,20 +725,11 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
         eprintln!("{msg}");
     }
     let _ = fixes::heal_ea_activation(&effective_game.install_dir);
-    if let Some(ref l) = launch
-        && steamless::has_steamstub(&l.executable)
-    {
-        if let Some(cli) = steamless::find_steamless_cli(data_dir) {
-            if let Err(e) = steamless::strip_executable(&l.executable, &cli) {
-                eprintln!("Steamless unpacking failed: {e}");
-            } else {
-                eprintln!("Steamless unpacked {}", l.executable.display());
-            }
-        } else {
-            eprintln!(
-                "SteamStub DRM detected in {}, but Steamless.CLI.exe was not found. Configure AZDL_STEAMLESS_PATH to enable unpacking.",
-                l.executable.display()
-            );
+    if steamless::scan_game_steamstub(&effective_game).stub_present {
+        match steamless::unpack_game(&effective_game, data_dir) {
+            Ok(count) if count > 0 => eprintln!("Steamless unpacked {count} executable(s)"),
+            Ok(_) => {}
+            Err(e) => eprintln!("Steamless unpacking failed: {e}"),
         }
     }
     let fix = if let Some(launch) = &launch {

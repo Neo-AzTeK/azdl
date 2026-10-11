@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { searchSteamGames } from '../api.js';
+  import { searchSteamGames, runAction } from '../api.js';
   import { notify } from '../notifications.js';
   import GameCard from '../components/GameCard.svelte';
   import SectionCard from '../components/SectionCard.svelte';
@@ -12,11 +12,40 @@
   let {
     jobs = [],
     tasks = [],
+    plugins = [],
     searchQuery = '',
     onSelectGame = null,
     onRefresh = null,
     onGoToSettings = null,
   } = $props();
+
+  async function handleInstallGame(game) {
+    if (!game) return;
+    const defaultPluginId = plugins?.[0]?.id;
+    if (game.source_id === 'steam' || !game.source_id) {
+      if (!defaultPluginId || plugins.length === 0) {
+        if (onGoToSettings) {
+          onGoToSettings();
+        }
+        notify.error('Install a download plugin from Settings first.');
+        return;
+      }
+    }
+
+    try {
+      await runAction({
+        action: 'steam-install',
+        id: game.qualified_id || game.id,
+        title: game.title,
+        banner_url: game.banner_url || game.header_image || game.large_capsule_image || null,
+        cover_url: game.cover_url || null,
+        plugin_id: defaultPluginId || undefined,
+      });
+      if (onRefresh) onRefresh();
+    } catch (err) {
+      notify.error(`Installation error: ${err}`);
+    }
+  }
 
   let loading = $state(true);
   let catalogGames = $state([]);
@@ -163,7 +192,7 @@
         <div class="featured-grid">
           {#each featuredGames as game (game.qualified_id)}
             {@const activeJob = getActiveJobForGame(game)}
-            <GameCard {game} {activeJob} onSelect={onSelectGame} />
+            <GameCard {game} {activeJob} onSelect={onSelectGame} onInstall={handleInstallGame} />
           {/each}
         </div>
       </SectionCard>
@@ -177,7 +206,7 @@
         <div class="catalog-grid">
           {#each browseGames.slice(0, Math.max(0, displayLimit - featuredGames.length)) as game (game.qualified_id)}
             {@const activeJob = getActiveJobForGame(game)}
-            <GameCard {game} {activeJob} onSelect={onSelectGame} />
+            <GameCard {game} {activeJob} onSelect={onSelectGame} onInstall={handleInstallGame} />
           {/each}
         </div>
       </section>
@@ -198,6 +227,7 @@
           {game}
           {activeJob}
           onSelect={onSelectGame}
+          onInstall={handleInstallGame}
         />
       {/each}
     </div>
