@@ -1,10 +1,9 @@
 //! SteamStub DRM detection and Steamless unpacking/rollback orchestrator.
-use crate::{Game, Result};
+use crate::{Game, Result, clean_command};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SteamStubStatus {
@@ -154,7 +153,7 @@ pub fn find_steamless_cli(data_dir: &Path) -> Option<PathBuf> {
 
 /// Download and extract the latest Steamless release from GitHub into `data_dir/steamless`.
 pub fn download_steamless(data_dir: &Path) -> Result<PathBuf> {
-    let output = Command::new("curl")
+    let output = clean_command("curl")
         .args([
             "--silent",
             "--show-error",
@@ -191,7 +190,7 @@ pub fn download_steamless(data_dir: &Path) -> Result<PathBuf> {
     fs::create_dir_all(&temp_dir)?;
     let archive_path = temp_dir.join("steamless.zip");
 
-    let status = Command::new("curl")
+    let status = clean_command("curl")
         .args(["--fail", "--location", "--retry", "3", "--output"])
         .arg(&archive_path)
         .arg(&download_url)
@@ -204,7 +203,7 @@ pub fn download_steamless(data_dir: &Path) -> Result<PathBuf> {
     let steamless_dir = data_dir.join("steamless");
     fs::create_dir_all(&steamless_dir)?;
 
-    let unpack_status = Command::new("bsdtar")
+    let unpack_status = clean_command("bsdtar")
         .args(["-xzf"])
         .arg(&archive_path)
         .arg("-C")
@@ -280,7 +279,7 @@ pub fn strip_executable(exe_path: &Path, cli_path: &Path) -> Result<()> {
 
     #[cfg(windows)]
     {
-        let status = Command::new(cli_path)
+        let status = clean_command(cli_path)
             .arg("--quiet")
             .arg(exe_path)
             .current_dir(working_dir)
@@ -294,7 +293,7 @@ pub fn strip_executable(exe_path: &Path, cli_path: &Path) -> Result<()> {
     {
         let wine = which_wine();
         let wine_target = to_wine_path(exe_path)?;
-        let status = Command::new(wine)
+        let status = clean_command(wine)
             .arg(cli_path)
             .arg("--quiet")
             .arg(&wine_target)

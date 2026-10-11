@@ -2,12 +2,11 @@ use crate::multiplayer::{FixKind, detect_fix};
 use crate::patch::active_patch;
 use crate::runtime::resolve_runner;
 use crate::steam::{steam_command, steam_root};
-use crate::{Game, Runner, resolve_launch};
+use crate::{Game, Runner, clean_command, resolve_launch};
 use serde::Serialize;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -250,9 +249,9 @@ pub struct SystemCheck {
 
 fn check_binary(name: &str, description: &str, required: bool, version_flag: &str) -> SystemCheck {
     let which = if cfg!(windows) {
-        Command::new("where").arg(name).output()
+        clean_command("where").arg(name).output()
     } else {
-        Command::new("which").arg(name).output()
+        clean_command("which").arg(name).output()
     };
     let path = which
         .ok()
@@ -266,7 +265,7 @@ fn check_binary(name: &str, description: &str, required: bool, version_flag: &st
 
     let available = path.is_some();
     let version = if available {
-        Command::new(name)
+        clean_command(name)
             .arg(version_flag)
             .output()
             .ok()

@@ -1,5 +1,5 @@
 use crate::discovery::discover_executables;
-use crate::{Game, Library, Result, Runner, save_library, validate_id};
+use crate::{Game, Library, Result, Runner, clean_command, save_library, validate_id};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Write;
@@ -335,7 +335,7 @@ pub fn move_game_to_drive(
 
     // Attempt fs::rename, or fallback to copy and delete if across filesystems
     if fs::rename(old_dir, &new_dir).is_err() {
-        let status = std::process::Command::new("cp")
+        let status = clean_command("cp")
             .arg("-r")
             .arg(old_dir)
             .arg(&new_dir)

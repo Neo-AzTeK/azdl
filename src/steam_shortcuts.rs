@@ -1,11 +1,10 @@
 //! Steam's binary shortcuts.vdf. Keep fields we do not understand as bytes so
 //! editing an azdl entry does not discard another launcher's settings.
 use crate::steam::steam_root;
-use crate::{Game, Library, Result, Runner, resolve_launch, validate_id};
+use crate::{Game, Library, Result, Runner, clean_command, resolve_launch, validate_id};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -524,7 +523,7 @@ fn copy_or_download_art(source: &str, install_dir: &Path, dest: &Path) -> bool {
             }
             None => return false,
         };
-        let status = Command::new("curl")
+        let status = clean_command("curl")
             .args([
                 "--fail",
                 "--location",

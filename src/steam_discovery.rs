@@ -1,10 +1,9 @@
 //! Steam Store discovery data used by the desktop catalog.
 
-use crate::Result;
+use crate::{Result, clean_command};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -121,7 +120,7 @@ fn encode_query(query: &str) -> String {
 }
 
 fn read_store_json(url: &str) -> Result<Value> {
-    let output = Command::new("curl")
+    let output = clean_command("curl")
         .args([
             "--fail",
             "--silent",
@@ -139,7 +138,17 @@ fn read_store_json(url: &str) -> Result<Value> {
         ])
         .output()?;
     if !output.status.success() {
-        return Err(format!("Steam Store request failed ({})", output.status).into());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = if stderr.trim().is_empty() {
+            format!("Steam Store request failed ({})", output.status)
+        } else {
+            format!(
+                "Steam Store request failed ({}): {}",
+                output.status,
+                stderr.trim()
+            )
+        };
+        return Err(detail.into());
     }
     Ok(serde_json::from_slice(&output.stdout)?)
 }

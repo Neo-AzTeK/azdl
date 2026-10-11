@@ -1,11 +1,10 @@
 use crate::archive::{extract_game_archive, recorded_multipart_download};
 use crate::discovery::discover_executables;
 use crate::jobs::{JobKind, recorded_download};
-use crate::{Game, Library, Result, Runner, add_game, validate_id};
+use crate::{Game, Library, Result, Runner, add_game, clean_command, validate_id};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
@@ -147,7 +146,7 @@ pub fn run_setup(
     }
     let prefix = data_dir.join("prefixes").join(id);
     fs::create_dir_all(&prefix)?;
-    let mut command = Command::new("wine");
+    let mut command = clean_command("wine");
     command.env("WINEPREFIX", fs::canonicalize(&prefix)?);
     command.current_dir(installer.parent().ok_or("installer has no parent")?);
     if extension.eq_ignore_ascii_case("msi") {

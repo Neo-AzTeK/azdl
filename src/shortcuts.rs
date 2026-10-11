@@ -1,4 +1,6 @@
 #[cfg(target_os = "linux")]
+use crate::clean_command;
+#[cfg(target_os = "linux")]
 use crate::validate_id;
 use crate::{Game, Result};
 #[cfg(target_os = "linux")]
@@ -9,8 +11,6 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
-use std::process::Command;
-#[cfg(target_os = "linux")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "linux")]
@@ -19,7 +19,7 @@ fn desktop_directory(override_dir: Option<&Path>, create: bool) -> Result<PathBu
         directory.to_path_buf()
     } else {
         let home = PathBuf::from(env::var_os("HOME").ok_or("HOME is not set")?);
-        let configured = Command::new("xdg-user-dir")
+        let configured = clean_command("xdg-user-dir")
             .arg("DESKTOP")
             .output()
             .ok()
@@ -192,6 +192,7 @@ pub fn remove_shortcut(_game: &Game, _data_dir: &Path, _directory: Option<&Path>
 mod tests {
     use super::*;
     use crate::{Library, add_game};
+    use std::process::Command;
 
     #[test]
     fn shortcut_uses_azdl_launch_and_can_be_removed_safely() {

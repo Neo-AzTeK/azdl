@@ -5,12 +5,13 @@ use std::error::Error;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, ExitStatus};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod archive;
 pub mod bundled_fix;
 pub mod catalog;
+pub mod cmd;
 pub mod discovery;
 pub mod doctor;
 pub mod fixes;
@@ -35,6 +36,7 @@ pub mod torrent;
 pub mod updates;
 
 pub use archive::normalize_windows_paths;
+pub use cmd::{clean_command, sanitize_command};
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -685,9 +687,9 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
     effective_game.executable = executable.to_path_buf();
     bundled_fix::ensure_steamidra_fix(&effective_game, data_dir)?;
     let mut cmd = match runner {
-        Runner::Native => Command::new(executable),
+        Runner::Native => clean_command(executable),
         Runner::Wine => {
-            let mut cmd = Command::new("wine");
+            let mut cmd = clean_command("wine");
             let prefix = data_dir.join("prefixes").join(&game.id);
             fs::create_dir_all(&prefix)?;
             cmd.env("WINEPREFIX", prefix);
@@ -702,7 +704,7 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
                 .filter(|path| path.is_dir())
                 .or_else(|| steam::steam_root().ok().filter(|path| path.is_dir()))
                 .ok_or("Steam client directory is missing; set STEAM_COMPAT_CLIENT_INSTALL_PATH")?;
-            let mut cmd = Command::new(path);
+            let mut cmd = clean_command(path);
             cmd.env_remove("LD_LIBRARY_PATH").env_remove("LD_PRELOAD");
             cmd.env("STEAM_COMPAT_CLIENT_INSTALL_PATH", steam);
             cmd.env("STEAM_COMPAT_DATA_PATH", compat);
@@ -713,7 +715,7 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
             cmd
         }
         Runner::Steam(app_id) => {
-            let mut cmd = Command::new(steam::steam_command());
+            let mut cmd = clean_command(steam::steam_command());
             cmd.arg("-applaunch").arg(app_id.to_string());
             cmd
         }
@@ -799,7 +801,7 @@ pub fn download(game: &Game, url: &str, relative: &Path) -> Result<PathBuf> {
     if fs::symlink_metadata(&part).is_ok_and(|metadata| !metadata.is_file()) {
         return Err("partial download path is not a regular file".into());
     }
-    let status = Command::new("curl")
+    let status = clean_command("curl")
         .args([
             "--fail",
             "--location",

@@ -1,15 +1,14 @@
 use crate::discovery::import_game;
 use crate::jobs::{JobKind, recorded_download};
-use crate::{Game, Library, Result, Runner, validate_id};
+use crate::{Game, Library, Result, Runner, clean_command, validate_id};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn archive_listing(archive: &Path, verbose: bool) -> Result<String> {
-    let output = Command::new("bsdtar")
+    let output = clean_command("bsdtar")
         .arg(if verbose { "-tvf" } else { "-tf" })
         .arg(archive)
         .output()?;
@@ -236,7 +235,7 @@ fn extract_unlistable_rar(archive: &Path, destination: &Path, passphrase: &str) 
     }
     let destination = fs::canonicalize(destination)?;
     let archive = fs::canonicalize(archive)?;
-    let output = Command::new("bwrap")
+    let output = clean_command("bwrap")
         .args(["--ro-bind", "/", "/", "--bind"])
         .arg(&destination)
         .arg(&destination)
@@ -300,7 +299,7 @@ pub fn extract_checked_with_passphrase(
         return Err(error);
     }
     if rar && let Some(passphrase) = passphrase {
-        let output = Command::new("unrar")
+        let output = clean_command("unrar")
             .args(["x", "-o-", "-idq", "-y"])
             .arg(format!("-p{passphrase}"))
             .arg(archive)
@@ -318,7 +317,7 @@ pub fn extract_checked_with_passphrase(
         normalize_windows_paths(destination)?;
         return Ok(());
     }
-    let mut command = Command::new("bsdtar");
+    let mut command = clean_command("bsdtar");
     command
         .args(["-x", "-f"])
         .arg(archive)
@@ -513,6 +512,7 @@ pub fn fetch_archive_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[cfg(target_os = "linux")]
     #[test]

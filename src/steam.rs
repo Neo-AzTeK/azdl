@@ -1,9 +1,9 @@
-use crate::{Game, Library, Result, Runner};
+use crate::{Game, Library, Result, Runner, clean_command};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[derive(Debug, Clone)]
 enum Value {
@@ -311,7 +311,7 @@ pub fn request_install(app_id: u32) -> Result<()> {
     if app_id == 0 {
         return Err("Steam app ID must be positive".into());
     }
-    Command::new(steam_command())
+    clean_command(steam_command())
         .arg(format!("steam://install/{app_id}"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -322,7 +322,7 @@ pub fn request_install(app_id: u32) -> Result<()> {
 
 /// Launch the official Steam desktop client in the background.
 pub fn launch_steam() -> Result<()> {
-    Command::new(steam_command())
+    clean_command(steam_command())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

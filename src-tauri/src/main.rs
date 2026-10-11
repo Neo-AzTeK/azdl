@@ -188,7 +188,7 @@ pub fn resolve_steam_metadata(query: &str) -> Option<MetadataCacheEntry> {
         "https://store.steampowered.com/api/storesearch/?term={}&l=english&cc=US",
         urlencoding_helper(clean)
     );
-    let output = std::process::Command::new("curl")
+    let output = azdl::clean_command("curl")
         .args(["-s", "--max-time", "5", "--proto", "=https", &url])
         .output()
         .ok()?;
@@ -205,7 +205,7 @@ pub fn resolve_steam_metadata(query: &str) -> Option<MetadataCacheEntry> {
 fn resolve_steam_app_artwork(app_id: u32) -> Option<MetadataCacheEntry> {
     let url =
         format!("https://store.steampowered.com/api/appdetails?appids={app_id}&cc=US&l=english");
-    let output = std::process::Command::new("curl")
+    let output = azdl::clean_command("curl")
         .args(["-s", "--max-time", "5", "--proto", "=https", &url])
         .output()
         .ok()?;
@@ -365,7 +365,6 @@ mod commands {
     use serde_json::{Value, json};
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tauri::{State, Window};
@@ -1041,6 +1040,7 @@ mod commands {
     }
 
     pub fn handle_get_runners(state: &AppState) -> Result<Vec<RunnerEntry>, String> {
+        #[allow(unused_mut)]
         let mut list = vec![
             RunnerEntry {
                 id: "auto".into(),
@@ -1417,7 +1417,7 @@ mod commands {
 
     #[cfg(unix)]
     fn signal_process_group(pid: u32) -> Result<(), String> {
-        if let Ok(status) = Command::new("kill")
+        if let Ok(status) = azdl::clean_command("kill")
             .args(["-TERM", "--"])
             .arg(format!("-{pid}"))
             .status()
@@ -1426,13 +1426,13 @@ mod commands {
             return Ok(());
         }
 
-        let status = Command::new("kill")
+        let status = azdl::clean_command("kill")
             .args(["-TERM", "--"])
             .arg(pid.to_string())
             .status()
             .map_err(|e| e.to_string())?;
         if !status.success() {
-            let check = Command::new("kill")
+            let check = azdl::clean_command("kill")
                 .args(["-0", "--"])
                 .arg(pid.to_string())
                 .status();
@@ -1448,7 +1448,7 @@ mod commands {
 
     #[cfg(windows)]
     fn signal_process_group(pid: u32) -> Result<(), String> {
-        let status = Command::new("taskkill")
+        let status = azdl::clean_command("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status()
             .map_err(|e| e.to_string())?;
@@ -1580,7 +1580,7 @@ mod commands {
 
                 #[cfg(target_os = "windows")]
                 {
-                    let _ = Command::new("explorer")
+                    let _ = azdl::clean_command("explorer")
                         .arg(&target_path)
                         .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
@@ -1589,7 +1589,7 @@ mod commands {
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
-                    let _ = Command::new("xdg-open")
+                    let _ = azdl::clean_command("xdg-open")
                         .arg(&target_path)
                         .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
@@ -2619,8 +2619,7 @@ mod commands {
                     .build();
                 let _ = window.set_effects(effects);
             } else {
-                let effects = EffectsBuilder::new().state(EffectState::Disabled).build();
-                let _ = window.set_effects(effects);
+                let _ = window.set_effects(None);
             }
         }
         let _ = (window, effect);
@@ -2749,7 +2748,7 @@ mod commands {
         let url = format!(
             "https://store.steampowered.com/api/appdetails?appids={app_id}&l=english&cc=US"
         );
-        let output = Command::new("curl")
+        let output = azdl::clean_command("curl")
             .args([
                 "--fail",
                 "--location",
@@ -2766,7 +2765,17 @@ mod commands {
             .output()
             .map_err(|e| format!("curl error: {e}"))?;
         if !output.status.success() {
-            return Err(format!("fetch failed with status {}", output.status));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = if stderr.trim().is_empty() {
+                format!("fetch failed with status {}", output.status)
+            } else {
+                format!(
+                    "fetch failed with status {}: {}",
+                    output.status,
+                    stderr.trim()
+                )
+            };
+            return Err(detail);
         }
         steam_details_for_ui(&output.stdout, app_id)
     }
@@ -2909,7 +2918,7 @@ fn ensure_desktop_integration() {
         let _ = std::fs::write(&target, &desktop_content);
     }
 
-    let desktop_dir = std::process::Command::new("xdg-user-dir")
+    let desktop_dir = azdl::clean_command("xdg-user-dir")
         .arg("DESKTOP")
         .output()
         .ok()
@@ -2956,13 +2965,13 @@ fn ensure_desktop_integration() {
         }
     }
 
-    let _ = std::process::Command::new("update-desktop-database")
+    let _ = azdl::clean_command("update-desktop-database")
         .arg(&apps_dir)
         .status();
 
-    let _ = std::process::Command::new("kbuildsycoca6").status();
+    let _ = azdl::clean_command("kbuildsycoca6").status();
 
-    let _ = std::process::Command::new("gtk-update-icon-cache")
+    let _ = azdl::clean_command("gtk-update-icon-cache")
         .args(["-f", "-q"])
         .arg(&hicolor_root)
         .status();

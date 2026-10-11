@@ -5,14 +5,13 @@ use crate::plugins;
 use crate::setup::{SetupOutcome, fetch_setup, fetch_setup_archive, fetch_setup_archive_parts};
 use crate::steam::{import_steam, scan_steam, steam_root};
 use crate::torrent::fetch_magnet;
-use crate::{CatalogOrigin, Game, Library, Result, Runner, fetch_game, validate_id};
+use crate::{CatalogOrigin, Game, Library, Result, Runner, clean_command, fetch_game, validate_id};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogSource {
@@ -184,7 +183,7 @@ pub fn refresh_source(data_dir: &Path, source: &CatalogSource) -> Result<usize> 
     if fs::symlink_metadata(&temp).is_ok_and(|metadata| !metadata.is_file()) {
         return Err("temporary catalog path is not a regular file".into());
     }
-    let status = Command::new("curl")
+    let status = clean_command("curl")
         .args([
             "--fail",
             "--location",
@@ -1038,6 +1037,7 @@ mod tests {
     use super::*;
     use crate::add_game;
     use crate::jobs::{DownloadJob, JobKind, JobStatus};
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::steam::{library_paths, steam_root};
-use crate::{Result, Runner};
+use crate::{Result, Runner, clean_command};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
@@ -158,7 +158,7 @@ pub fn resolve_runner(configured: &Runner, executable: &Path, data_dir: &Path) -
 }
 
 pub fn fetch_latest_proton_ge_release() -> Result<(String, String)> {
-    let output = std::process::Command::new("curl")
+    let output = clean_command("curl")
         .args([
             "--silent",
             "--show-error",
@@ -204,7 +204,7 @@ pub fn download_proton_ge(data_dir: &Path) -> Result<ProtonEntry> {
     fs::create_dir_all(&temp_dir)?;
     let archive_path = temp_dir.join(format!("{tag}.tar.gz"));
 
-    let status = std::process::Command::new("curl")
+    let status = clean_command("curl")
         .args(["--fail", "--location", "--retry", "3", "--output"])
         .arg(&archive_path)
         .arg(&url)
@@ -216,7 +216,7 @@ pub fn download_proton_ge(data_dir: &Path) -> Result<ProtonEntry> {
     let runners_dir = data_dir.join("runners");
     fs::create_dir_all(&runners_dir)?;
 
-    let unpack_status = std::process::Command::new("bsdtar")
+    let unpack_status = clean_command("bsdtar")
         .args(["-xzf"])
         .arg(&archive_path)
         .arg("-C")

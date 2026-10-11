@@ -1,7 +1,7 @@
-use crate::Result;
 use crate::archive::extract_checked;
 use crate::catalog::{CatalogGame, PackageType, load_sources, parse_feed};
 use crate::validate_id;
+use crate::{Result, clean_command};
 use libloading::Library as SharedLibrary;
 use serde::Deserialize;
 use std::ffi::{CString, c_char, c_int, c_void};
@@ -199,7 +199,7 @@ fn cached_plugin_feed(data_dir: &Path, id: &str) -> PathBuf {
 fn fetch_remote_plugin_catalog(url: &str) -> Result<Vec<u8>> {
     let temp_file =
         std::env::temp_dir().join(format!("azdl-plugin-cat-{}.tmp", std::process::id()));
-    let status = std::process::Command::new("curl")
+    let status = clean_command("curl")
         .args([
             "--fail",
             "--location",

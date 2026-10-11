@@ -1,5 +1,5 @@
 use crate::sha256::file_sha256;
-use crate::{Game, Result, load_library, validate_id};
+use crate::{Game, Result, clean_command, load_library, validate_id};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -414,7 +414,7 @@ fn transfer(data_dir: &Path, job: &DownloadJob) -> Result<TransferOutcome> {
     if pause.exists() {
         return Ok(TransferOutcome::Paused);
     }
-    let mut child = Command::new("curl")
+    let mut child = clean_command("curl")
         .args([
             "--fail",
             "--location",

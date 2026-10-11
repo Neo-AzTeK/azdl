@@ -1,13 +1,12 @@
 use crate::jobs::{JobKind, recorded_download_with_sha256};
 use crate::plugins::{PluginManifest, install_bundle_expected, list_plugins};
-use crate::{Game, Result, Runner, validate_id};
+use crate::{Game, Result, Runner, clean_command, validate_id};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 const DEFAULT_STORE_URL: &str =
     "https://gitlab.com/BadKiko/arachnel-plugins-sourcelist/-/raw/main/plugins.json";
@@ -178,7 +177,7 @@ fn fetch_store_url(url: &str) -> Result<Vec<u8>> {
     if !url.starts_with("https://") {
         return Err("plugin store URL must use HTTPS".into());
     }
-    let output = Command::new("curl")
+    let output = clean_command("curl")
         .args([
             "--fail",
             "--location",

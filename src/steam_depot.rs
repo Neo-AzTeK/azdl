@@ -5,11 +5,10 @@ use crate::jobs::{
     job_id_for_target, load_job, now, save_job,
 };
 use crate::steam::{import_steam, scan_steam, steam_root};
-use crate::{Library, Result, discovery, validate_id};
+use crate::{Library, Result, clean_command, discovery, validate_id};
 use std::ffi::{CStr, CString, c_char, c_double, c_int, c_void};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 #[repr(C)]
@@ -457,7 +456,7 @@ pub fn install_steam_manifest_game(
     let manifest_url = format!("https://ryuu.badkiko.ru/v1/download/{app_id}");
     let manifest_zip = download_dir.join(format!("{app_id}.zip"));
     if !manifest_zip.is_file() || manifest_zip.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
-        let output = Command::new("curl")
+        let output = clean_command("curl")
             .args([
                 "--fail",
                 "--location",
@@ -527,7 +526,7 @@ pub fn install_steam_manifest_game(
                 .unwrap_or_else(|| format!("{}.rar", addon.id));
             let dest = download_dir.join(&filename);
             if !dest.is_file() || dest.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
-                let mut cmd = Command::new("curl");
+                let mut cmd = clean_command("curl");
                 cmd.args([
                     "--fail",
                     "--location",

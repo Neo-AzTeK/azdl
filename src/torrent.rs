@@ -1,13 +1,12 @@
 use crate::archive::install_archive;
 use crate::discovery::{discover_executables, import_game};
 use crate::jobs::{InstallState, JobStatus};
-use crate::{Library, Result, validate_id};
+use crate::{Library, Result, clean_command, validate_id};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -392,7 +391,7 @@ fn work_magnet_job(
     }
     if !job.download_complete {
         fs::create_dir_all(&downloads)?;
-        let mut child = match Command::new(program)
+        let mut child = match clean_command(program)
             .args([
                 "--no-conf",
                 "--continue=true",
