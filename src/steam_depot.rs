@@ -8,6 +8,7 @@ use crate::steam::{import_steam, scan_steam, steam_root};
 use crate::{Library, Result, clean_command, discovery, validate_id};
 use std::ffi::{CStr, CString, c_char, c_double, c_int, c_void};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -48,6 +49,20 @@ pub struct DepotInfo {
     pub depot_id: u32,
     pub manifest_path: PathBuf,
     pub depot_key: String,
+}
+
+fn validate_manifest_archive(path: &Path, app_id: u32) -> Result<()> {
+    let mut file = fs::File::open(path)?;
+    let mut signature = [0u8; 4];
+    if file.read_exact(&mut signature).is_err()
+        || !matches!(signature, [b'P', b'K', 3, 4] | [b'P', b'K', 5, 6] | [b'P', b'K', 7, 8])
+    {
+        return Err(format!(
+            "No usable download manifest is available for Steam App ID {app_id}: the selected plugin's provider did not return a ZIP manifest"
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Parse depot IDs, decryption keys, and manifest paths from unpacked Lua scripts and manifest files.
@@ -478,8 +493,8 @@ pub fn install_steam_manifest_game(
         if !output.status.success() {
             let _ = fs::remove_file(&manifest_zip);
             let http_code = String::from_utf8_lossy(&output.stdout);
-            if http_code.trim() == "404" {
-                return Err(format!("No manifest is available for Steam App ID {app_id}").into());
+            if matches!(http_code.trim(), "404" | "410") {
+                return Err(format!("No download manifest is available for Steam App ID {app_id} from the selected plugin's provider").into());
             }
             return Err(format!(
                 "Manifest provider could not be reached for Steam App ID {app_id} ({})",
@@ -489,9 +504,7 @@ pub fn install_steam_manifest_game(
         }
     }
 
-    if manifest_zip.metadata()?.len() == 0 {
-        return Err("Manifest provider returned an empty download".into());
-    }
+    validate_manifest_archive(&manifest_zip, app_id)?;
 
     let unpack_dir = download_dir.join("manifest");
     if let Ok(metadata) = fs::symlink_metadata(&unpack_dir) {
@@ -653,6 +666,23 @@ pub fn install_steam_manifest_game(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_error_page_is_reported_as_missing_manifest() {
+        let path = std::env::temp_dir().join(format!(
+            "azdl-manifest-response-{}-{}.zip",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, br#"{"error":"app not found"}"#).unwrap();
+        let error = validate_manifest_archive(&path, 620).unwrap_err().to_string();
+        fs::remove_file(&path).unwrap();
+        assert!(error.contains("No usable download manifest"));
+        assert!(error.contains("620"));
+    }
 
     #[test]
     fn parses_lua_addappid_and_manifest_id() {
