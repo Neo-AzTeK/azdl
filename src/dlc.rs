@@ -61,8 +61,15 @@ fn state_dir(data_dir: &Path, game_id: &str, dlc_id: &str) -> PathBuf {
 }
 
 pub(crate) fn lock_game(data_dir: &Path, game_id: &str) -> Result<File> {
-    let parent = data_dir.join("dlc").join(game_id);
+    let root = data_dir.join("dlc");
+    if fs::symlink_metadata(&root).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err("DLC state root is a symbolic link".into());
+    }
+    let parent = root.join(game_id);
     fs::create_dir_all(&parent)?;
+    if fs::symlink_metadata(&parent)?.file_type().is_symlink() {
+        return Err("DLC game state is a symbolic link".into());
+    }
     let path = parent.join(".game.lock");
     if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
         return Err("DLC lock path is a symbolic link".into());
@@ -210,7 +217,10 @@ pub fn list_installed(game: &Game, data_dir: &Path) -> Result<Vec<String>> {
     for entry in entries {
         let entry = entry?;
         let id = entry.file_name().to_string_lossy().into_owned();
-        if validate_id(&id).is_err() || !entry.path().join("complete").is_file() {
+        if validate_id(&id).is_err()
+            || !fs::symlink_metadata(entry.path().join("complete"))
+                .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
+        {
             continue;
         }
         read_manifest(&entry.path(), game, &id)?;
@@ -457,7 +467,10 @@ fn recover_unlocked(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
         let target = check_target(&manifest.install_dir, &file.path)?;
         if target.exists() && file_sha256(&target)? != file.sha256 {
             let payload = state.join("payload").join(&file.path);
-            if !payload.is_file() || !is_prefix_of(&payload, &target)? {
+            if !fs::symlink_metadata(&payload)
+                .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
+                || !is_prefix_of(&payload, &target)?
+            {
                 return Err(
                     format!("Interrupted DLC file was modified: {}", file.path.display()).into(),
                 );
@@ -487,9 +500,8 @@ pub fn remove(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
     validate_id(&game.id)?;
     validate_id(dlc_id)?;
     let _lock = lock_game(data_dir, &game.id)?;
-    if !state_dir(data_dir, &game.id, dlc_id)
-        .join("complete")
-        .is_file()
+    if !fs::symlink_metadata(state_dir(data_dir, &game.id, dlc_id).join("complete"))
+        .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
     {
         return Err("DLC installation was interrupted; recover it before removal".into());
     }
