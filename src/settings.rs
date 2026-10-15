@@ -338,9 +338,8 @@ pub fn move_game_to_drive(
         .get_mut(game_id)
         .ok_or_else(|| format!("Game '{game_id}' not found in library"))?;
 
-    if !crate::dlc::list_installed(game, data_dir)?.is_empty() {
-        return Err("Remove installed DLC before moving this game to another drive".into());
-    }
+    let _dlc_lock = crate::dlc::lock_game(data_dir, game_id)?;
+    crate::dlc::prepare_move(game, data_dir)?;
 
     let old_dir = &game.install_dir;
     if !old_dir.exists() {

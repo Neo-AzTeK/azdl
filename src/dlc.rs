@@ -15,6 +15,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct DlcFile {
     pub path: PathBuf,
     pub sha256: String,
+    #[serde(default)]
+    pub staged_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +58,23 @@ pub fn available_for_game(game: &Game, data_dir: &Path) -> Result<Vec<CatalogAdd
 
 fn state_dir(data_dir: &Path, game_id: &str, dlc_id: &str) -> PathBuf {
     data_dir.join("dlc").join(game_id).join(dlc_id)
+}
+
+pub(crate) fn lock_game(data_dir: &Path, game_id: &str) -> Result<File> {
+    let parent = data_dir.join("dlc").join(game_id);
+    fs::create_dir_all(&parent)?;
+    let path = parent.join(".game.lock");
+    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err("DLC lock path is a symbolic link".into());
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    file.lock()?;
+    Ok(file)
 }
 
 fn collect_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
@@ -108,14 +127,56 @@ fn read_manifest(state: &Path, game: &Game, dlc_id: &str) -> Result<DlcManifest>
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err("DLC state is not a regular directory".into());
     }
-    let manifest: DlcManifest = serde_json::from_slice(&fs::read(state.join("manifest.json"))?)?;
+    let manifest_path = state.join("manifest.json");
+    let manifest_meta = fs::symlink_metadata(&manifest_path)?;
+    if !manifest_meta.is_file() || manifest_meta.file_type().is_symlink() {
+        return Err("DLC manifest is not a regular file".into());
+    }
+    let mut manifest: DlcManifest = serde_json::from_slice(&fs::read(manifest_path)?)?;
+    let install = fs::canonicalize(&game.install_dir)?;
     if manifest.game_id != game.id
         || manifest.dlc_id != dlc_id
-        || manifest.install_dir != fs::canonicalize(&game.install_dir)?
+        || (!manifest.install_dir.as_os_str().is_empty() && manifest.install_dir != install)
     {
         return Err("DLC state does not match this game installation".into());
     }
+    manifest.install_dir = install;
     Ok(manifest)
+}
+
+/// Convert legacy absolute-path manifests to relocatable records before a game move.
+pub(crate) fn prepare_move(game: &Game, data_dir: &Path) -> Result<()> {
+    if !list_interrupted(game, data_dir)?.is_empty() {
+        return Err("Recover interrupted DLC before moving this game".into());
+    }
+    for id in list_installed(game, data_dir)? {
+        let state = state_dir(data_dir, &game.id, &id);
+        let mut manifest = read_manifest(&state, game, &id)?;
+        manifest.install_dir = PathBuf::new();
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let temp = state.join(format!("manifest.json.{}.{nonce}.tmp", std::process::id()));
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        serde_json::to_writer_pretty(&mut output, &manifest)?;
+        output.write_all(b"\n")?;
+        output.sync_all()?;
+        #[cfg(windows)]
+        {
+            let target = state.join("manifest.json");
+            let backup = state.join(format!("manifest.json.{nonce}.bak"));
+            fs::rename(&target, &backup)?;
+            if let Err(error) = fs::rename(&temp, &target) {
+                let _ = fs::rename(&backup, &target);
+                return Err(error.into());
+            }
+            fs::remove_file(backup)?;
+        }
+        #[cfg(not(windows))]
+        fs::rename(temp, state.join("manifest.json"))?;
+    }
+    Ok(())
 }
 
 /// List DLC records installed for a game.
@@ -141,6 +202,28 @@ pub fn list_installed(game: &Game, data_dir: &Path) -> Result<Vec<String>> {
     Ok(ids)
 }
 
+/// List DLC installs that were interrupted before their completion marker was written.
+pub fn list_interrupted(game: &Game, data_dir: &Path) -> Result<Vec<String>> {
+    validate_id(&game.id)?;
+    let root = data_dir.join("dlc").join(&game.id);
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let id = entry.file_name().to_string_lossy().into_owned();
+        if validate_id(&id).is_ok() && !entry.path().join("complete").exists() {
+            read_manifest(&entry.path(), game, &id)?;
+            ids.push(id);
+        }
+    }
+    ids.sort();
+    Ok(ids)
+}
+
 /// Install an additive DLC archive. Existing game files are never overwritten.
 pub fn install_archive(
     game: &Game,
@@ -150,6 +233,7 @@ pub fn install_archive(
 ) -> Result<usize> {
     validate_id(&game.id)?;
     validate_id(dlc_id)?;
+    let _lock = lock_game(data_dir, &game.id)?;
     let install = fs::canonicalize(&game.install_dir)?;
     if !install.is_dir() {
         return Err("Base game installation is missing".into());
@@ -187,15 +271,25 @@ pub fn install_archive(
                 )
                 .into());
             }
+            let name = relative
+                .file_name()
+                .ok_or("DLC file has no name")?
+                .to_string_lossy();
+            let staged_path =
+                relative.with_file_name(format!(".{name}.azdl-{dlc_id}-{nonce}.partial"));
+            if fs::symlink_metadata(check_target(&install, &staged_path)?).is_ok() {
+                return Err("DLC staging path already exists".into());
+            }
             entries.push(DlcFile {
                 sha256: file_sha256(&payload.join(&relative))?,
                 path: relative,
+                staged_path,
             });
         }
         let manifest = DlcManifest {
             game_id: game.id.clone(),
             dlc_id: dlc_id.to_string(),
-            install_dir: install.clone(),
+            install_dir: PathBuf::new(),
             files: entries,
         };
         let mut output = File::create(staging.join("manifest.json"))?;
@@ -205,6 +299,7 @@ pub fn install_archive(
         fs::rename(&staging, &state)?;
         for entry in &manifest.files {
             let target = check_target(&install, &entry.path)?;
+            let staged_target = check_target(&install, &entry.staged_path)?;
             if fs::symlink_metadata(&target).is_ok() {
                 return Err("DLC target changed during installation".into());
             }
@@ -213,12 +308,17 @@ pub fn install_archive(
             let mut output = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(&target)?;
+                .open(&staged_target)?;
             if let Err(error) = io::copy(&mut source, &mut output).and_then(|_| output.sync_all()) {
                 drop(output);
-                let _ = fs::remove_file(&target);
+                let _ = fs::remove_file(&staged_target);
                 return Err(error.into());
             }
+            drop(output);
+            if fs::symlink_metadata(&target).is_ok() {
+                return Err("DLC target changed during installation".into());
+            }
+            fs::rename(&staged_target, &target)?;
         }
         fs::remove_dir_all(state.join("payload"))?;
         File::create(state.join("complete"))?.sync_all()?;
@@ -227,7 +327,7 @@ pub fn install_archive(
     if result.is_err() {
         let _ = fs::remove_dir_all(&staging);
         if state.is_dir() {
-            let _ = remove(game, data_dir, dlc_id);
+            let _ = recover_unlocked(game, data_dir, dlc_id);
         }
     }
     result
@@ -304,10 +404,63 @@ pub fn install_catalog_dlc(game: &Game, data_dir: &Path, addon: &CatalogAddon) -
     Ok(count)
 }
 
+fn recover_unlocked(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
+    let state = state_dir(data_dir, &game.id, dlc_id);
+    if state.join("complete").exists() {
+        return Err("DLC installation is complete; use Remove instead".into());
+    }
+    let manifest = read_manifest(&state, game, dlc_id)?;
+    let mut staged = Vec::new();
+    for file in &manifest.files {
+        if file.staged_path.as_os_str().is_empty() {
+            continue;
+        }
+        let path = check_target(&manifest.install_dir, &file.staged_path)?;
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => staged.push(path),
+            Ok(_) => return Err("Interrupted DLC staging file is not a regular file".into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    // Verify all installed targets before deleting staging files or the state record.
+    for file in &manifest.files {
+        let target = check_target(&manifest.install_dir, &file.path)?;
+        if target.exists() && file_sha256(&target)? != file.sha256 {
+            return Err(
+                format!("Interrupted DLC file was modified: {}", file.path.display()).into(),
+            );
+        }
+    }
+    for path in staged {
+        fs::remove_file(path)?;
+    }
+    remove_unlocked(game, data_dir, dlc_id)
+}
+
+/// Roll back an interrupted DLC install after verifying any completed files.
+pub fn recover_interrupted(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
+    validate_id(&game.id)?;
+    validate_id(dlc_id)?;
+    let _lock = lock_game(data_dir, &game.id)?;
+    recover_unlocked(game, data_dir, dlc_id)
+}
+
 /// Remove a DLC and all files recorded in its install manifest.
 pub fn remove(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
     validate_id(&game.id)?;
     validate_id(dlc_id)?;
+    let _lock = lock_game(data_dir, &game.id)?;
+    if !state_dir(data_dir, &game.id, dlc_id)
+        .join("complete")
+        .is_file()
+    {
+        return Err("DLC installation was interrupted; recover it before removal".into());
+    }
+    remove_unlocked(game, data_dir, dlc_id)
+}
+
+fn remove_unlocked(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
     let state = state_dir(data_dir, &game.id, dlc_id);
     let manifest = read_manifest(&state, game, dlc_id)?;
     let install = &manifest.install_dir;
@@ -400,10 +553,22 @@ mod tests {
         library.games.insert(game.id.clone(), game.clone());
         let drive =
             crate::settings::add_storage_drive(&root, "Other", &root.join("other")).unwrap();
+        let manifest_path = state_dir(&root, &game.id, "bonus").join("manifest.json");
+        let mut legacy: DlcManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        legacy.install_dir = fs::canonicalize(&game_dir).unwrap();
+        fs::write(&manifest_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let moved =
+            crate::settings::move_game_to_drive(&root, &mut library, &game.id, &drive.id).unwrap();
+        assert!(!game_dir.exists());
+        let game = library.games.get(&game.id).unwrap().clone();
+        assert_eq!(game.install_dir, moved);
         assert!(
-            crate::settings::move_game_to_drive(&root, &mut library, &game.id, &drive.id).is_err()
+            list_installed(&game, &root)
+                .unwrap()
+                .contains(&"bonus".to_string())
         );
-        assert!(game_dir.join("base.exe").exists());
+        let game_dir = moved;
         assert!(install_archive(&game, &root, "another", &archive).is_err());
         fs::write(game_dir.join("Content/DLC/bonus.dat"), b"modified").unwrap();
         assert!(remove(&game, &root, "bonus").is_err());
@@ -414,6 +579,17 @@ mod tests {
         fs::write(game_dir.join("Content/DLC/bonus.dat"), b"bonus").unwrap();
         remove(&game, &root, "bonus").unwrap();
         assert_eq!(fs::read(game_dir.join("base.exe")).unwrap(), b"base");
+        assert!(!game_dir.join("Content/DLC/bonus.dat").exists());
+        install_archive(&game, &root, "bonus2", &archive).unwrap();
+        let interrupted = state_dir(&root, &game.id, "bonus2");
+        let manifest: DlcManifest =
+            serde_json::from_slice(&fs::read(interrupted.join("manifest.json")).unwrap()).unwrap();
+        fs::remove_file(interrupted.join("complete")).unwrap();
+        let staged = game_dir.join(&manifest.files[0].staged_path);
+        fs::write(&staged, b"partial").unwrap();
+        assert_eq!(list_interrupted(&game, &root).unwrap(), vec!["bonus2"]);
+        recover_interrupted(&game, &root, "bonus2").unwrap();
+        assert!(!staged.exists());
         assert!(!game_dir.join("Content/DLC/bonus.dat").exists());
         fs::remove_dir_all(root).unwrap();
     }
