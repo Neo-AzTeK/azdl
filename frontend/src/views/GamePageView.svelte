@@ -71,6 +71,7 @@
   let dlcInfo = $state({ available: [], installed: [] });
   let dlcPending = $state('');
   let dlcToRemove = $state(null);
+  let dlcToRecover = $state(null);
 
   async function refreshDlc(id) {
     try {
@@ -119,6 +120,23 @@
     } finally {
       dlcPending = '';
       dlcToRemove = null;
+    }
+  }
+
+  async function recoverDlc() {
+    if (!installedRecord || !dlcToRecover || dlcPending) return;
+    const addon = dlcToRecover;
+    dlcPending = addon.id;
+    try {
+      await runAction({ action: 'dlc-recover', id: installedRecord.id, dlc_id: addon.id });
+      notify.success(`${addon.title} is ready to install again`);
+      await refreshDlc(installedRecord.id);
+      onRefresh?.();
+    } catch (error) {
+      notifyError(error);
+    } finally {
+      dlcPending = '';
+      dlcToRecover = null;
     }
   }
 
@@ -1053,7 +1071,9 @@
               {#each dlcInfo.available as addon (addon.id)}
                 <div class="dlc-row">
                   <span>{addon.title}</span>
-                  {#if addon.installed}
+                  {#if addon.interrupted}
+                    <button class="md3-btn danger" disabled={!!dlcPending} onclick={() => dlcToRecover = addon}>Recover</button>
+                  {:else if addon.installed}
                     <button class="md3-btn danger" disabled={!!dlcPending} onclick={() => dlcToRemove = addon}>Remove</button>
                   {:else}
                     <button class="md3-btn" disabled={!addon.content_available || !!dlcPending} onclick={() => installDlc(addon)}>
@@ -1504,6 +1524,15 @@
     isDestructive={true}
     onConfirm={removeDlc}
     onCancel={() => dlcToRemove = null}
+  />
+  <ConfirmModal
+    open={!!dlcToRecover}
+    title="Recover Interrupted DLC"
+    message={`Remove files left by the interrupted ${dlcToRecover?.title || 'DLC'} installation?`}
+    confirmText="Recover"
+    isDestructive={true}
+    onConfirm={recoverDlc}
+    onCancel={() => dlcToRecover = null}
   />
 </div>
 

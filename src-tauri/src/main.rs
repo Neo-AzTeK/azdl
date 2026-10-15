@@ -427,6 +427,10 @@ pub enum Action {
         id: String,
         dlc_id: String,
     },
+    DlcRecover {
+        id: String,
+        dlc_id: String,
+    },
     OpenFolder {
         #[serde(default)]
         id: Option<String>,
@@ -1887,6 +1891,15 @@ mod commands {
                 azdl::dlc::remove(game, data_dir, &dlc_id)?;
                 Ok(json!({ "success": true }))
             }
+            Action::DlcRecover { id, dlc_id } => {
+                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let game = library
+                    .games
+                    .get(&id)
+                    .ok_or_else(|| format!("Game {id} not found"))?;
+                azdl::dlc::recover_interrupted(game, data_dir, &dlc_id)?;
+                Ok(json!({ "success": true }))
+            }
             Action::OpenFolder { id, location } => {
                 let target_path = if let Some(p) = location {
                     PathBuf::from(p)
@@ -3032,6 +3045,8 @@ mod commands {
                 .ok_or_else(|| format!("Game {id} not found"))?;
             let installed =
                 azdl::dlc::list_installed(game, &data_dir).map_err(|e| e.to_string())?;
+            let interrupted =
+                azdl::dlc::list_interrupted(game, &data_dir).map_err(|e| e.to_string())?;
             let mut available = azdl::dlc::available_for_game(game, &data_dir)
                 .map_err(|e| e.to_string())?
                 .into_iter()
@@ -3041,6 +3056,7 @@ mod commands {
                         "title": addon.title,
                         "content_available": addon.content_available,
                         "installed": installed.contains(&addon.id),
+                        "interrupted": interrupted.contains(&addon.id),
                     })
                 })
                 .collect::<Vec<_>>();
@@ -3051,10 +3067,22 @@ mod commands {
                         "title": dlc_id,
                         "content_available": false,
                         "installed": true,
+                        "interrupted": false,
                     }));
                 }
             }
-            Ok(json!({ "available": available, "installed": installed }))
+            for dlc_id in &interrupted {
+                if !available.iter().any(|addon| addon["id"] == *dlc_id) {
+                    available.push(json!({
+                        "id": dlc_id,
+                        "title": dlc_id,
+                        "content_available": false,
+                        "installed": false,
+                        "interrupted": true,
+                    }));
+                }
+            }
+            Ok(json!({ "available": available, "installed": installed, "interrupted": interrupted }))
         })
         .await
         .map_err(|e| e.to_string())?
