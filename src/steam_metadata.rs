@@ -26,6 +26,7 @@ pub struct SteamDepotMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SteamAppMetadata {
     pub app_id: u32,
+    pub app_type: Option<String>,
     pub name: Option<String>,
     pub parent_app_id: Option<u32>,
     pub dlc_ids: Vec<u32>,
@@ -97,6 +98,7 @@ pub fn parse_appinfo(payload: &[u8], app_id: u32) -> Result<SteamAppMetadata> {
     depots.sort_by_key(|depot| depot.depot_id);
     Ok(SteamAppMetadata {
         app_id,
+        app_type: app.pointer("/common/type").and_then(text),
         name: app.pointer("/common/name").and_then(text),
         parent_app_id: app.pointer("/common/parent").and_then(numeric_id),
         dlc_ids: dlc_ids.into_iter().collect(),
@@ -252,6 +254,7 @@ mod tests {
             br#"{"data":{"200":{"common":{"name":"Sample DLC","parent":"100","type":"DLC"}}}}"#;
         let metadata = parse_appinfo(payload, 200).unwrap();
         assert_eq!(metadata.name.as_deref(), Some("Sample DLC"));
+        assert_eq!(metadata.app_type.as_deref(), Some("DLC"));
         assert_eq!(metadata.parent_app_id, Some(100));
         assert!(metadata.depots.is_empty());
     }

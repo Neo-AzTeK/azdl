@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { searchSteamGames, runAction } from '../api.js';
+  import { searchSteamGames, getSteamDetails, runAction } from '../api.js';
   import { notify, notifyError } from '../notifications.js';
   import GameCard from '../components/GameCard.svelte';
   import SectionCard from '../components/SectionCard.svelte';
@@ -20,8 +20,48 @@
     onGoToSettings = null,
   } = $props();
 
+  async function selectCatalogEntry(entry, openNormal = true) {
+    if (!entry) return false;
+    let parentId = Number(entry.parent_app_id);
+    let parentTitle = entry.parent_title;
+    let isDlc = entry.kind === 'dlc';
+    if (!isDlc && entry.kind !== 'game' && entry.steam_app_id) {
+      const details = await getSteamDetails(entry.steam_app_id);
+      if (!details?.type) {
+        notify.error('Steam could not identify this catalog entry. Try again later.');
+        return true;
+      }
+      isDlc = String(details?.type || '').toLowerCase() === 'dlc';
+      if (isDlc) {
+        parentId = Number(details?.fullgame?.appid);
+        parentTitle = details?.fullgame?.name;
+      }
+    }
+    if (isDlc) {
+      if (!Number.isInteger(parentId) || parentId <= 0) {
+        notify.error('The parent game for this DLC is unavailable.');
+        return true;
+      }
+      if (!parentTitle) {
+        parentTitle = (await getSteamDetails(parentId))?.name;
+      }
+      onSelectGame?.({
+        id: `steam-${parentId}`,
+        qualified_id: `steam:${parentId}`,
+        source_id: 'steam',
+        steam_app_id: parentId,
+        title: parentTitle || `Steam game ${parentId}`,
+        selected_dlc_id: String(entry.steam_app_id),
+      });
+      return true;
+    }
+    if (openNormal) onSelectGame?.(entry);
+    return false;
+  }
+
   async function handleInstallGame(game) {
     if (!game) return;
+    if (await selectCatalogEntry(game, false)) return;
     const favoriteId = settings?.favorite_plugin_id;
     const defaultPluginId = plugins.find((plugin) => plugin.id === favoriteId)?.id
       || (plugins.length === 1 ? plugins[0].id : null);
@@ -206,7 +246,7 @@
         <div class="featured-grid">
           {#each featuredGames as game (game.qualified_id)}
             {@const activeJob = getActiveJobForGame(game)}
-            <GameCard {game} {activeJob} onSelect={onSelectGame} onInstall={handleInstallGame} />
+            <GameCard {game} {activeJob} onSelect={selectCatalogEntry} onInstall={handleInstallGame} />
           {/each}
         </div>
       </SectionCard>
@@ -220,7 +260,7 @@
         <div class="catalog-grid">
           {#each browseGames.slice(0, Math.max(0, displayLimit - featuredGames.length)) as game (game.qualified_id)}
             {@const activeJob = getActiveJobForGame(game)}
-            <GameCard {game} {activeJob} onSelect={onSelectGame} onInstall={handleInstallGame} />
+            <GameCard {game} {activeJob} onSelect={selectCatalogEntry} onInstall={handleInstallGame} />
           {/each}
         </div>
       </section>
@@ -240,7 +280,7 @@
         <GameCard
           {game}
           {activeJob}
-          onSelect={onSelectGame}
+          onSelect={selectCatalogEntry}
           onInstall={handleInstallGame}
         />
       {/each}

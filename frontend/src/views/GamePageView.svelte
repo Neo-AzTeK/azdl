@@ -1,5 +1,5 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import Hls from 'hls.js';
   import { Button, Tabs, FAB } from 'm3-svelte';
   import iconPlay from '@ktibow/iconset-material-symbols/play-arrow';
@@ -88,6 +88,13 @@
     const id = installedRecord?.id;
     if (id) refreshDlc(id);
     else dlcInfo = { available: [], installed: [] };
+  });
+
+  $effect(() => {
+    if (game?.selected_dlc_id && isInstalled && dlcInfo.available.length > 0) {
+      activeDetailTab = 'overview';
+      tick().then(() => document.getElementById('section-dlc')?.scrollIntoView({ behavior: 'smooth' }));
+    }
   });
 
   async function installDlc(addon) {
@@ -1065,7 +1072,7 @@
             </div>
           </section>
           {#if isInstalled && dlcInfo.available.length > 0}
-            <section class="steam-section-card">
+            <section id="section-dlc" class="steam-section-card">
               <h3 class="section-heading">Downloadable Content</h3>
               {#each dlcInfo.available as addon (addon.id)}
                 <div class="dlc-row">

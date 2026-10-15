@@ -3,6 +3,7 @@
   import iconPlay from '@ktibow/iconset-material-symbols/play-arrow';
   import iconStop from '@ktibow/iconset-material-symbols/stop';
   import iconDownload from '@ktibow/iconset-material-symbols/download';
+  import iconInfo from '@ktibow/iconset-material-symbols/info';
   import { launchGame, stopGame } from '../api.js';
   import { getGameCardMetadataTags, normalizeGameCard } from '../game_card.js';
   import { getSteamStorageSize } from '../steam_storage.js';
@@ -75,6 +76,7 @@
   let metadataTags = $derived(getGameCardMetadataTags(cardGame, steamStorageSize));
 
   function loadStorageWhenVisible(node) {
+    if (game.kind === 'dlc') return;
     const appId = extractSteamAppId(cardGame);
     if (isLibraryCard || cardGame.file_size || !appId) return;
 
@@ -319,9 +321,9 @@
         <FAB
           size="small"
           color="primary"
-          icon={iconDownload}
+          icon={game.kind === 'dlc' ? iconInfo : iconDownload}
           onclick={handleCatalogAction}
-          aria-label="Download game"
+          aria-label={game.kind === 'dlc' ? 'View DLC' : 'Download game'}
         />
       {/if}
     </div>
@@ -332,6 +334,9 @@
     <div class="title-row">
       <span class="title" title={cardGame.title}>{cardGame.title}</span>
     </div>
+    {#if cardGame.kind === 'dlc' && cardGame.parent_title}
+      <span class="parent-title">For {cardGame.parent_title}</span>
+    {/if}
 
     {#if metadataTags.length}
       <div class="badge-row">
@@ -518,6 +523,11 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     width: 100%;
+  }
+
+  .parent-title {
+    font-size: 12px;
+    color: var(--md-sys-color-on-surface-variant);
   }
 
   /* Badges Row (Material 3 Tag Chips) */

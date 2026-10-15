@@ -676,6 +676,8 @@ mod commands {
 
     #[derive(serde::Deserialize)]
     struct SteamDetailsPayload {
+        r#type: Option<Value>,
+        fullgame: Option<Value>,
         name: Option<Value>,
         header_image: Option<Value>,
         detailed_description: Option<Value>,
@@ -692,6 +694,8 @@ mod commands {
         fn into_value(self) -> Value {
             let mut selected = serde_json::Map::new();
             for (key, value) in [
+                ("type", self.r#type),
+                ("fullgame", self.fullgame),
                 ("name", self.name),
                 ("header_image", self.header_image),
                 ("detailed_description", self.detailed_description),
@@ -1439,7 +1443,50 @@ mod commands {
         let library = load_library(&state.data_dir).map_err(|e| e.to_string())?;
         let discovered =
             azdl::steam_discovery::discover_games(&query).map_err(|e| e.to_string())?;
-        Ok(steam_games_to_values(&library, discovered))
+        let mut games = steam_games_to_values(&library, discovered);
+        if !query.trim().is_empty()
+            && let Some(items) = games.as_array_mut()
+        {
+            for batch in items.chunks_mut(4).take(3) {
+                let identities = std::thread::scope(|scope| {
+                    let handles = batch
+                        .iter()
+                        .filter_map(|item| item["steam_app_id"].as_u64())
+                        .filter_map(|id| u32::try_from(id).ok())
+                        .map(|id| scope.spawn(move || azdl::steam_metadata::fetch_appinfo(id).ok()))
+                        .collect::<Vec<_>>();
+                    handles
+                        .into_iter()
+                        .map(|handle| handle.join().ok().flatten())
+                        .collect::<Vec<_>>()
+                });
+                for (item, identity) in batch.iter_mut().zip(identities) {
+                    if let Some(identity) = identity {
+                        if identity
+                            .app_type
+                            .as_deref()
+                            .is_some_and(|kind| kind.eq_ignore_ascii_case("game"))
+                        {
+                            item["kind"] = json!("game");
+                        } else if identity
+                            .app_type
+                            .as_deref()
+                            .is_some_and(|kind| kind.eq_ignore_ascii_case("dlc"))
+                            && let Some(parent_id) = identity.parent_app_id
+                        {
+                            item["kind"] = json!("dlc");
+                            item["parent_app_id"] = json!(parent_id);
+                            item["parent_title"] = json!(
+                                azdl::steam_metadata::fetch_appinfo(parent_id)
+                                    .ok()
+                                    .and_then(|metadata| metadata.name)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(games)
     }
 
     #[tauri::command]
@@ -2923,7 +2970,9 @@ mod commands {
         object.retain(|key, _| {
             matches!(
                 key.as_str(),
-                "name"
+                "type"
+                    | "fullgame"
+                    | "name"
                     | "header_image"
                     | "detailed_description"
                     | "short_description"
@@ -2979,6 +3028,9 @@ mod commands {
             for genre in genres {
                 retain_object_fields(genre, &["description"]);
             }
+        }
+        if let Some(fullgame) = object.get_mut("fullgame") {
+            retain_object_fields(fullgame, &["appid", "name"]);
         }
         if let Some(release_date) = object.get_mut("release_date") {
             retain_object_fields(release_date, &["date"]);
@@ -3797,6 +3849,25 @@ mod tests {
         let selected_size = serde_json::to_vec(&selected).unwrap().len();
         let full_size = serde_json::to_vec(&details).unwrap().len();
         assert!(selected_size * 10 < full_size);
+    }
+
+    #[test]
+    fn steam_details_keep_dlc_parent_for_catalog_routing() {
+        let response = serde_json::json!({
+            "200": {
+                "success": true,
+                "data": {
+                    "type": "dlc",
+                    "name": "Sample DLC",
+                    "fullgame": { "appid": "100", "name": "Sample Game", "extra": "discard" }
+                }
+            }
+        });
+        let selected =
+            commands::steam_details_for_ui(&serde_json::to_vec(&response).unwrap(), 200).unwrap();
+        assert_eq!(selected["type"], "dlc");
+        assert_eq!(selected["fullgame"]["appid"], "100");
+        assert!(selected["fullgame"].get("extra").is_none());
     }
 
     #[test]
