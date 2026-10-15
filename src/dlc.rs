@@ -344,7 +344,7 @@ pub fn remove(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Runner;
+    use crate::{Library, Runner};
     use std::collections::BTreeMap;
     use std::process::Command;
 
@@ -389,12 +389,21 @@ mod tests {
             cover_url: None,
             banner_url: None,
         };
+        assert!(available_for_game(&game, &root).unwrap().is_empty());
         assert_eq!(install_archive(&game, &root, "bonus", &archive).unwrap(), 1);
         assert!(
             list_installed(&game, &root)
                 .unwrap()
                 .contains(&"bonus".to_string())
         );
+        let mut library = Library::default();
+        library.games.insert(game.id.clone(), game.clone());
+        let drive =
+            crate::settings::add_storage_drive(&root, "Other", &root.join("other")).unwrap();
+        assert!(
+            crate::settings::move_game_to_drive(&root, &mut library, &game.id, &drive.id).is_err()
+        );
+        assert!(game_dir.join("base.exe").exists());
         assert!(install_archive(&game, &root, "another", &archive).is_err());
         fs::write(game_dir.join("Content/DLC/bonus.dat"), b"modified").unwrap();
         assert!(remove(&game, &root, "bonus").is_err());

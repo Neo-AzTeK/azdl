@@ -162,7 +162,7 @@ azdl steam install 620 steamidra
 
 The Plugin Store installs `.arach` bundles and verifies their package digests. The desktop game page lists installed plugins as download choices. A favorite plugin can be set in Settings; it is used automatically for installs, while multiple installed plugins without a favorite require an explicit choice. Search results are Steam games whether or not any installed plugin can download them. Steam Store search and featured routes are used without a bundled Web API key; these Store endpoints are less stable than Valve's documented keyed `IStoreService/GetAppList`. Network acceptance could not be verified in an offline build environment.
 
-For installed games, the game page shows DLC entries explicitly supplied by the source plugin. Archive DLC is installed additively and recorded with file hashes for safe removal. Steam Store DLC listings alone do not provide downloadable content, and plugin-owned DLC installers are not yet supported. Installing to a selected storage drive is supported for archive, executable, and Steam depot packages; setup and magnet packages currently require the default drive.
+For installed games, the game page shows DLC entries explicitly supplied by the source plugin. Archive DLC is installed additively and recorded with file hashes for safe removal. Steam Store DLC listings alone do not provide downloadable content, and plugin-owned DLC installers are not yet supported. Installing to a selected storage drive is supported for archive, executable, and Steam depot packages; setup and magnet packages currently require the built-in Default Library directory.
 
 ```sh
 azdl list
