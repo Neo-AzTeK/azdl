@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use azdl::LauncherError;
 use azdl::Result as AzdlResult;
 use azdl::data_dir;
 use serde::de::{IgnoredAny, MapAccess, Visitor};
@@ -375,7 +376,6 @@ pub struct AppState {
     pub running_games: Arc<Mutex<HashMap<String, RunningGameInfo>>>,
     pub tasks: Arc<Mutex<Vec<TaskInfo>>>,
     pub mutating: Arc<AtomicBool>,
-    pub cached_catalog: Arc<Mutex<Option<Vec<azdl::catalog::CatalogGame>>>>,
     pub cached_diagnostics: Arc<Mutex<Option<Vec<azdl::doctor::SystemCheck>>>>,
     library_cache: Arc<Mutex<Option<CachedLibrary>>>,
     pub dir_size_cache: Arc<Mutex<HashMap<PathBuf, (u64, Instant)>>>,
@@ -383,39 +383,209 @@ pub struct AppState {
     pub fix_status_cache: Arc<Mutex<FixStatusCache>>,
     pub metadata_cache: Arc<Mutex<HashMap<String, MetadataCacheEntry>>>,
     pub metadata_pending: Arc<Mutex<HashSet<String>>>,
+    pub app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-pub struct ActionRequest {
-    pub action: String,
-    pub id: Option<String>,
-    pub title: Option<String>,
-    pub install_dir: Option<String>,
-    pub executable: Option<String>,
-    pub destination: Option<String>,
-    pub sha256: Option<String>,
-    pub install_kind: Option<String>,
-    pub patch_kind: Option<String>,
-    pub patch_root: Option<String>,
-    pub location: Option<String>,
-    pub addon_id: Option<String>,
-    pub option_id: Option<String>,
-    pub working_directory: Option<String>,
-    pub runner: Option<String>,
-    pub arguments: Option<Vec<String>>,
-    pub key: Option<String>,
-    pub value: Option<String>,
-    pub drive_id: Option<String>,
-    pub drive_label: Option<String>,
-    pub drive_path: Option<String>,
-    pub settings: Option<azdl::settings::LauncherSettings>,
-    pub plugin_name: Option<String>,
-    pub version: Option<String>,
-    pub catalog_url: Option<String>,
-    pub plugin_id: Option<String>,
-    pub banner_url: Option<String>,
-    pub cover_url: Option<String>,
+impl AppState {
+    pub fn notify_state_changed(&self) {
+        if let Ok(guard) = self.app_handle.lock()
+            && let Some(handle) = guard.as_ref()
+        {
+            use tauri::Emitter;
+            let _ = handle.emit("state-changed", ());
+        }
+    }
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "action", rename_all = "kebab-case")]
+pub enum Action {
+    Launch {
+        id: String,
+        #[serde(default)]
+        arguments: Option<Vec<String>>,
+    },
+    Stop {
+        id: String,
+    },
+    RunnerSet {
+        id: String,
+        runner: String,
+    },
+    ExecutableSet {
+        id: String,
+        executable: String,
+    },
+    GameRemove {
+        id: String,
+    },
+    DlcInstall {
+        id: String,
+        dlc_id: String,
+    },
+    DlcRemove {
+        id: String,
+        dlc_id: String,
+    },
+    OpenFolder {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        location: Option<String>,
+    },
+    GameImport {
+        id: String,
+        title: String,
+        install_dir: String,
+        #[serde(default)]
+        executable: Option<String>,
+    },
+    PendingAdd {
+        id: String,
+        #[serde(default)]
+        title: Option<String>,
+        install_dir: String,
+        executable: String,
+        #[serde(default)]
+        install_kind: Option<String>,
+    },
+    PendingRemove {
+        id: String,
+        #[serde(default)]
+        install_dir: Option<String>,
+    },
+    ShortcutCreate {
+        id: String,
+    },
+    ShortcutRemove {
+        id: String,
+    },
+    SteamShortcutCreate {
+        id: String,
+    },
+    SteamShortcutRemove {
+        id: String,
+    },
+    OverlayToggle {
+        id: String,
+    },
+    SteamstubUnpack {
+        id: String,
+    },
+    SteamstubRollback {
+        id: String,
+    },
+    EaHeal {
+        id: String,
+    },
+    EaRollback {
+        id: String,
+    },
+    JobPause {
+        id: String,
+    },
+    JobResume {
+        id: String,
+    },
+    JobCancel {
+        id: String,
+    },
+    ArgsSet {
+        id: String,
+        #[serde(default)]
+        arguments: Option<Vec<String>>,
+    },
+    EnvSet {
+        id: String,
+        key: String,
+        #[serde(default)]
+        value: Option<String>,
+    },
+    EnvRemove {
+        id: String,
+        key: String,
+    },
+    OptionAdd {
+        id: String,
+        option_id: String,
+        title: String,
+        executable: String,
+        #[serde(default)]
+        working_directory: Option<String>,
+        #[serde(default)]
+        arguments: Option<Vec<String>>,
+    },
+    OptionSelect {
+        id: String,
+        option_id: String,
+    },
+    OptionRemove {
+        id: String,
+        option_id: String,
+    },
+    SteamInstall {
+        id: String,
+        #[serde(default)]
+        plugin_id: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        banner_url: Option<String>,
+        #[serde(default)]
+        cover_url: Option<String>,
+        #[serde(default)]
+        location: Option<String>,
+    },
+    PatchToggle {
+        id: String,
+    },
+    PatchRollback {
+        id: String,
+    },
+    PluginRemove {
+        id: String,
+    },
+    PluginFavoriteSet {
+        id: Option<String>,
+    },
+    PluginStoreRefresh,
+    PluginStoreAdd {
+        location: String,
+    },
+    PluginStoreInstall {
+        id: String,
+    },
+    SettingsUpdate {
+        settings: azdl::settings::LauncherSettings,
+    },
+    StorageAddDrive {
+        #[serde(alias = "location", alias = "install_dir")]
+        drive_path: String,
+        #[serde(default, alias = "title")]
+        drive_label: Option<String>,
+    },
+    StorageRemoveDrive {
+        #[serde(alias = "id")]
+        drive_id: String,
+    },
+    StorageSetDefault {
+        #[serde(alias = "id")]
+        drive_id: String,
+    },
+    StorageMoveGame {
+        id: String,
+        drive_id: String,
+    },
+    ScanInstalledGames,
+    ProtonDownload,
+    SteamShortcutsSync,
+    JobClear {
+        id: String,
+    },
+    JobClearCompleted,
+}
+
+pub type ActionRequest = Action;
 
 fn resolve_install_game(
     data_dir: &Path,
@@ -444,6 +614,24 @@ fn resolve_install_game(
         return Ok(game);
     }
     Err("install requests must use steam:<appid>".into())
+}
+
+fn install_root_for(data_dir: &Path, location: Option<&str>) -> AzdlResult<PathBuf> {
+    let settings = azdl::settings::load_settings(data_dir)?;
+    let drive = match location.filter(|value| !value.is_empty()) {
+        Some(value) => settings
+            .storage_drives
+            .iter()
+            .find(|drive| drive.id == value || drive.path.to_string_lossy() == value),
+        None => settings.default_drive(),
+    }
+    .ok_or("Selected installation drive is no longer configured")?;
+    if let Ok(metadata) = std::fs::symlink_metadata(&drive.path)
+        && (!metadata.is_dir() || metadata.file_type().is_symlink())
+    {
+        return Err("Selected installation drive is not a regular directory".into());
+    }
+    Ok(drive.path.clone())
 }
 
 #[derive(Debug, Serialize)]
@@ -531,6 +719,7 @@ mod commands {
                 tasks.retain(|task| task.id != task_id);
             }
         }
+        state.notify_state_changed();
     }
 
     fn runner_str(runner: &Runner) -> String {
@@ -638,30 +827,6 @@ mod commands {
         }
     }
 
-    fn parse_size_str_to_bytes(s: &str) -> Option<u64> {
-        let s = s.trim();
-        let num_part: String = s
-            .chars()
-            .take_while(|c| c.is_ascii_digit() || *c == '.')
-            .collect();
-        let num: f64 = num_part.parse().ok()?;
-        let rest = s[num_part.len()..].trim().to_ascii_uppercase();
-        let multiplier: f64 = if rest.starts_with("TB") {
-            1024.0 * 1024.0 * 1024.0 * 1024.0
-        } else if rest.starts_with("GB") {
-            1024.0 * 1024.0 * 1024.0
-        } else if rest.starts_with("MB") {
-            1024.0 * 1024.0
-        } else if rest.starts_with("KB") {
-            1024.0
-        } else if rest.starts_with('B') {
-            1.0
-        } else {
-            1024.0 * 1024.0
-        };
-        Some((num * multiplier) as u64)
-    }
-
     fn pending_installs(
         data_dir: &Path,
         library: &Library,
@@ -669,8 +834,16 @@ mod commands {
         active_targets: &[PathBuf],
     ) -> AzdlResult<Vec<Value>> {
         let mut pending = Vec::new();
-        for (folder, kind) in [("games", "portable"), ("prefixes", "setup")] {
-            let root = data_dir.join(folder);
+        let mut roots = vec![
+            (data_dir.join("games"), "portable"),
+            (data_dir.join("prefixes"), "setup"),
+        ];
+        for drive in azdl::settings::load_settings(data_dir)?.storage_drives {
+            if !roots.iter().any(|(root, _)| root == &drive.path) {
+                roots.push((drive.path, "portable"));
+            }
+        }
+        for (root, kind) in roots {
             if !root.is_dir() {
                 continue;
             }
@@ -762,12 +935,6 @@ mod commands {
         let pending = pending_installs(&state.data_dir, &library, &active_ids, &active_targets)
             .unwrap_or_default();
 
-        let cached_cat = state
-            .cached_catalog
-            .lock()
-            .ok()
-            .and_then(|lock| lock.clone());
-
         let games: Vec<Value> = library
             .games
             .values()
@@ -796,36 +963,16 @@ mod commands {
                     None
                 };
 
-                let catalog_match = cached_cat.as_ref().and_then(|cat| {
-                    cat.iter().find(|cg| {
-                        cg.id == game.id
-                            || game
-                                .origin
-                                .as_ref()
-                                .map(|o| &o.qualified_id)
-                                .map(|qid| qid == &format!("{}:{}", cg.source_id, cg.id))
-                                .unwrap_or(false)
-                            || cg.title.eq_ignore_ascii_case(&game.title)
-                    })
-                });
-
-                let source_id = catalog_match.map(|cg| cg.source_id.clone()).or_else(|| {
-                    game.origin
-                        .as_ref()
-                        .and_then(|o| o.qualified_id.split_once(':').map(|(s, _)| s.to_string()))
-                        .or_else(|| game.id.split_once(':').map(|(s, _)| s.to_string()))
-                });
-
-                let version = game
+                let source_id = game
                     .origin
                     .as_ref()
-                    .and_then(|o| o.version.clone())
-                    .or_else(|| catalog_match.and_then(|cg| cg.version.clone()));
+                    .and_then(|o| o.qualified_id.split_once(':').map(|(s, _)| s.to_string()))
+                    .or_else(|| game.id.split_once(':').map(|(s, _)| s.to_string()));
 
-                let genres = catalog_match
-                    .map(|cg| cg.genres.clone())
-                    .unwrap_or_default();
-                let addons_count = catalog_match.map(|cg| cg.addons.len()).unwrap_or(0);
+                let version = game.origin.as_ref().and_then(|o| o.version.clone());
+
+                let genres: Vec<String> = Vec::new();
+                let addons_count = 0;
 
                 let dir_bytes = calc_dir_size_cached(state, &game.install_dir);
                 let file_size = format_file_size(dir_bytes);
@@ -842,13 +989,9 @@ mod commands {
                 };
 
                 let steam_id = game.steam_app_id.map(|id| id.to_string()).or_else(|| {
-                    catalog_match
-                        .and_then(|cg| cg.steam_app_id.map(|id| id.to_string()))
-                        .or_else(|| {
-                            meta_entry
-                                .as_ref()
-                                .and_then(|m| m.steam_app_id.map(|id| id.to_string()))
-                        })
+                    meta_entry
+                        .as_ref()
+                        .and_then(|m| m.steam_app_id.map(|id| id.to_string()))
                         .or_else(|| {
                             game.origin
                                 .as_ref()
@@ -860,13 +1003,11 @@ mod commands {
                 let raw_banner_url = game
                     .banner_url
                     .clone()
-                    .or_else(|| catalog_match.and_then(|cg| cg.banner_url.clone()))
                     .or_else(|| meta_entry.as_ref().and_then(|m| m.banner_url.clone()));
 
                 let raw_cover_url = game
                     .cover_url
                     .clone()
-                    .or_else(|| catalog_match.and_then(|cg| cg.cover_url.clone()))
                     .or_else(|| meta_entry.as_ref().and_then(|m| m.cover_url.clone()));
 
                 let disk_banner = steam_id
@@ -1041,32 +1182,23 @@ mod commands {
                     s => format!("{:?}", s),
                 };
 
-                let cat = j.install.as_ref().and_then(|p| {
-                    cached_cat.as_ref().and_then(|cat| {
-                        cat.iter().find(|cg| cg.id == p.game_id || cg.title.eq_ignore_ascii_case(&p.title))
-                    })
-                });
-                let estimated_bytes = cat
-                    .and_then(|cg| cg.file_size.as_deref())
-                    .and_then(parse_size_str_to_bytes);
-
                 let install_json = j.install.as_ref().map(|p| {
                     let meta = state.metadata_cache.lock().ok().and_then(|c| {
                         c.get(&p.title.to_lowercase())
                             .or_else(|| c.get(&p.game_id.to_lowercase()))
                             .cloned()
                     });
-                    let steam_id = cat
-                        .and_then(|cg| cg.steam_app_id.map(|id| id.to_string()))
-                        .or_else(|| meta.as_ref().and_then(|m| m.steam_app_id.map(|id| id.to_string())))
+                    let steam_id = meta
+                        .as_ref()
+                        .and_then(|m| m.steam_app_id.map(|id| id.to_string()))
                         .or_else(|| parse_steam_id(&p.game_id));
-                    let banner = cat
-                        .and_then(|cg| cg.banner_url.clone())
-                        .or_else(|| meta.as_ref().and_then(|m| m.banner_url.clone()))
+                    let banner = meta
+                        .as_ref()
+                        .and_then(|m| m.banner_url.clone())
                         .or_else(|| steam_id.as_ref().map(|id| format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{id}/header.jpg")));
-                    let cover = cat
-                        .and_then(|cg| cg.cover_url.clone())
-                        .or_else(|| meta.as_ref().and_then(|m| m.cover_url.clone()))
+                    let cover = meta
+                        .as_ref()
+                        .and_then(|m| m.cover_url.clone())
                         .or_else(|| steam_id.as_ref().map(|id| format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{id}/library_600x900.jpg")));
 
                     json!({
@@ -1075,11 +1207,11 @@ mod commands {
                         "kind": format!("{:?}", p.kind),
                         "banner_url": banner,
                         "cover_url": cover,
-                        "file_size": cat.and_then(|cg| cg.file_size.clone()),
+                        "file_size": None::<String>,
                     })
                 });
 
-                let total_bytes = j.total_bytes.or(estimated_bytes);
+                let total_bytes = j.total_bytes;
 
                 json!({
                     "id": j.id,
@@ -1088,7 +1220,7 @@ mod commands {
                     "bytes": j.downloaded_bytes(),
                     "total_bytes": total_bytes,
                     "total": total_bytes,
-                    "estimated_bytes": estimated_bytes,
+                    "estimated_bytes": None::<u64>,
                     "target": j.target,
                     "error": j.error,
                     "install": install_json,
@@ -1111,35 +1243,25 @@ mod commands {
                     s => format!("{:?}", s),
                 };
 
-                let cat = cached_cat.as_ref().and_then(|cat| {
-                    cat.iter()
-                        .find(|cg| cg.id == t.id || cg.title.eq_ignore_ascii_case(&t.title))
-                });
-                let estimated_bytes = cat
-                    .and_then(|cg| cg.file_size.as_deref())
-                    .and_then(parse_size_str_to_bytes);
-                let total_bytes = estimated_bytes;
-
                 let meta = state.metadata_cache.lock().ok().and_then(|c| {
                     c.get(&t.title.to_lowercase())
                         .or_else(|| c.get(&t.id.to_lowercase()))
                         .cloned()
                 });
-                let steam_id = cat
-                    .and_then(|cg| cg.steam_app_id.map(|id| id.to_string()))
-                    .or_else(|| {
-                        meta.as_ref()
-                            .and_then(|m| m.steam_app_id.map(|id| id.to_string()))
-                    })
+                let steam_id = meta
+                    .as_ref()
+                    .and_then(|m| m.steam_app_id.map(|id| id.to_string()))
                     .or_else(|| parse_steam_id(&t.id));
-                let banner = cat
-                    .and_then(|cg| cg.banner_url.clone())
-                    .or_else(|| meta.as_ref().and_then(|m| m.banner_url.clone()))
+                let banner = meta
+                    .as_ref()
+                    .and_then(|m| m.banner_url.clone())
                     .or_else(|| steam_id.as_ref().map(|id| format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{id}/header.jpg")));
-                let cover = cat
-                    .and_then(|cg| cg.cover_url.clone())
-                    .or_else(|| meta.as_ref().and_then(|m| m.cover_url.clone()))
+                let cover = meta
+                    .as_ref()
+                    .and_then(|m| m.cover_url.clone())
                     .or_else(|| steam_id.as_ref().map(|id| format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{id}/library_600x900.jpg")));
+
+                let total_bytes = None::<u64>;
 
                 jobs_list.push(json!({
                     "id": t.id,
@@ -1148,7 +1270,7 @@ mod commands {
                     "bytes": t.downloaded_bytes(&state.data_dir),
                     "total_bytes": total_bytes,
                     "total": total_bytes,
-                    "estimated_bytes": estimated_bytes,
+                    "estimated_bytes": None::<u64>,
                     "target": t.download_dir(&state.data_dir),
                     "error": t.error,
                     "install": Some(json!({
@@ -1157,7 +1279,7 @@ mod commands {
                         "kind": "Archive",
                         "banner_url": banner,
                         "cover_url": cover,
-                        "file_size": cat.and_then(|cg| cg.file_size.clone()),
+                        "file_size": None::<String>,
                     })),
                     "install_state": t.install_state.map(|s| format!("{:?}", s)),
                     "install_error": None::<String>,
@@ -1509,27 +1631,39 @@ mod commands {
         state: &AppState,
         id: String,
         extra_args: Option<Vec<String>>,
-    ) -> Result<Value, String> {
-        validate_id(&id).map_err(|e| e.to_string())?;
+    ) -> Result<Value, LauncherError> {
+        validate_id(&id).map_err(|e| LauncherError::invalid_id(e.to_string()))?;
 
-        let mut library = load_library(&state.data_dir).map_err(|e| e.to_string())?;
+        let mut library =
+            load_library(&state.data_dir).map_err(|e| LauncherError::general(e.to_string()))?;
         let game = library
             .games
             .get_mut(&id)
-            .ok_or_else(|| format!("Game {id} not found"))?;
+            .ok_or_else(|| LauncherError::game_not_found(&id))?;
 
         {
             let running = state
                 .running_games
                 .lock()
-                .map_err(|_| "State lock poisoned")?;
+                .map_err(|_| LauncherError::lock_poisoned("running_games state lock poisoned"))?;
             if running.contains_key(&id) {
-                return Err(format!("Game '{id}' is already running"));
+                return Err(LauncherError::game_already_running(&id));
             }
         }
 
         let extra = extra_args.unwrap_or_default();
-        let mut child = spawn_game(game, &state.data_dir, &extra).map_err(|e| e.to_string())?;
+        let mut child = spawn_game(game, &state.data_dir, &extra).map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("Compatibility tool") || msg.contains("runner") {
+                LauncherError::runner_not_found(msg)
+            } else if msg.contains("executable") || msg.contains("not found") {
+                LauncherError::executable_not_found(game.executable.display().to_string())
+            } else if msg.contains("Steam client directory is missing") {
+                LauncherError::steam_not_running(&game.title)
+            } else {
+                LauncherError::general(msg)
+            }
+        })?;
         let pid = child.id();
         let game_title = game.title.clone();
         let now = SystemTime::now()
@@ -1543,7 +1677,7 @@ mod commands {
             let mut running = state
                 .running_games
                 .lock()
-                .map_err(|_| "State lock poisoned")?;
+                .map_err(|_| LauncherError::lock_poisoned("running_games state lock poisoned"))?;
             running.insert(
                 id.clone(),
                 RunningGameInfo {
@@ -1558,6 +1692,7 @@ mod commands {
         let running_map = Arc::clone(&state.running_games);
         let monitored_id = id.clone();
         let data_dir = state.data_dir.clone();
+        let state_exit = state.clone();
         std::thread::spawn(move || {
             let _ = child.wait();
             if let Ok(mut map) = running_map.lock() {
@@ -1573,7 +1708,10 @@ mod commands {
                 g.last_played_unix = exit_time;
                 let _ = save_library(&data_dir, &lib);
             }
+            state_exit.notify_state_changed();
         });
+
+        state.notify_state_changed();
 
         Ok(json!({
             "status": "launched",
@@ -1588,11 +1726,11 @@ mod commands {
         state: State<'_, AppState>,
         id: String,
         extra_args: Option<Vec<String>>,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, LauncherError> {
         let state = state.inner().clone();
         tauri::async_runtime::spawn_blocking(move || handle_launch_game(&state, id, extra_args))
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| LauncherError::general(e.to_string()))?
     }
 
     #[cfg(unix)]
@@ -1643,25 +1781,27 @@ mod commands {
         Err("stopping a launch is unsupported on this platform".into())
     }
 
-    pub fn handle_stop_game(state: &AppState, id: String) -> Result<Value, String> {
-        validate_id(&id).map_err(|e| e.to_string())?;
+    pub fn handle_stop_game(state: &AppState, id: String) -> Result<Value, LauncherError> {
+        validate_id(&id).map_err(|e| LauncherError::invalid_id(e.to_string()))?;
 
         let pid = {
             let running = state
                 .running_games
                 .lock()
-                .map_err(|_| "State lock poisoned")?;
+                .map_err(|_| LauncherError::lock_poisoned("running_games state lock poisoned"))?;
             let info = running
                 .get(&id)
-                .ok_or_else(|| format!("Game '{id}' is not running"))?;
+                .ok_or_else(|| LauncherError::game_not_found(&id))?;
             info.pid
         };
 
-        signal_process_group(pid).map_err(|e| e.to_string())?;
+        signal_process_group(pid).map_err(|e| LauncherError::general(e.to_string()))?;
 
         if let Ok(mut map) = state.running_games.lock() {
             map.remove(&id);
         }
+
+        state.notify_state_changed();
 
         Ok(json!({
             "status": "stopped",
@@ -1671,54 +1811,42 @@ mod commands {
     }
 
     #[tauri::command]
-    pub async fn stop_game(state: State<'_, AppState>, id: String) -> Result<Value, String> {
+    pub async fn stop_game(state: State<'_, AppState>, id: String) -> Result<Value, LauncherError> {
         let state = state.inner().clone();
         tauri::async_runtime::spawn_blocking(move || handle_stop_game(&state, id))
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| LauncherError::general(e.to_string()))?
     }
 
-    pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Value, String> {
+    pub fn handle_run_action(
+        state: &AppState,
+        action: ActionRequest,
+    ) -> Result<Value, LauncherError> {
         let data_dir = &state.data_dir;
-        let name = action.action.as_str();
-
-        let res = match name {
-            "launch" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
-                handle_launch_game(state, id, action.arguments)
-            }
-            "stop" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
-                handle_stop_game(state, id)
-            }
-            "runner-set" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
-                let runner_val = action.runner.ok_or_else(|| "missing runner".to_string())?;
+        let res = match action {
+            Action::Launch { id, arguments } => handle_launch_game(state, id, arguments),
+            Action::Stop { id } => handle_stop_game(state, id),
+            Action::RunnerSet { id, runner } => {
                 let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
                     .get_mut(&id)
                     .ok_or_else(|| format!("Game {id} not found"))?;
-                set_runner(game, &runner_val).map_err(|e| e.to_string())?;
+                set_runner(game, &runner).map_err(|e| e.to_string())?;
                 save_library(data_dir, &library).map_err(|e| e.to_string())?;
-                Ok(json!({ "success": true, "runner": runner_val }))
+                Ok(json!({ "success": true, "runner": runner }))
             }
-            "executable-set" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
-                let exe = action
-                    .executable
-                    .ok_or_else(|| "missing executable".to_string())?;
+            Action::ExecutableSet { id, executable } => {
                 let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
                     .get_mut(&id)
                     .ok_or_else(|| format!("Game {id} not found"))?;
-                set_executable(game, Path::new(&exe)).map_err(|e| e.to_string())?;
+                set_executable(game, Path::new(&executable)).map_err(|e| e.to_string())?;
                 save_library(data_dir, &library).map_err(|e| e.to_string())?;
-                Ok(json!({ "success": true, "executable": exe }))
+                Ok(json!({ "success": true, "executable": executable }))
             }
-            "game-remove" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
+            Action::GameRemove { id } => {
                 let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
                 azdl::remove_game(&mut library, data_dir, &id).map_err(|e| e.to_string())?;
                 if let Ok(mut tasks) = state.tasks.lock() {
@@ -1737,24 +1865,45 @@ mod commands {
                 }
                 Ok(json!({ "success": true, "removed": id }))
             }
-            "open-folder" => {
-                let target_path = if let Some(p) = action.location {
+            Action::DlcInstall { id, dlc_id } => {
+                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let game = library
+                    .games
+                    .get(&id)
+                    .ok_or_else(|| format!("Game {id} not found"))?;
+                let addon = azdl::dlc::available_for_game(game, data_dir)?
+                    .into_iter()
+                    .find(|addon| addon.id == dlc_id)
+                    .ok_or("DLC is not offered by this game's source plugin")?;
+                let count = azdl::dlc::install_catalog_dlc(game, data_dir, &addon)?;
+                Ok(json!({ "success": true, "files": count }))
+            }
+            Action::DlcRemove { id, dlc_id } => {
+                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let game = library
+                    .games
+                    .get(&id)
+                    .ok_or_else(|| format!("Game {id} not found"))?;
+                azdl::dlc::remove(game, data_dir, &dlc_id)?;
+                Ok(json!({ "success": true }))
+            }
+            Action::OpenFolder { id, location } => {
+                let target_path = if let Some(p) = location {
                     PathBuf::from(p)
-                } else if let Some(id) = action.id {
-                    let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                } else if let Some(id) = id {
+                    let library = load_library(data_dir)?;
                     let game = library
                         .games
                         .get(&id)
-                        .ok_or_else(|| format!("Game {id} not found"))?;
+                        .ok_or_else(|| LauncherError::game_not_found(&id))?;
                     game.install_dir.clone()
                 } else {
-                    return Err("missing game ID or location".to_string());
+                    return Err(LauncherError::general("missing game ID or location"));
                 };
 
                 if !target_path.exists() {
-                    return Err(format!(
-                        "Folder path does not exist: {}",
-                        target_path.display()
+                    return Err(LauncherError::executable_not_found(
+                        target_path.display().to_string(),
                     ));
                 }
 
@@ -1779,12 +1928,12 @@ mod commands {
 
                 Ok(json!({ "success": true, "path": target_path.display().to_string() }))
             }
-            "game-import" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
-                let title = action.title.ok_or_else(|| "missing title".to_string())?;
-                let install_dir = action
-                    .install_dir
-                    .ok_or_else(|| "missing install_dir".to_string())?;
+            Action::GameImport {
+                id,
+                title,
+                install_dir,
+                executable,
+            } => {
                 let canonical_install =
                     fs::canonicalize(&install_dir).map_err(|e| e.to_string())?;
                 let settings = azdl::settings::load_settings(data_dir)
@@ -1803,7 +1952,7 @@ mod commands {
                     );
                 }
                 let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
-                if let Some(exe) = action.executable.filter(|e| !e.is_empty()) {
+                if let Some(exe) = executable.filter(|e| !e.is_empty()) {
                     add_game(
                         &mut library,
                         &id,
@@ -1819,41 +1968,36 @@ mod commands {
                 save_library(data_dir, &library).map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "imported": id }))
             }
-            "pending-add" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
-                let title = action.title.unwrap_or_else(|| id.clone());
-                let install_dir = action
-                    .install_dir
-                    .ok_or_else(|| "missing install_dir".to_string())?;
-                let exe = action
-                    .executable
-                    .ok_or_else(|| "missing executable".to_string())?;
+            Action::PendingAdd {
+                id,
+                title,
+                install_dir,
+                executable,
+                install_kind,
+            } => {
+                let game_title = title.unwrap_or_else(|| id.clone());
                 let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let install_path = Path::new(&install_dir);
-                let exe_path = Path::new(&exe);
-                let final_install_dir = if action.install_kind.as_deref() == Some("setup")
-                    && exe_path.is_absolute()
-                    && !exe_path.starts_with(install_path)
-                {
-                    exe_path.parent().unwrap_or(install_path)
-                } else {
-                    install_path
-                };
-                add_game(&mut library, &id, &title, final_install_dir, exe_path)
+                let exe_path = Path::new(&executable);
+                let is_setup = install_kind.as_deref() == Some("setup");
+                let final_install_dir =
+                    if is_setup && exe_path.is_absolute() && !exe_path.starts_with(install_path) {
+                        exe_path.parent().unwrap_or(install_path)
+                    } else {
+                        install_path
+                    };
+                add_game(&mut library, &id, &game_title, final_install_dir, exe_path)
                     .map_err(|e| e.to_string())?;
-                if action.install_kind.as_deref() == Some("setup")
-                    && let Some(game) = library.games.get_mut(&id)
-                {
+                if is_setup && let Some(game) = library.games.get_mut(&id) {
                     game.runner = Runner::Wine;
                 }
                 save_library(data_dir, &library).map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "added": id }))
             }
-            "pending-remove" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
+            Action::PendingRemove { id, install_dir } => {
                 validate_id(&id).map_err(|e| e.to_string())?;
 
-                if let Some(dir_str) = action.install_dir.as_deref() {
+                if let Some(dir_str) = install_dir.as_deref() {
                     let dir = Path::new(dir_str);
                     if dir.exists()
                         && let Ok(canon) = fs::canonicalize(dir)
@@ -1881,8 +2025,7 @@ mod commands {
                 let _ = azdl::cleanup_leftovers(data_dir, Some(&id));
                 Ok(json!({ "success": true, "removed": id }))
             }
-            "shortcut-create" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
+            Action::ShortcutCreate { id } => {
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
@@ -1898,8 +2041,7 @@ mod commands {
                 let _ = game;
                 Ok(json!({ "success": true }))
             }
-            "shortcut-remove" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
+            Action::ShortcutRemove { id } => {
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
@@ -1914,8 +2056,7 @@ mod commands {
                 let _ = game;
                 Ok(json!({ "success": true }))
             }
-            "steam-shortcut-create" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
+            Action::SteamShortcutCreate { id } => {
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
@@ -1924,8 +2065,7 @@ mod commands {
                 azdl::steam_shortcuts::create_shortcut(game, None).map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true }))
             }
-            "steam-shortcut-remove" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
+            Action::SteamShortcutRemove { id } => {
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
@@ -1934,8 +2074,7 @@ mod commands {
                 azdl::steam_shortcuts::remove_shortcut(game, None).map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true }))
             }
-            "overlay-toggle" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
+            Action::OverlayToggle { id } => {
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
@@ -1948,62 +2087,42 @@ mod commands {
                 }
                 Ok(json!({ "success": true, "enabled": !status.enabled }))
             }
-            "steamstub-unpack" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
+            Action::SteamstubUnpack { id } => {
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
                     .get(&id)
                     .ok_or_else(|| format!("Game {id} not found"))?;
-                let _cli =
-                    azdl::steamless::ensure_steamless_cli(data_dir).map_err(|e| e.to_string())?;
-                let task_id = format!("steamstub-{id}");
-                {
-                    let mut tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
-                    tasks.retain(|t| t.id != task_id);
-                    tasks.push(TaskInfo {
-                        id: task_id.clone(),
-                        label: format!("Stripping DRM for {}", game.title),
-                        status: "running".into(),
-                        pid: None,
-                        game_id: Some(id.clone()),
-                        log_tail: String::new(),
-                    });
-                }
-                let state_clone = state.clone();
-                let game_clone = game.clone();
-                let data_dir_buf = data_dir.to_path_buf();
-                let id_clone = id.clone();
-                let task_id_clone = task_id.clone();
-                std::thread::Builder::new()
-                    .name(format!("azdl-stub-{id}"))
-                    .spawn(move || {
-                        let _ = azdl::steamless::unpack_game(&game_clone, &data_dir_buf);
-                        if let Ok(mut cache) = state_clone.steamstub_cache.lock() {
-                            cache.remove(&id_clone);
-                        }
-                        if let Ok(mut tasks) = state_clone.tasks.lock() {
-                            tasks.retain(|t| t.id != task_id_clone);
-                        }
-                    })
-                    .map_err(|e| e.to_string())?;
-                Ok(json!({ "success": true, "started": true, "id": id }))
-            }
-            "steamstub-rollback" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
-                let game = library
-                    .games
-                    .get(&id)
-                    .ok_or_else(|| format!("Game {id} not found"))?;
-                azdl::steamless::rollback_game(game).map_err(|e| e.to_string())?;
+                let count =
+                    azdl::steamless::unpack_game(game, data_dir).map_err(|e| e.to_string())?;
+                let new_status = azdl::steamless::scan_game_steamstub(game);
                 if let Ok(mut cache) = state.steamstub_cache.lock() {
-                    cache.remove(&id);
+                    cache.insert(id.clone(), (new_status.clone(), Instant::now()));
                 }
-                Ok(json!({ "success": true }))
+                Ok(json!({
+                    "success": true,
+                    "unpacked_count": count,
+                    "steamstub": new_status,
+                }))
             }
-            "ea-heal" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
+            Action::SteamstubRollback { id } => {
+                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let game = library
+                    .games
+                    .get(&id)
+                    .ok_or_else(|| format!("Game {id} not found"))?;
+                let count = azdl::steamless::rollback_game(game).map_err(|e| e.to_string())?;
+                let new_status = azdl::steamless::scan_game_steamstub(game);
+                if let Ok(mut cache) = state.steamstub_cache.lock() {
+                    cache.insert(id.clone(), (new_status.clone(), Instant::now()));
+                }
+                Ok(json!({
+                    "success": true,
+                    "restored_count": count,
+                    "steamstub": new_status,
+                }))
+            }
+            Action::EaHeal { id } => {
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
@@ -2013,8 +2132,7 @@ mod commands {
                     .map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "message": msg }))
             }
-            "ea-rollback" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
+            Action::EaRollback { id } => {
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
@@ -2024,59 +2142,52 @@ mod commands {
                     .map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "message": msg }))
             }
-            "job-pause" => {
-                let id = action.id.ok_or_else(|| "missing job ID".to_string())?;
+            Action::JobPause { id } => {
                 if azdl::jobs::load_job(data_dir, &id).is_ok() {
-                    azdl::jobs::pause_job(data_dir, &id).map_err(|e| e.to_string())?;
+                    azdl::jobs::pause_job(data_dir, &id)?;
                 } else if azdl::torrent::load_torrent_job(data_dir, &id).is_ok() {
-                    azdl::torrent::pause_magnet(data_dir, &id).map_err(|e| e.to_string())?;
+                    azdl::torrent::pause_magnet(data_dir, &id)?;
                 } else {
-                    return Err(format!("Job {id} not found"));
+                    return Err(LauncherError::general(format!("Job {id} not found")));
                 }
                 Ok(json!({ "success": true }))
             }
-            "job-resume" => {
-                let id = action.id.ok_or_else(|| "missing job ID".to_string())?;
+            Action::JobResume { id } => {
                 if azdl::jobs::load_job(data_dir, &id).is_ok() {
-                    azdl::jobs::retry_job(data_dir, &id).map_err(|e| e.to_string())?;
+                    azdl::jobs::retry_job(data_dir, &id)?;
                 } else if azdl::torrent::load_torrent_job(data_dir, &id).is_ok() {
-                    let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
-                    azdl::torrent::resume_magnet(&mut library, data_dir, &id)
-                        .map_err(|e| e.to_string())?;
+                    let mut library = load_library(data_dir)?;
+                    azdl::torrent::resume_magnet(&mut library, data_dir, &id)?;
                 } else {
-                    return Err(format!("Job {id} not found"));
+                    return Err(LauncherError::general(format!("Job {id} not found")));
                 }
                 Ok(json!({ "success": true }))
             }
-            "job-cancel" => {
-                let id = action.id.ok_or_else(|| "missing job ID".to_string())?;
+            Action::JobCancel { id } => {
                 if azdl::jobs::load_job(data_dir, &id).is_ok() {
-                    azdl::jobs::cancel_job(data_dir, &id).map_err(|e| e.to_string())?;
+                    azdl::jobs::cancel_job(data_dir, &id)?;
                 } else if azdl::torrent::load_torrent_job(data_dir, &id).is_ok() {
-                    azdl::torrent::cancel_magnet(data_dir, &id).map_err(|e| e.to_string())?;
+                    azdl::torrent::cancel_magnet(data_dir, &id)?;
                 } else {
-                    return Err(format!("Job {id} not found"));
+                    return Err(LauncherError::general(format!("Job {id} not found")));
                 }
                 if let Ok(mut tasks) = state.tasks.lock() {
                     tasks.retain(|t| t.id != id && t.game_id.as_deref() != Some(&id));
                 }
                 Ok(json!({ "success": true }))
             }
-            "args-set" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
+            Action::ArgsSet { id, arguments } => {
                 let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
                     .get_mut(&id)
                     .ok_or_else(|| format!("Game {id} not found"))?;
-                game.arguments = action.arguments.unwrap_or_default();
+                game.arguments = arguments.unwrap_or_default();
                 save_library(data_dir, &library).map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true }))
             }
-            "env-set" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
-                let key = action.key.ok_or_else(|| "missing env key".to_string())?;
-                let val = action.value.unwrap_or_default();
+            Action::EnvSet { id, key, value } => {
+                let val = value.unwrap_or_default();
                 let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
@@ -2086,9 +2197,7 @@ mod commands {
                 save_library(data_dir, &library).map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true }))
             }
-            "env-remove" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
-                let key = action.key.ok_or_else(|| "missing env key".to_string())?;
+            Action::EnvRemove { id, key } => {
                 let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
@@ -2098,16 +2207,15 @@ mod commands {
                 save_library(data_dir, &library).map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true }))
             }
-            "option-add" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
-                let opt_id = action
-                    .option_id
-                    .ok_or_else(|| "missing option_id".to_string())?;
-                let title = action.title.ok_or_else(|| "missing title".to_string())?;
-                let exe = action
-                    .executable
-                    .ok_or_else(|| "missing executable".to_string())?;
-                let working = action.working_directory.map(PathBuf::from);
+            Action::OptionAdd {
+                id,
+                option_id,
+                title,
+                executable,
+                working_directory,
+                arguments,
+            } => {
+                let working = working_directory.map(PathBuf::from);
                 let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
@@ -2115,55 +2223,52 @@ mod commands {
                     .ok_or_else(|| format!("Game {id} not found"))?;
                 add_launch_option(
                     game,
-                    &opt_id,
+                    &option_id,
                     &title,
-                    Path::new(&exe),
+                    Path::new(&executable),
                     working.as_deref(),
-                    &action.arguments.unwrap_or_default(),
+                    &arguments.unwrap_or_default(),
                 )
                 .map_err(|e| e.to_string())?;
                 save_library(data_dir, &library).map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true }))
             }
-            "option-select" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
-                let opt_id = action
-                    .option_id
-                    .ok_or_else(|| "missing option_id".to_string())?;
+            Action::OptionSelect { id, option_id } => {
                 let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
                     .get_mut(&id)
                     .ok_or_else(|| format!("Game {id} not found"))?;
-                select_launch_option(game, Some(&opt_id)).map_err(|e| e.to_string())?;
+                select_launch_option(game, Some(&option_id)).map_err(|e| e.to_string())?;
                 save_library(data_dir, &library).map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true }))
             }
-            "option-remove" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
-                let opt_id = action
-                    .option_id
-                    .ok_or_else(|| "missing option_id".to_string())?;
+            Action::OptionRemove { id, option_id } => {
                 let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
                     .get_mut(&id)
                     .ok_or_else(|| format!("Game {id} not found"))?;
-                remove_launch_option(game, &opt_id).map_err(|e| e.to_string())?;
+                remove_launch_option(game, &option_id).map_err(|e| e.to_string())?;
                 save_library(data_dir, &library).map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true }))
             }
-            "steam-install" => {
-                let id = action.id.ok_or_else(|| "missing catalog ID".to_string())?;
-                let plugin_id = action.plugin_id.clone();
-                let request_title = action.title.clone();
+            Action::SteamInstall {
+                id,
+                plugin_id,
+                title,
+                banner_url,
+                cover_url,
+                location,
+            } => {
+                let games_root = install_root_for(data_dir, location.as_deref())?;
                 let cat_game = resolve_install_game(
                     data_dir,
                     &id,
                     plugin_id.as_deref(),
-                    request_title.as_deref(),
-                    action.banner_url.as_deref(),
-                    action.cover_url.as_deref(),
+                    title.as_deref(),
+                    banner_url.as_deref(),
+                    cover_url.as_deref(),
                 )
                 .map_err(|e| e.to_string())?;
 
@@ -2222,6 +2327,7 @@ mod commands {
                 let cat_game_clone = cat_game.clone();
                 let task_id_clone = task_id.clone();
                 let qualified_id = id.clone();
+                let games_root_for_thread = games_root.clone();
 
                 let is_test_env = cfg!(test) || std::env::var("AZDL_TEST_IN_PROCESS").is_ok();
                 let mut spawned_pid: Option<u32> = None;
@@ -2231,9 +2337,10 @@ mod commands {
                         .arg("worker-install")
                         .arg(&qualified_id)
                         .arg(plugin_id.as_deref().unwrap_or(""))
-                        .arg(request_title.as_deref().unwrap_or(""))
+                        .arg(title.as_deref().unwrap_or(""))
                         .arg(cat_game.banner_url.as_deref().unwrap_or(""))
                         .arg(cat_game.cover_url.as_deref().unwrap_or(""))
+                        .arg(location.as_deref().unwrap_or(""))
                         .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::piped())
@@ -2270,9 +2377,6 @@ mod commands {
                                         }
                                     };
                                     finish_install_task(&wait_state, &wait_task_id, error);
-                                    if let Ok(mut lock) = wait_state.cached_catalog.lock() {
-                                        *lock = None;
-                                    }
                                 })
                                 .ok();
                         }
@@ -2303,9 +2407,10 @@ mod commands {
                                 }
                             };
 
-                            let outcome = azdl::catalog::install_game(
+                            let outcome = azdl::catalog::install_game_in(
                                 &mut library,
                                 data_dir,
+                                &games_root_for_thread,
                                 &cat_game_clone,
                             );
                             let mut failure = None;
@@ -2324,15 +2429,9 @@ mod commands {
                                     }
                                     let _ =
                                         azdl::cleanup_leftovers(data_dir, Some(&cat_game_clone.id));
-                                    if let Ok(mut lock) = state_clone.cached_catalog.lock() {
-                                        *lock = None;
-                                    }
                                 }
                                 Ok(azdl::catalog::InstallOutcome::NeedsSelection(_)) => {
                                     let _ = save_library(data_dir, &library);
-                                    if let Ok(mut lock) = state_clone.cached_catalog.lock() {
-                                        *lock = None;
-                                    }
                                 }
                                 Ok(azdl::catalog::InstallOutcome::SteamRequested(_)) => {}
                                 Err(e) => {
@@ -2358,8 +2457,7 @@ mod commands {
                     "title": cat_game.title,
                 }))
             }
-            "patch-toggle" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
+            Action::PatchToggle { id } => {
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
@@ -2380,8 +2478,7 @@ mod commands {
                     Err("No patch installed for this game".into())
                 }
             }
-            "patch-rollback" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
+            Action::PatchRollback { id } => {
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
@@ -2393,20 +2490,29 @@ mod commands {
                 }
                 Ok(json!({ "success": true }))
             }
-            "plugin-install" => {
-                let loc = action
-                    .location
-                    .ok_or_else(|| "missing location".to_string())?;
-                let manifest = azdl::plugins::install_bundle(data_dir, Path::new(&loc))
-                    .map_err(|e| e.to_string())?;
-                Ok(json!({ "success": true, "plugin": manifest.id }))
-            }
-            "plugin-remove" => {
-                let id = action.id.ok_or_else(|| "missing plugin ID".to_string())?;
+            Action::PluginRemove { id } => {
                 azdl::plugins::remove_plugin(data_dir, &id).map_err(|e| e.to_string())?;
+                let mut settings = azdl::settings::load_settings(data_dir)?;
+                if settings.favorite_plugin_id.as_deref() == Some(&id) {
+                    settings.favorite_plugin_id = None;
+                    azdl::settings::save_settings(data_dir, &settings)?;
+                }
                 Ok(json!({ "success": true, "removed": id }))
             }
-            "plugin-store-refresh" => {
+            Action::PluginFavoriteSet { id } => {
+                if let Some(ref id) = id
+                    && !azdl::plugins::list_plugins(data_dir)?
+                        .iter()
+                        .any(|plugin| &plugin.id == id)
+                {
+                    return Err(LauncherError::plugin_not_found(id));
+                }
+                let mut settings = azdl::settings::load_settings(data_dir)?;
+                settings.favorite_plugin_id = id.clone();
+                azdl::settings::save_settings(data_dir, &settings)?;
+                Ok(json!({ "success": true, "favorite_plugin_id": id }))
+            }
+            Action::PluginStoreRefresh => {
                 let task_id = "refresh-plugin-store".to_string();
                 {
                     let mut tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
@@ -2440,16 +2546,12 @@ mod commands {
                     .map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "started": true }))
             }
-            "plugin-store-add" => {
-                let loc = action
-                    .location
-                    .ok_or_else(|| "missing store location/URL".to_string())?;
-                let count =
-                    azdl::plugin_store::add_store(data_dir, &loc).map_err(|e| e.to_string())?;
-                Ok(json!({ "success": true, "store": loc, "count": count }))
+            Action::PluginStoreAdd { location } => {
+                let count = azdl::plugin_store::add_store(data_dir, &location)
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({ "success": true, "store": location, "count": count }))
             }
-            "plugin-store-install" => {
-                let id = action.id.ok_or_else(|| "missing plugin ID".to_string())?;
+            Action::PluginStoreInstall { id } => {
                 let task_id = format!("install-plugin-{id}");
                 {
                     let mut tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
@@ -2470,88 +2572,44 @@ mod commands {
                     .name(format!("azdl-plug-{id}"))
                     .spawn(move || {
                         let data_dir = &state_clone.data_dir;
-                        if azdl::plugin_store::install_store_plugin(data_dir, &id_clone).is_ok() {
-                            let _ = azdl::plugins::refresh_plugin_catalog(data_dir, &id_clone);
-                            if let Ok(mut lock) = state_clone.cached_catalog.lock() {
-                                *lock = None;
-                            }
-                        }
-                        if let Ok(mut tasks) = state_clone.tasks.lock() {
-                            tasks.retain(|t| t.id != task_id_clone);
-                        }
+                        let result = azdl::plugin_store::install_store_plugin(data_dir, &id_clone)
+                            .and_then(|_| {
+                                azdl::plugins::refresh_plugin_catalog(data_dir, &id_clone)
+                            });
+                        finish_install_task(
+                            &state_clone,
+                            &task_id_clone,
+                            result.err().map(|e| e.to_string()),
+                        );
                     })
                     .map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "started": true, "plugin": id }))
             }
-            "plugin-create" => {
-                let id = action.id.ok_or_else(|| "missing plugin ID".to_string())?;
-                azdl::validate_id(&id).map_err(|e| e.to_string())?;
-                let name = action.plugin_name.unwrap_or_else(|| id.clone());
-                let version = action.version.unwrap_or_else(|| "1.0.0".to_string());
-                let catalog_url = action.catalog_url.or(action.location);
-                let plugins_dir = data_dir.join("plugins").join(&id);
-                fs::create_dir_all(&plugins_dir).map_err(|e| e.to_string())?;
-                let manifest = json!({
-                    "id": id,
-                    "name": name,
-                    "version": version,
-                    "apiVersion": 4,
-                    "library": "",
-                    "catalogUrl": catalog_url
-                });
-                let manifest_path = plugins_dir.join("plugin.json");
-                fs::write(
-                    &manifest_path,
-                    serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
-                )
-                .map_err(|e| e.to_string())?;
-                if let Some(ref _url) = catalog_url {
-                    let _ = azdl::plugins::refresh_plugin_catalog(data_dir, &id);
-                }
-                Ok(json!({ "success": true, "plugin": id, "manifest": manifest }))
-            }
-            "settings-update" => {
-                let settings = action
-                    .settings
-                    .ok_or_else(|| "missing settings payload".to_string())?;
+            Action::SettingsUpdate { settings } => {
                 azdl::settings::save_settings(data_dir, &settings).map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "settings": settings }))
             }
-            "storage-add-drive" => {
-                let path_str = action
-                    .drive_path
-                    .or(action.location)
-                    .or(action.install_dir)
-                    .ok_or_else(|| "missing drive path".to_string())?;
-                let label = action.drive_label.or(action.title).unwrap_or_default();
+            Action::StorageAddDrive {
+                drive_path,
+                drive_label,
+            } => {
+                let label = drive_label.unwrap_or_default();
                 let drive =
-                    azdl::settings::add_storage_drive(data_dir, &label, Path::new(&path_str))
+                    azdl::settings::add_storage_drive(data_dir, &label, Path::new(&drive_path))
                         .map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "drive": drive }))
             }
-            "storage-remove-drive" => {
-                let drive_id = action
-                    .drive_id
-                    .or(action.id)
-                    .ok_or_else(|| "missing drive id".to_string())?;
+            Action::StorageRemoveDrive { drive_id } => {
                 azdl::settings::remove_storage_drive(data_dir, &drive_id)
                     .map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "removed": drive_id }))
             }
-            "storage-set-default" => {
-                let drive_id = action
-                    .drive_id
-                    .or(action.id)
-                    .ok_or_else(|| "missing drive id".to_string())?;
+            Action::StorageSetDefault { drive_id } => {
                 azdl::settings::set_default_drive(data_dir, &drive_id)
                     .map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "default": drive_id }))
             }
-            "storage-move-game" => {
-                let id = action.id.ok_or_else(|| "missing game ID".to_string())?;
-                let drive_id = action
-                    .drive_id
-                    .ok_or_else(|| "missing target drive ID".to_string())?;
+            Action::StorageMoveGame { id, drive_id } => {
                 let task_id = format!("move-{id}");
                 {
                     let mut tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
@@ -2579,27 +2637,30 @@ mod commands {
                     .name(format!("azdl-move-{id}"))
                     .spawn(move || {
                         let data_dir = &state_clone.data_dir;
-                        if let Ok(mut library) = load_library(data_dir)
-                            && let Ok(_new_path) = azdl::settings::move_game_to_drive(
+                        let result = (|| -> AzdlResult<()> {
+                            let mut library = load_library(data_dir)?;
+                            azdl::settings::move_game_to_drive(
                                 data_dir,
                                 &mut library,
                                 &id_clone,
                                 &drive_id_clone,
-                            )
-                        {
-                            let _ = save_library(data_dir, &library);
-                        }
+                            )?;
+                            save_library(data_dir, &library)?;
+                            Ok(())
+                        })();
                         if let Ok(mut cache) = state_clone.dir_size_cache.lock() {
                             cache.clear();
                         }
-                        if let Ok(mut tasks) = state_clone.tasks.lock() {
-                            tasks.retain(|t| t.id != task_id_clone);
-                        }
+                        finish_install_task(
+                            &state_clone,
+                            &task_id_clone,
+                            result.err().map(|e| e.to_string()),
+                        );
                     })
                     .map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "started": true, "id": id }))
             }
-            "scan-installed-games" => {
+            Action::ScanInstalledGames => {
                 let task_id = "scan-games".to_string();
                 {
                     let mut tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
@@ -2619,17 +2680,19 @@ mod commands {
                     .name("azdl-scan-games".into())
                     .spawn(move || {
                         let data_dir = &state_clone.data_dir;
-                        if let Ok(mut library) = load_library(data_dir) {
-                            let _ = azdl::settings::scan_drives_for_games(data_dir, &mut library);
-                        }
-                        if let Ok(mut tasks) = state_clone.tasks.lock() {
-                            tasks.retain(|t| t.id != task_id_clone);
-                        }
+                        let result = load_library(data_dir).and_then(|mut library| {
+                            azdl::settings::scan_drives_for_games(data_dir, &mut library)
+                        });
+                        finish_install_task(
+                            &state_clone,
+                            &task_id_clone,
+                            result.err().map(|e| e.to_string()),
+                        );
                     })
                     .map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "started": true }))
             }
-            "proton-download" => {
+            Action::ProtonDownload => {
                 let task_id = "download-proton-ge".to_string();
                 {
                     let mut tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
@@ -2654,15 +2717,17 @@ mod commands {
                 std::thread::Builder::new()
                     .name("azdl-dl-proton".into())
                     .spawn(move || {
-                        let _ = azdl::runtime::download_proton_ge(&state_clone.data_dir);
-                        if let Ok(mut tasks) = state_clone.tasks.lock() {
-                            tasks.retain(|t| t.id != task_id_clone);
-                        }
+                        let result = azdl::runtime::download_proton_ge(&state_clone.data_dir);
+                        finish_install_task(
+                            &state_clone,
+                            &task_id_clone,
+                            result.err().map(|e| e.to_string()),
+                        );
                     })
                     .map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "started": true }))
             }
-            "steam-shortcuts-sync" => {
+            Action::SteamShortcutsSync => {
                 let task_id = "sync-steam-shortcuts".to_string();
                 {
                     let mut tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
@@ -2698,8 +2763,7 @@ mod commands {
                     .map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "started": true }))
             }
-            "job-clear" => {
-                let id = action.id.ok_or_else(|| "missing job ID".to_string())?;
+            Action::JobClear { id } => {
                 let mut cleared = false;
                 if azdl::jobs::clear_job(data_dir, &id).is_ok() {
                     cleared = true;
@@ -2712,10 +2776,12 @@ mod commands {
                 if cleared {
                     Ok(json!({ "success": true, "cleared": id }))
                 } else {
-                    Err(format!("Job {id} not found or could not be cleared"))
+                    Err(LauncherError::general(format!(
+                        "Job {id} not found or could not be cleared"
+                    )))
                 }
             }
-            "job-clear-completed" => {
+            Action::JobClearCompleted => {
                 let mut count =
                     azdl::jobs::clear_completed_jobs(data_dir).map_err(|e| e.to_string())?;
                 if let Ok(jobs) = azdl::jobs::list_jobs(data_dir) {
@@ -2749,24 +2815,12 @@ mod commands {
                 }
                 Ok(json!({ "success": true, "cleared_count": count }))
             }
-            _ => Err(format!("Unimplemented or unknown action: {name}")),
         };
-        if res.is_ok()
-            && matches!(
-                name,
-                "plugin-install"
-                    | "plugin-store-add"
-                    | "plugin-store-refresh"
-                    | "plugin-store-install"
-                    | "plugin-remove"
-                    | "storage-add-drive"
-                    | "storage-remove-drive"
-                    | "scan-installed-games"
-            )
-            && let Ok(mut lock) = state.cached_catalog.lock()
-        {
-            *lock = None;
+
+        if res.is_ok() {
+            state.notify_state_changed();
         }
+
         res
     }
 
@@ -2774,11 +2828,11 @@ mod commands {
     pub async fn run_action(
         state: State<'_, AppState>,
         action: ActionRequest,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, LauncherError> {
         let state = state.inner().clone();
         tauri::async_runtime::spawn_blocking(move || handle_run_action(&state, action))
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| LauncherError::general(e.to_string()))?
     }
 
     #[tauri::command]
@@ -2968,14 +3022,47 @@ mod commands {
     }
 
     #[tauri::command]
-    pub fn is_steam_running() -> bool {
-        azdl::multiplayer::steam_running()
+    pub async fn get_game_dlc(state: State<'_, AppState>, id: String) -> Result<Value, String> {
+        let data_dir = state.data_dir.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let library = load_library(&data_dir).map_err(|e| e.to_string())?;
+            let game = library
+                .games
+                .get(&id)
+                .ok_or_else(|| format!("Game {id} not found"))?;
+            let installed =
+                azdl::dlc::list_installed(game, &data_dir).map_err(|e| e.to_string())?;
+            let mut available = azdl::dlc::available_for_game(game, &data_dir)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|addon| {
+                    json!({
+                        "id": addon.id,
+                        "title": addon.title,
+                        "content_available": addon.content_available,
+                        "installed": installed.contains(&addon.id),
+                    })
+                })
+                .collect::<Vec<_>>();
+            for dlc_id in &installed {
+                if !available.iter().any(|addon| addon["id"] == *dlc_id) {
+                    available.push(json!({
+                        "id": dlc_id,
+                        "title": dlc_id,
+                        "content_available": false,
+                        "installed": true,
+                    }));
+                }
+            }
+            Ok(json!({ "available": available, "installed": installed }))
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 
     #[tauri::command]
-    pub fn start_steam() -> Result<bool, String> {
-        azdl::steam::launch_steam().map_err(|e| e.to_string())?;
-        Ok(true)
+    pub fn is_steam_running() -> bool {
+        azdl::multiplayer::steam_running()
     }
 }
 
@@ -3186,6 +3273,7 @@ fn run_worker_install(
     title: Option<&str>,
     banner_url: Option<&str>,
     cover_url: Option<&str>,
+    location: Option<&str>,
 ) {
     let data_dir = match data_dir() {
         Ok(d) => d,
@@ -3215,7 +3303,14 @@ fn run_worker_install(
             std::process::exit(1);
         }
     };
-    let outcome = azdl::catalog::install_game(&mut library, &data_dir, &cat_game);
+    let games_root = match install_root_for(&data_dir, location) {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("Worker error: {error}");
+            std::process::exit(1);
+        }
+    };
+    let outcome = azdl::catalog::install_game_in(&mut library, &data_dir, &games_root, &cat_game);
     match outcome {
         Ok(azdl::catalog::InstallOutcome::Installed(inst_id)) => {
             if let Ok(mut fresh_library) = azdl::load_library(&data_dir) {
@@ -3254,6 +3349,7 @@ fn main() {
             args.get(4).map(String::as_str),
             args.get(5).map(String::as_str),
             args.get(6).map(String::as_str),
+            args.get(7).map(String::as_str),
         );
         return;
     }
@@ -3271,7 +3367,6 @@ fn main() {
         running_games: Arc::new(Mutex::new(HashMap::new())),
         tasks: Arc::new(Mutex::new(Vec::new())),
         mutating: Arc::new(AtomicBool::new(false)),
-        cached_catalog: Arc::new(Mutex::new(None)),
         cached_diagnostics: Arc::new(Mutex::new(None)),
         library_cache: Arc::new(Mutex::new(None)),
         dir_size_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -3279,6 +3374,7 @@ fn main() {
         fix_status_cache: Arc::new(Mutex::new(HashMap::new())),
         metadata_cache: Arc::new(Mutex::new(metadata_cache)),
         metadata_pending: Arc::new(Mutex::new(HashSet::new())),
+        app_handle: Arc::new(Mutex::new(None)),
     };
 
     tauri::Builder::default()
@@ -3359,6 +3455,10 @@ fn main() {
         .manage(state)
         .setup(|app| {
             use tauri::Manager;
+            let state = app.state::<AppState>();
+            if let Ok(mut handle) = state.app_handle.lock() {
+                *handle = Some(app.handle().clone());
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let icon_bytes = include_bytes!("../icons/icon.png");
                 if let Ok(icon) = tauri::image::Image::from_bytes(icon_bytes) {
@@ -3372,6 +3472,7 @@ fn main() {
             commands::get_state,
             commands::get_runners,
             commands::get_steam_details,
+            commands::get_game_dlc,
             commands::search_steam_games,
             commands::resolve_game_artwork,
             commands::diagnose,
@@ -3385,7 +3486,6 @@ fn main() {
             commands::window_toggle_maximize,
             commands::window_close,
             commands::is_steam_running,
-            commands::start_steam,
         ])
         .run(tauri::generate_context!())
         .expect("error while running azdl tauri application");
@@ -3472,7 +3572,6 @@ mod tests {
             running_games: Arc::new(Mutex::new(HashMap::new())),
             tasks: Arc::new(Mutex::new(Vec::new())),
             mutating: Arc::new(AtomicBool::new(false)),
-            cached_catalog: Arc::new(Mutex::new(None)),
             cached_diagnostics: Arc::new(Mutex::new(None)),
             library_cache: Arc::new(Mutex::new(None)),
             dir_size_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -3480,6 +3579,7 @@ mod tests {
             fix_status_cache: Arc::new(Mutex::new(HashMap::new())),
             metadata_cache: Arc::new(Mutex::new(HashMap::new())),
             metadata_pending: Arc::new(Mutex::new(HashSet::new())),
+            app_handle: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -3667,16 +3767,55 @@ mod tests {
     fn test_action_request_deserialization() {
         let json = r#"{"action":"steam-install","id":"steam:620","banner_url":"https://cdn.example/header.jpg","cover_url":"https://cdn.example/cover.jpg"}"#;
         let req: ActionRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.action, "steam-install");
-        assert_eq!(req.id.as_deref(), Some("steam:620"));
-        assert_eq!(
-            req.banner_url.as_deref(),
-            Some("https://cdn.example/header.jpg")
-        );
-        assert_eq!(
-            req.cover_url.as_deref(),
-            Some("https://cdn.example/cover.jpg")
-        );
+        match req {
+            Action::SteamInstall {
+                id,
+                banner_url,
+                cover_url,
+                ..
+            } => {
+                assert_eq!(id, "steam:620");
+                assert_eq!(
+                    banner_url.as_deref(),
+                    Some("https://cdn.example/header.jpg")
+                );
+                assert_eq!(cover_url.as_deref(), Some("https://cdn.example/cover.jpg"));
+            }
+            _ => panic!("Expected SteamInstall variant"),
+        }
+
+        // Test StorageAddDrive with alias "install_dir" and "title"
+        let json_drive =
+            r#"{"action":"storage-add-drive","install_dir":"/mnt/fast","title":"Fast NVMe"}"#;
+        let req_drive: ActionRequest = serde_json::from_str(json_drive).unwrap();
+        match req_drive {
+            Action::StorageAddDrive {
+                drive_path,
+                drive_label,
+            } => {
+                assert_eq!(drive_path, "/mnt/fast");
+                assert_eq!(drive_label.as_deref(), Some("Fast NVMe"));
+            }
+            _ => panic!("Expected StorageAddDrive variant"),
+        }
+
+        // Test StorageRemoveDrive with alias "id"
+        let json_remove = r#"{"action":"storage-remove-drive","id":"drive-1"}"#;
+        let req_remove: ActionRequest = serde_json::from_str(json_remove).unwrap();
+        match req_remove {
+            Action::StorageRemoveDrive { drive_id } => {
+                assert_eq!(drive_id, "drive-1");
+            }
+            _ => panic!("Expected StorageRemoveDrive variant"),
+        }
+
+        // Test unknown action fails deserialization at compile/serde level
+        let json_unknown = r#"{"action":"nonexistent-action","id":"123"}"#;
+        assert!(serde_json::from_str::<ActionRequest>(json_unknown).is_err());
+
+        // Test missing required field fails deserialization
+        let json_missing = r#"{"action":"runner-set","id":"game-1"}"#;
+        assert!(serde_json::from_str::<ActionRequest>(json_missing).is_err());
     }
 
     #[test]
@@ -3741,26 +3880,11 @@ mod tests {
         fs::write(game_dir.join("game.bin"), b"test").unwrap();
 
         // 1. Import game
-        let import_req = ActionRequest {
-            action: "game-import".into(),
-            id: Some("test-game".into()),
-            title: Some("My Test Game".into()),
-            install_dir: Some(game_dir.to_string_lossy().into()),
+        let import_req = Action::GameImport {
+            id: "test-game".into(),
+            title: "My Test Game".into(),
+            install_dir: game_dir.to_string_lossy().into(),
             executable: Some("game.bin".into()),
-            destination: None,
-            sha256: None,
-            install_kind: None,
-            patch_kind: None,
-            patch_root: None,
-            location: None,
-            addon_id: None,
-            option_id: None,
-            working_directory: None,
-            runner: None,
-            arguments: None,
-            key: None,
-            value: None,
-            ..Default::default()
         };
         let res = handle_run_action(&state, import_req).unwrap();
         assert_eq!(res["imported"], "test-game");
@@ -3773,26 +3897,8 @@ mod tests {
         assert_eq!(lib[0]["title"], "My Test Game");
 
         // 2. Remove game
-        let remove_req = ActionRequest {
-            action: "game-remove".into(),
-            id: Some("test-game".into()),
-            title: None,
-            install_dir: None,
-            executable: None,
-            destination: None,
-            sha256: None,
-            install_kind: None,
-            patch_kind: None,
-            patch_root: None,
-            location: None,
-            addon_id: None,
-            option_id: None,
-            working_directory: None,
-            runner: None,
-            arguments: None,
-            key: None,
-            value: None,
-            ..Default::default()
+        let remove_req = Action::GameRemove {
+            id: "test-game".into(),
         };
         let res_rem = handle_run_action(&state, remove_req).unwrap();
         assert_eq!(res_rem["removed"], "test-game");
@@ -3811,74 +3917,25 @@ mod tests {
         fs::write(game_dir.join("game.exe"), b"test").unwrap();
         fs::write(game_dir.join("game2.exe"), b"test2").unwrap();
 
-        let import_req = ActionRequest {
-            action: "game-import".into(),
-            id: Some("runner-game".into()),
-            title: Some("Runner Game".into()),
-            install_dir: Some(game_dir.to_string_lossy().into()),
+        let import_req = Action::GameImport {
+            id: "runner-game".into(),
+            title: "Runner Game".into(),
+            install_dir: game_dir.to_string_lossy().into(),
             executable: Some("game.exe".into()),
-            destination: None,
-            sha256: None,
-            install_kind: None,
-            patch_kind: None,
-            patch_root: None,
-            location: None,
-            addon_id: None,
-            option_id: None,
-            working_directory: None,
-            runner: None,
-            arguments: None,
-            key: None,
-            value: None,
-            ..Default::default()
         };
         handle_run_action(&state, import_req).unwrap();
 
         // Change runner to wine
-        let runner_req = ActionRequest {
-            action: "runner-set".into(),
-            id: Some("runner-game".into()),
-            runner: Some("wine".into()),
-            title: None,
-            install_dir: None,
-            executable: None,
-            destination: None,
-            sha256: None,
-            install_kind: None,
-            patch_kind: None,
-            patch_root: None,
-            location: None,
-            addon_id: None,
-            option_id: None,
-            working_directory: None,
-            arguments: None,
-            key: None,
-            value: None,
-            ..Default::default()
+        let runner_req = Action::RunnerSet {
+            id: "runner-game".into(),
+            runner: "wine".into(),
         };
         handle_run_action(&state, runner_req).unwrap();
 
         // Change executable to game2.exe
-        let exe_req = ActionRequest {
-            action: "executable-set".into(),
-            id: Some("runner-game".into()),
-            executable: Some("game2.exe".into()),
-            title: None,
-            install_dir: None,
-            destination: None,
-            sha256: None,
-            install_kind: None,
-            patch_kind: None,
-            patch_root: None,
-            location: None,
-            addon_id: None,
-            option_id: None,
-            working_directory: None,
-            runner: None,
-            arguments: None,
-            key: None,
-            value: None,
-            ..Default::default()
+        let exe_req = Action::ExecutableSet {
+            id: "runner-game".into(),
+            executable: "game2.exe".into(),
         };
         handle_run_action(&state, exe_req).unwrap();
 
@@ -3898,26 +3955,11 @@ mod tests {
 
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "game-import".into(),
-                id: Some("args-env-game".into()),
-                title: Some("Args Env Game".into()),
-                install_dir: Some(game_dir.to_string_lossy().into()),
+            Action::GameImport {
+                id: "args-env-game".into(),
+                title: "Args Env Game".into(),
+                install_dir: game_dir.to_string_lossy().into(),
                 executable: Some("main.bin".into()),
-                destination: None,
-                sha256: None,
-                install_kind: None,
-                patch_kind: None,
-                patch_root: None,
-                location: None,
-                addon_id: None,
-                option_id: None,
-                working_directory: None,
-                runner: None,
-                arguments: None,
-                key: None,
-                value: None,
-                ..Default::default()
             },
         )
         .unwrap();
@@ -3925,26 +3967,9 @@ mod tests {
         // Set launch arguments
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "args-set".into(),
-                id: Some("args-env-game".into()),
+            Action::ArgsSet {
+                id: "args-env-game".into(),
                 arguments: Some(vec!["--fullscreen".into(), "-v".into()]),
-                title: None,
-                install_dir: None,
-                executable: None,
-                destination: None,
-                sha256: None,
-                install_kind: None,
-                patch_kind: None,
-                patch_root: None,
-                location: None,
-                addon_id: None,
-                option_id: None,
-                working_directory: None,
-                runner: None,
-                key: None,
-                value: None,
-                ..Default::default()
             },
         )
         .unwrap();
@@ -3952,26 +3977,10 @@ mod tests {
         // Set env variable
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "env-set".into(),
-                id: Some("args-env-game".into()),
-                key: Some("DXVK_HUD".into()),
+            Action::EnvSet {
+                id: "args-env-game".into(),
+                key: "DXVK_HUD".into(),
                 value: Some("fps".into()),
-                title: None,
-                install_dir: None,
-                executable: None,
-                destination: None,
-                sha256: None,
-                install_kind: None,
-                patch_kind: None,
-                patch_root: None,
-                location: None,
-                addon_id: None,
-                option_id: None,
-                working_directory: None,
-                runner: None,
-                arguments: None,
-                ..Default::default()
             },
         )
         .unwrap();
@@ -3984,26 +3993,9 @@ mod tests {
         // Remove env variable
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "env-remove".into(),
-                id: Some("args-env-game".into()),
-                key: Some("DXVK_HUD".into()),
-                title: None,
-                install_dir: None,
-                executable: None,
-                destination: None,
-                sha256: None,
-                install_kind: None,
-                patch_kind: None,
-                patch_root: None,
-                location: None,
-                addon_id: None,
-                option_id: None,
-                working_directory: None,
-                runner: None,
-                arguments: None,
-                value: None,
-                ..Default::default()
+            Action::EnvRemove {
+                id: "args-env-game".into(),
+                key: "DXVK_HUD".into(),
             },
         )
         .unwrap();
@@ -4023,26 +4015,11 @@ mod tests {
 
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "game-import".into(),
-                id: Some("opt-game".into()),
-                title: Some("Option Game".into()),
-                install_dir: Some(game_dir.to_string_lossy().into()),
+            Action::GameImport {
+                id: "opt-game".into(),
+                title: "Option Game".into(),
+                install_dir: game_dir.to_string_lossy().into(),
                 executable: Some("game.exe".into()),
-                destination: None,
-                sha256: None,
-                install_kind: None,
-                patch_kind: None,
-                patch_root: None,
-                location: None,
-                addon_id: None,
-                option_id: None,
-                working_directory: None,
-                runner: None,
-                arguments: None,
-                key: None,
-                value: None,
-                ..Default::default()
             },
         )
         .unwrap();
@@ -4050,26 +4027,13 @@ mod tests {
         // Add launch option
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "option-add".into(),
-                id: Some("opt-game".into()),
-                option_id: Some("mp".into()),
-                title: Some("Multiplayer".into()),
-                executable: Some("mp.exe".into()),
+            Action::OptionAdd {
+                id: "opt-game".into(),
+                option_id: "mp".into(),
+                title: "Multiplayer".into(),
+                executable: "mp.exe".into(),
                 working_directory: None,
                 arguments: Some(vec!["--mp".into()]),
-                destination: None,
-                sha256: None,
-                install_kind: None,
-                patch_kind: None,
-                patch_root: None,
-                location: None,
-                addon_id: None,
-                runner: None,
-                key: None,
-                value: None,
-                install_dir: None,
-                ..Default::default()
             },
         )
         .unwrap();
@@ -4077,26 +4041,9 @@ mod tests {
         // Select launch option
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "option-select".into(),
-                id: Some("opt-game".into()),
-                option_id: Some("mp".into()),
-                title: None,
-                executable: None,
-                working_directory: None,
-                arguments: None,
-                destination: None,
-                sha256: None,
-                install_kind: None,
-                patch_kind: None,
-                patch_root: None,
-                location: None,
-                addon_id: None,
-                runner: None,
-                key: None,
-                value: None,
-                install_dir: None,
-                ..Default::default()
+            Action::OptionSelect {
+                id: "opt-game".into(),
+                option_id: "mp".into(),
             },
         )
         .unwrap();
@@ -4107,26 +4054,9 @@ mod tests {
         // Remove launch option
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "option-remove".into(),
-                id: Some("opt-game".into()),
-                option_id: Some("mp".into()),
-                title: None,
-                executable: None,
-                working_directory: None,
-                arguments: None,
-                destination: None,
-                sha256: None,
-                install_kind: None,
-                patch_kind: None,
-                patch_root: None,
-                location: None,
-                addon_id: None,
-                runner: None,
-                key: None,
-                value: None,
-                install_dir: None,
-                ..Default::default()
+            Action::OptionRemove {
+                id: "opt-game".into(),
+                option_id: "mp".into(),
             },
         )
         .unwrap();
@@ -4163,13 +4093,12 @@ mod tests {
         // Register it via pending-add (omitting title defaults to id)
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "pending-add".into(),
-                id: Some("unregistered".into()),
+            Action::PendingAdd {
+                id: "unregistered".into(),
                 title: None, // defaults to "unregistered"
-                install_dir: Some(pending_dir.to_string_lossy().into()),
-                executable: Some("app.exe".into()),
-                ..Default::default()
+                install_dir: pending_dir.to_string_lossy().into(),
+                executable: "app.exe".into(),
+                install_kind: None,
             },
         )
         .unwrap();
@@ -4196,11 +4125,9 @@ mod tests {
         // Remove via pending-remove
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "pending-remove".into(),
-                id: Some("to-delete".into()),
+            Action::PendingRemove {
+                id: "to-delete".into(),
                 install_dir: Some(pending_dir.to_string_lossy().into()),
-                ..Default::default()
             },
         )
         .unwrap();
@@ -4220,26 +4147,11 @@ mod tests {
 
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "game-import".into(),
-                id: Some("diag-game".into()),
-                title: Some("Diag Game".into()),
-                install_dir: Some(game_dir.to_string_lossy().into()),
+            Action::GameImport {
+                id: "diag-game".into(),
+                title: "Diag Game".into(),
+                install_dir: game_dir.to_string_lossy().into(),
                 executable: Some("main.exe".into()),
-                destination: None,
-                sha256: None,
-                install_kind: None,
-                patch_kind: None,
-                patch_root: None,
-                location: None,
-                addon_id: None,
-                option_id: None,
-                working_directory: None,
-                runner: None,
-                arguments: None,
-                key: None,
-                value: None,
-                ..Default::default()
             },
         )
         .unwrap();
@@ -4344,26 +4256,11 @@ mod tests {
 
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "game-import".into(),
-                id: Some("fix-game".into()),
-                title: Some("Fix Game".into()),
-                install_dir: Some(game_dir.to_string_lossy().into()),
+            Action::GameImport {
+                id: "fix-game".into(),
+                title: "Fix Game".into(),
+                install_dir: game_dir.to_string_lossy().into(),
                 executable: Some("game.exe".into()),
-                destination: None,
-                sha256: None,
-                install_kind: None,
-                patch_kind: None,
-                patch_root: None,
-                location: None,
-                addon_id: None,
-                option_id: None,
-                working_directory: None,
-                runner: None,
-                arguments: None,
-                key: None,
-                value: None,
-                ..Default::default()
             },
         )
         .unwrap();
@@ -4371,26 +4268,8 @@ mod tests {
         // Toggle overlay: disables OnlineFix64.dll -> OnlineFix64.dll.arachnel-off
         let res = handle_run_action(
             &state,
-            ActionRequest {
-                action: "overlay-toggle".into(),
-                id: Some("fix-game".into()),
-                title: None,
-                install_dir: None,
-                executable: None,
-                destination: None,
-                sha256: None,
-                install_kind: None,
-                patch_kind: None,
-                patch_root: None,
-                location: None,
-                addon_id: None,
-                option_id: None,
-                working_directory: None,
-                runner: None,
-                arguments: None,
-                key: None,
-                value: None,
-                ..Default::default()
+            Action::OverlayToggle {
+                id: "fix-game".into(),
             },
         )
         .unwrap();
@@ -4400,31 +4279,83 @@ mod tests {
         // Toggle back: re-enables
         let res2 = handle_run_action(
             &state,
-            ActionRequest {
-                action: "overlay-toggle".into(),
-                id: Some("fix-game".into()),
-                title: None,
-                install_dir: None,
-                executable: None,
-                destination: None,
-                sha256: None,
-                install_kind: None,
-                patch_kind: None,
-                patch_root: None,
-                location: None,
-                addon_id: None,
-                option_id: None,
-                working_directory: None,
-                runner: None,
-                arguments: None,
-                key: None,
-                value: None,
-                ..Default::default()
+            Action::OverlayToggle {
+                id: "fix-game".into(),
             },
         )
         .unwrap();
         assert_eq!(res2["enabled"], true);
         assert!(game_dir.join("OnlineFix64.dll").exists());
+    }
+
+    #[test]
+    fn test_handle_run_action_steamstub_unpack_and_rollback() {
+        let root = scratch();
+        let state = test_state(&root);
+        let game_dir = root.join("stub-game");
+        fs::create_dir_all(&game_dir).unwrap();
+
+        let exe_path = game_dir.join("game.exe");
+        let mut data = vec![0u8; 512];
+        data[0] = b'M';
+        data[1] = b'Z';
+        data[0x3C] = 0x80;
+        data[128] = b'P';
+        data[129] = b'E';
+        data[130] = 0;
+        data[131] = 0;
+        data[134] = 1;
+        data[148] = 0;
+        for (i, b) in b".bind\0\0\0".iter().enumerate() {
+            data[152 + i] = *b;
+        }
+        fs::write(&exe_path, &data).unwrap();
+
+        handle_run_action(
+            &state,
+            Action::GameImport {
+                id: "stub-game".into(),
+                title: "Stub Game".into(),
+                install_dir: game_dir.to_string_lossy().into(),
+                executable: Some("game.exe".into()),
+            },
+        )
+        .unwrap();
+
+        let lib_state = handle_get_state(&state).unwrap();
+        assert_eq!(lib_state["library"][0]["steamstub"]["stub_present"], true);
+        assert_eq!(lib_state["library"][0]["steamstub"]["applied"], false);
+
+        // Simulate unpack by creating backup and clean exe
+        let backup_path = game_dir.join("game.exe.steamstub.bak");
+        fs::copy(&exe_path, &backup_path).unwrap();
+        let mut clean_data = data.clone();
+        for (i, b) in b".text\0\0\0".iter().enumerate() {
+            clean_data[152 + i] = *b;
+        }
+        fs::write(&exe_path, &clean_data).unwrap();
+
+        let res_rollback = handle_run_action(
+            &state,
+            Action::SteamstubRollback {
+                id: "stub-game".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(res_rollback["success"], true);
+        assert_eq!(res_rollback["restored_count"], 1);
+        assert_eq!(res_rollback["steamstub"]["stub_present"], true);
+        assert_eq!(res_rollback["steamstub"]["applied"], false);
+
+        let cached_status = {
+            let cache = state.steamstub_cache.lock().unwrap();
+            cache.get("stub-game").map(|(s, _)| s.clone()).unwrap()
+        };
+        assert!(cached_status.stub_present);
+        assert!(!cached_status.applied);
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4454,26 +4385,11 @@ mod tests {
 
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "game-import".into(),
-                id: Some("proc-game".into()),
-                title: Some("Proc Game".into()),
-                install_dir: Some(game_dir.to_string_lossy().into()),
+            Action::GameImport {
+                id: "proc-game".into(),
+                title: "Proc Game".into(),
+                install_dir: game_dir.to_string_lossy().into(),
                 executable: Some(exe_name.into()),
-                destination: None,
-                sha256: None,
-                install_kind: None,
-                patch_kind: None,
-                patch_root: None,
-                location: None,
-                addon_id: None,
-                option_id: None,
-                working_directory: None,
-                runner: None,
-                arguments: None,
-                key: None,
-                value: None,
-                ..Default::default()
             },
         )
         .unwrap();
@@ -4510,23 +4426,33 @@ mod tests {
         // 1. Add storage drive
         let add_res = handle_run_action(
             &state,
-            ActionRequest {
-                action: "storage-add-drive".into(),
+            Action::StorageAddDrive {
                 drive_label: Some("External SSD".into()),
-                drive_path: Some(custom_drive.to_string_lossy().into()),
-                ..Default::default()
+                drive_path: custom_drive.to_string_lossy().into(),
             },
         )
         .unwrap();
         let drive_id = add_res["drive"]["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            install_root_for(&root, Some(&drive_id)).unwrap(),
+            custom_drive
+        );
+        assert!(install_root_for(&root, Some("unconfigured-drive")).is_err());
+        fs::create_dir_all(custom_drive.join("unfinished-game")).unwrap();
+        let pending_state = handle_get_state(&state).unwrap();
+        assert!(
+            pending_state["pending"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == "unfinished-game")
+        );
 
         // 2. Set default drive
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "storage-set-default".into(),
-                drive_id: Some(drive_id.clone()),
-                ..Default::default()
+            Action::StorageSetDefault {
+                drive_id: drive_id.clone(),
             },
         )
         .unwrap();
@@ -4546,10 +4472,8 @@ mod tests {
 
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "settings-update".into(),
-                settings: Some(new_settings),
-                ..Default::default()
+            Action::SettingsUpdate {
+                settings: new_settings,
             },
         )
         .unwrap();
@@ -4561,10 +4485,8 @@ mod tests {
         // 4. Remove storage drive
         handle_run_action(
             &state,
-            ActionRequest {
-                action: "storage-remove-drive".into(),
-                drive_id: Some(drive_id.clone()),
-                ..Default::default()
+            Action::StorageRemoveDrive {
+                drive_id: drive_id.clone(),
             },
         )
         .unwrap();
@@ -4575,18 +4497,62 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_source_actions_are_not_exposed() {
+    fn favorite_plugin_persists_and_is_cleared_on_removal() {
         let root = scratch();
+        let plugin = root.join("plugins/provider-a");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(
+            plugin.join("plugin.json"),
+            br#"{"id":"provider-a","name":"Provider A","version":"1","apiVersion":4,"library":"provider.so"}"#,
+        )
+        .unwrap();
         let state = test_state(&root);
-        let result = handle_run_action(
+        handle_run_action(
             &state,
-            ActionRequest {
-                action: "source-add".into(),
-                id: Some("old-feed".into()),
-                location: Some("/tmp/old-feed.json".into()),
-                ..Default::default()
+            Action::PluginFavoriteSet {
+                id: Some("provider-a".into()),
             },
+        )
+        .unwrap();
+        assert_eq!(
+            azdl::settings::load_settings(&root)
+                .unwrap()
+                .favorite_plugin_id
+                .as_deref(),
+            Some("provider-a")
         );
+        assert!(
+            handle_run_action(
+                &state,
+                Action::PluginFavoriteSet {
+                    id: Some("missing".into()),
+                },
+            )
+            .is_err()
+        );
+        handle_run_action(
+            &state,
+            Action::PluginRemove {
+                id: "provider-a".into(),
+            },
+        )
+        .unwrap();
+        assert!(
+            azdl::settings::load_settings(&root)
+                .unwrap()
+                .favorite_plugin_id
+                .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn test_legacy_source_actions_are_not_exposed() {
+        let result: Result<Action, _> = serde_json::from_value(serde_json::json!({
+            "action": "source-add",
+            "id": "old-feed",
+            "location": "/tmp/old-feed.json"
+        }));
         assert!(result.is_err());
     }
 
@@ -4625,10 +4591,9 @@ mod tests {
         // 1. Direct location
         let res = handle_run_action(
             &state,
-            ActionRequest {
-                action: "open-folder".into(),
+            Action::OpenFolder {
+                id: None,
                 location: Some(game_dir.display().to_string()),
-                ..Default::default()
             },
         )
         .unwrap();
@@ -4637,10 +4602,9 @@ mod tests {
         // 2. Missing path returns error
         let err = handle_run_action(
             &state,
-            ActionRequest {
-                action: "open-folder".into(),
+            Action::OpenFolder {
+                id: None,
                 location: Some(temp.join("NonExistent").display().to_string()),
-                ..Default::default()
             },
         );
         assert!(err.is_err());
@@ -4758,14 +4722,7 @@ mod tests {
         );
 
         // Clear completed/failed transfers
-        let clear_res = handle_run_action(
-            &state,
-            ActionRequest {
-                action: "job-clear-completed".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let clear_res = handle_run_action(&state, Action::JobClearCompleted).unwrap();
         assert_eq!(clear_res["success"], true);
 
         // Failed job is cleared from disk
@@ -4792,12 +4749,13 @@ mod tests {
         let start_time = std::time::Instant::now();
         let res = handle_run_action(
             &state,
-            ActionRequest {
-                action: "steam-install".into(),
-                id: Some("steam:620".into()),
+            Action::SteamInstall {
+                id: "steam:620".into(),
                 title: Some("Portal 2".into()),
                 plugin_id: Some("steamidra".into()),
-                ..Default::default()
+                banner_url: None,
+                cover_url: None,
+                location: None,
             },
         )
         .unwrap();
@@ -4823,12 +4781,13 @@ mod tests {
         });
         let duplicate = handle_run_action(
             &state,
-            ActionRequest {
-                action: "steam-install".into(),
-                id: Some("steam:480".into()),
+            Action::SteamInstall {
+                id: "steam:480".into(),
                 title: Some("Spacewar".into()),
                 plugin_id: Some("steamidra".into()),
-                ..Default::default()
+                banner_url: None,
+                cover_url: None,
+                location: None,
             },
         )
         .unwrap();
