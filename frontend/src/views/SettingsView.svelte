@@ -16,6 +16,7 @@
     refreshPluginStore,
     installStorePlugin,
     removePlugin,
+    setFavoritePlugin,
     downloadProtonGE,
     openGameFolder,
   } from '../api.js';
@@ -365,6 +366,16 @@
     });
   }
 
+  async function handleFavoritePlugin(id) {
+    try {
+      await setFavoritePlugin(id);
+      if (onRefresh) await onRefresh();
+      notify.success(id ? 'Favorite download plugin updated.' : 'Favorite download plugin cleared.');
+    } catch (e) {
+      notify.error(`Could not update favorite plugin: ${e}`);
+    }
+  }
+
   async function handleMoveIndividualGame(gameId, targetDriveId) {
     if (!gameId || !targetDriveId || movingGameId) return;
     movingGameId = gameId;
@@ -688,6 +699,9 @@
                 <div class="plugin-badges">
                   {#if isInstalled}
                     <span class="badge installed-badge">Installed</span>
+                    {#if settings?.favorite_plugin_id === p.id}
+                      <span class="badge recommended-badge">Favorite</span>
+                    {/if}
                   {/if}
                   {#if p.recommended}
                     <span class="badge recommended-badge">Recommended</span>
@@ -701,6 +715,13 @@
                 </span>
                 <div class="card-action-group">
                   {#if isInstalled}
+                    <button
+                      class="md3-btn tonal small"
+                      onclick={() => handleFavoritePlugin(settings?.favorite_plugin_id === p.id ? null : p.id)}
+                      aria-pressed={settings?.favorite_plugin_id === p.id}
+                    >
+                      {settings?.favorite_plugin_id === p.id ? 'Unfavorite' : 'Favorite'}
+                    </button>
                     <button
                       class="md3-btn danger small"
                       onclick={() => requestUninstallPlugin(p.id, p.name)}

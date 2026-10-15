@@ -13,10 +13,11 @@
     discoverExecutables,
     scanSetup,
     getSteamDetails,
+    getGameDlc,
     moveGameToDrive,
     openGameFolder,
   } from '../api.js';
-  import { notify } from '../notifications.js';
+  import { notify, notifyError } from '../notifications.js';
   import Modal from '../components/Modal.svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import {
@@ -67,6 +68,59 @@
   });
 
   let isInstalled = $derived(!!installedRecord);
+  let dlcInfo = $state({ available: [], installed: [] });
+  let dlcPending = $state('');
+  let dlcToRemove = $state(null);
+
+  async function refreshDlc(id) {
+    try {
+      const info = await getGameDlc(id);
+      if (installedRecord?.id === id) dlcInfo = info;
+    } catch (error) {
+      if (installedRecord?.id === id) {
+        dlcInfo = { available: [], installed: [] };
+        notifyError(error);
+      }
+    }
+  }
+
+  $effect(() => {
+    const id = installedRecord?.id;
+    if (id) refreshDlc(id);
+    else dlcInfo = { available: [], installed: [] };
+  });
+
+  async function installDlc(addon) {
+    if (!installedRecord || dlcPending) return;
+    dlcPending = addon.id;
+    try {
+      await runAction({ action: 'dlc-install', id: installedRecord.id, dlc_id: addon.id });
+      notify.success(`${addon.title} installed`);
+      await refreshDlc(installedRecord.id);
+      onRefresh?.();
+    } catch (error) {
+      notifyError(error);
+    } finally {
+      dlcPending = '';
+    }
+  }
+
+  async function removeDlc() {
+    if (!installedRecord || !dlcToRemove || dlcPending) return;
+    const addon = dlcToRemove;
+    dlcPending = addon.id;
+    try {
+      await runAction({ action: 'dlc-remove', id: installedRecord.id, dlc_id: addon.id });
+      notify.success(`${addon.title} removed`);
+      await refreshDlc(installedRecord.id);
+      onRefresh?.();
+    } catch (error) {
+      notifyError(error);
+    } finally {
+      dlcPending = '';
+      dlcToRemove = null;
+    }
+  }
 
   // Active download/install job for this game
   let activeJob = $derived.by(() => {
@@ -218,6 +272,10 @@
 
   // Steam store metadata (screenshots, videos, detailed description)
   let steamData = $state(null);
+  function steamDescriptionText(html) {
+    if (typeof DOMParser === 'undefined') return String(html).replace(/<[^>]*>/g, ' ');
+    return new DOMParser().parseFromString(html, 'text/html').body.textContent || '';
+  }
   let loadingSteam = $state(false);
   let selectedMediaIndex = $state(0);
 
@@ -228,7 +286,9 @@
 
   $effect(() => {
     if (plugins.length > 0 && !plugins.some((plugin) => plugin.id === selectedPluginId)) {
-      selectedPluginId = plugins[0].id;
+      const favoriteId = settings?.favorite_plugin_id;
+      selectedPluginId = plugins.find((plugin) => plugin.id === favoriteId)?.id
+        || (plugins.length === 1 ? plugins[0].id : '');
     }
   });
 
@@ -255,6 +315,28 @@
 
   // Sub-tabs for installed game management
   let activeDetailTab = $state('overview'); // 'overview' | 'patches' | 'config' | 'diagnostics'
+
+  // Optimistic / reactive SteamStub DRM state
+  let localSteamStub = $state(null);
+  let pendingAction = $state(null);
+  let effectiveSteamStub = $derived(localSteamStub || installedRecord?.steamstub);
+
+  $effect(() => {
+    // Reset local optimistic override when switching games
+    const _ = game?.id;
+    localSteamStub = null;
+  });
+
+  $effect(() => {
+    if (installedRecord?.steamstub && localSteamStub) {
+      if (
+        installedRecord.steamstub.applied === localSteamStub.applied &&
+        installedRecord.steamstub.stub_present === localSteamStub.stub_present
+      ) {
+        localSteamStub = null;
+      }
+    }
+  });
 
   // Scroll and header translucency state
   let isScrolled = $state(false);
@@ -511,12 +593,17 @@
 
   async function handleStartInstall() {
     if (isInstalling || activeJob) return;
-    const defaultPluginId = selectedPluginId || plugins[0]?.id;
+    const defaultPluginId = selectedPluginId;
     if (game.source_id === 'steam' && (!defaultPluginId || plugins.length === 0)) {
-      if (onOpenPlugins) {
-        onOpenPlugins();
-      }
-      notify.error('Install a download plugin from Settings first.');
+      notifyError(
+        {
+          code: 'no_plugin_available',
+          message: plugins.length ? 'Choose a download plugin for this game.' : 'Install a download plugin from Settings first.',
+        },
+        {
+          onOpenSettings: () => onOpenPlugins?.('plugins'),
+        }
+      );
       return;
     }
     isInstalling = true;
@@ -533,7 +620,7 @@
         banner_url: game.banner_url || game.header_image || game.large_capsule_image || null,
         cover_url: game.cover_url || null,
         plugin_id: game.source_id === 'steam' ? defaultPluginId : undefined,
-        location: targetDrive?.path || undefined,
+        location: targetDrive?.id || undefined,
       });
 
       if (res && res.already_working) {
@@ -541,6 +628,9 @@
       }
       if (onRefresh) onRefresh();
     } catch (err) {
+      notifyError(err, {
+        onOpenSettings: (cat) => onOpenPlugins?.(cat || 'plugins'),
+      });
       setBanner('error', `Installation error: ${err}`);
     } finally {
       isInstalling = false;
@@ -548,14 +638,24 @@
   }
 
   async function handleAction(actionPayload, successMsg) {
-    if (!installedRecord) return;
+    if (!installedRecord || pendingAction) return;
+    pendingAction = actionPayload.action;
     try {
-      await runAction({ id: installedRecord.id, ...actionPayload });
+      const res = await runAction({ id: installedRecord.id, ...actionPayload });
+      if (res?.steamstub) {
+        localSteamStub = res.steamstub;
+      }
       setBanner('success', successMsg);
-      if (onRefresh) onRefresh();
+      if (onRefresh) await onRefresh();
       await refreshDiagnostics();
     } catch (err) {
+      notifyError(err, {
+        onOpenSettings: (cat) => onOpenPlugins?.(cat),
+        onConfigureExecutable: () => (showExePicker = true),
+      });
       setBanner('error', String(err));
+    } finally {
+      pendingAction = null;
     }
   }
 
@@ -777,6 +877,7 @@
                   {#if plugins.length > 0}
                     <label for="game-plugin-select" class="drive-label">Download Plugin:</label>
                     <select id="game-plugin-select" class="md3-select" bind:value={selectedPluginId}>
+                      {#if !selectedPluginId}<option value="">Choose a plugin</option>{/if}
                       {#each plugins as plugin}
                         <option value={plugin.id}>{plugin.name}</option>
                       {/each}
@@ -936,8 +1037,7 @@
             <h3 class="section-heading">About This Game</h3>
             <div class="game-description-body">
               {#if steamData?.detailed_description}
-                <!-- Render Steam description HTML safely -->
-                {@html steamData.detailed_description}
+                <p>{steamDescriptionText(steamData.detailed_description)}</p>
               {:else if steamData?.short_description}
                 <p>{steamData.short_description}</p>
               {:else if game.description}
@@ -947,6 +1047,23 @@
               {/if}
             </div>
           </section>
+          {#if isInstalled && dlcInfo.available.length > 0}
+            <section class="steam-section-card">
+              <h3 class="section-heading">Downloadable Content</h3>
+              {#each dlcInfo.available as addon (addon.id)}
+                <div class="dlc-row">
+                  <span>{addon.title}</span>
+                  {#if addon.installed}
+                    <button class="md3-btn danger" disabled={!!dlcPending} onclick={() => dlcToRemove = addon}>Remove</button>
+                  {:else}
+                    <button class="md3-btn" disabled={!addon.content_available || !!dlcPending} onclick={() => installDlc(addon)}>
+                      {dlcPending === addon.id ? 'Installing...' : addon.content_available ? 'Install' : 'Unavailable'}
+                    </button>
+                  {/if}
+                </div>
+              {/each}
+            </section>
+          {/if}
         {/if}
 
         <!-- TAB: PATCHES (INSTALLED) -->
@@ -980,6 +1097,7 @@
                   class="md3-btn"
                   class:primary={!installedRecord.fix || installedRecord.fix === 'None'}
                   class:tonal={installedRecord.fix && installedRecord.fix !== 'None'}
+                  disabled={pendingAction === 'overlay-toggle'}
                   onclick={() => handleAction({ action: 'overlay-toggle' }, 'Toggled DLL overlay')}
                 >
                   <svg class="btn-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
@@ -998,9 +1116,9 @@
                     </svg>
                     <h4>Steamless DRM Stripper</h4>
                   </div>
-                  {#if installedRecord.steamstub?.applied}
+                  {#if effectiveSteamStub?.applied}
                     <span class="tool-pill success">Unpacked (.steamstub.bak)</span>
-                  {:else if installedRecord.steamstub?.stub_present}
+                  {:else if effectiveSteamStub?.stub_present}
                     <span class="tool-pill warning">SteamStub Protected</span>
                   {:else}
                     <span class="tool-pill inactive">Clean / No DRM</span>
@@ -1009,28 +1127,29 @@
                 <p class="tool-desc">
                   Strip SteamStub DRM from PE binaries with automated <code>.steamstub.bak</code> backups.
                 </p>
-                {#if installedRecord.steamstub?.applied}
+                {#if effectiveSteamStub?.applied}
                   <button
                     class="md3-btn tonal"
+                    disabled={pendingAction === 'steamstub-rollback'}
                     onclick={() => handleAction({ action: 'steamstub-rollback' }, 'Restored original SteamStub executable')}
                   >
                     <svg class="btn-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
                       <path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/>
                     </svg>
-                    <span>Rollback Original Binary</span>
+                    <span>{pendingAction === 'steamstub-rollback' ? 'Restoring...' : 'Rollback Original Binary'}</span>
                   </button>
                 {:else}
                   <button
                     class="md3-btn"
-                    class:primary={installedRecord.steamstub?.stub_present}
-                    class:tonal={!installedRecord.steamstub?.stub_present}
-                    disabled={!installedRecord.steamstub?.stub_present}
+                    class:primary={effectiveSteamStub?.stub_present}
+                    class:tonal={!effectiveSteamStub?.stub_present}
+                    disabled={!effectiveSteamStub?.stub_present || pendingAction === 'steamstub-unpack'}
                     onclick={() => handleAction({ action: 'steamstub-unpack' }, 'SteamStub DRM unpacked')}
                   >
                     <svg class="btn-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
                       <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14l-5-5 1.41-1.41L12 14.17l7.59-7.59L21 8l-9 9z"/>
                     </svg>
-                    <span>{installedRecord.steamstub?.stub_present ? 'Strip SteamStub DRM' : 'No SteamStub DRM Detected'}</span>
+                    <span>{pendingAction === 'steamstub-unpack' ? 'Stripping SteamStub DRM...' : effectiveSteamStub?.stub_present ? 'Strip SteamStub DRM' : 'No SteamStub DRM Detected'}</span>
                   </button>
                 {/if}
               </div>
@@ -1055,6 +1174,7 @@
                   {#if installedRecord.ea_heal_applied}
                     <button
                       class="md3-btn tonal"
+                      disabled={pendingAction === 'ea-rollback'}
                       onclick={() => handleAction({ action: 'ea-rollback' }, 'EA activation restored')}
                     >
                       <span>Rollback EA Patch</span>
@@ -1062,6 +1182,7 @@
                   {:else}
                     <button
                       class="md3-btn primary"
+                      disabled={pendingAction === 'ea-heal'}
                       onclick={() => handleAction({ action: 'ea-heal' }, 'EA activation patched')}
                     >
                       <span>Apply Activation Patch</span>
@@ -1089,6 +1210,7 @@
                   </p>
                   <button
                     class="md3-btn tonal"
+                    disabled={pendingAction === 'patch-toggle'}
                     onclick={() => handleAction({ action: 'patch-toggle' }, 'Toggled game patch')}
                   >
                     <span>{installedRecord.patch === 'enabled' ? 'Disable Patch' : 'Enable Patch'}</span>
@@ -1374,9 +1496,26 @@
     isDestructive={true}
     onConfirm={executeUninstall}
   />
+  <ConfirmModal
+    open={!!dlcToRemove}
+    title="Remove DLC"
+    message={`Remove ${dlcToRemove?.title || 'this DLC'} and its installed files?`}
+    confirmText="Remove"
+    isDestructive={true}
+    onConfirm={removeDlc}
+    onCancel={() => dlcToRemove = null}
+  />
 </div>
 
 <style>
+  .dlc-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.75rem 0;
+    border-top: 1px solid var(--md-sys-color-outline-variant);
+  }
   .game-page-view {
     position: relative;
     width: 100%;

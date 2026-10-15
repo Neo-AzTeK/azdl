@@ -3,9 +3,11 @@ import { get } from 'svelte/store';
 import {
   notifications,
   notify,
+  notifyError,
   dismissNotification,
   clearNotifications,
 } from './notifications.js';
+import { parseLauncherError } from './api.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -96,6 +98,76 @@ describe('Unified Notification System (notifications.js)', () => {
     clearNotifications();
     expect(get(notifications)).toEqual([]);
   });
+
+  it('correctly parses structured and fallback launcher errors', () => {
+    expect(parseLauncherError(null)).toMatchObject({ code: 'general' });
+    expect(parseLauncherError('Network timed out')).toMatchObject({
+      code: 'general',
+      message: 'Network timed out',
+    });
+
+    const parsedJson = parseLauncherError(
+      JSON.stringify({ code: 'runner_not_found', message: 'Runner GE-Proton not found' })
+    );
+    expect(parsedJson).toMatchObject({
+      code: 'runner_not_found',
+      message: 'Runner GE-Proton not found',
+    });
+
+    const parsedObj = parseLauncherError({
+      code: 'drive_full',
+      message: 'Drive is full',
+      path: '/games',
+    });
+    expect(parsedObj).toMatchObject({
+      code: 'drive_full',
+      message: 'Drive is full',
+      path: '/games',
+    });
+  });
+
+  it('attaches contextual remediation action for runner_not_found', () => {
+    let settingsOpened = false;
+    notifyError(
+      { code: 'runner_not_found', message: 'Missing compatibility runner GE-Proton' },
+      {
+        onOpenSettings: (cat) => {
+          expect(cat).toBe('runners');
+          settingsOpened = true;
+        },
+      }
+    );
+
+    const list = get(notifications);
+    expect(list).toHaveLength(1);
+    expect(list[0].type).toBe('error');
+    expect(list[0].action).toBeTruthy();
+    expect(list[0].action.label).toBe('Runners Settings');
+
+    list[0].action.onClick();
+    expect(settingsOpened).toBe(true);
+  });
+
+  it('attaches contextual remediation action for no_plugin_available', () => {
+    let pluginsOpened = false;
+    notifyError(
+      { code: 'no_plugin_available', message: 'No plugin installed' },
+      {
+        onOpenSettings: (cat) => {
+          expect(cat).toBe('plugins');
+          pluginsOpened = true;
+        },
+      }
+    );
+
+    const list = get(notifications);
+    expect(list).toHaveLength(1);
+    expect(list[0].action.label).toBe('Plugins Store');
+
+    list[0].action.onClick();
+    expect(pluginsOpened).toBe(true);
+  });
+
 });
 
 describe('Zero Native Dialogs & Error Palette Invariants', () => {

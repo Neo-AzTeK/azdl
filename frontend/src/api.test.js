@@ -8,6 +8,12 @@ vi.mock('@tauri-apps/api/core', () => ({
   isTauri: () => false,
 }));
 
+// Mock @tauri-apps/api/event
+const mockListen = vi.fn();
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: (...args) => mockListen(...args),
+}));
+
 describe('API - Browser Fallback Mode', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -22,7 +28,7 @@ describe('API - Browser Fallback Mode', () => {
     const state = await api.getState();
     expect(state).toHaveProperty('library');
     expect(Array.isArray(state.library)).toBe(true);
-    expect(state).toHaveProperty('sources');
+    expect(state).toHaveProperty('plugins');
     expect(state).toHaveProperty('jobs');
     expect(state).toHaveProperty('running_games');
   });
@@ -46,9 +52,16 @@ describe('API - Browser Fallback Mode', () => {
     expect(res).toEqual({ success: true });
   });
 
-  it('returns fallback false for isSteamRunning and true for startSteam', async () => {
+  it('returns fallback false for isSteamRunning', async () => {
     expect(await api.isSteamRunning()).toBe(false);
-    expect(await api.startSteam()).toBe(true);
+  });
+
+  it('returns a no-op unlisten function for onStateChange in browser mode', () => {
+    const cb = vi.fn();
+    const unsub = api.onStateChange(cb);
+    expect(typeof unsub).toBe('function');
+    expect(mockListen).not.toHaveBeenCalled();
+    unsub();
   });
 });
 
@@ -154,16 +167,12 @@ describe('API - Desktop Mode IPC Bridge', () => {
     expect(mockInvoke).toHaveBeenCalledWith('window_close');
   });
 
-  it('invokes is_steam_running and start_steam in desktop mode', async () => {
+  it('invokes is_steam_running in desktop mode', async () => {
     mockInvoke.mockResolvedValueOnce(true);
     const running = await api.isSteamRunning();
     expect(mockInvoke).toHaveBeenCalledWith('is_steam_running');
     expect(running).toBe(true);
 
-    mockInvoke.mockResolvedValueOnce(true);
-    const started = await api.startSteam();
-    expect(mockInvoke).toHaveBeenCalledWith('start_steam');
-    expect(started).toBe(true);
   });
 
   it('invokes storage and settings action helpers correctly', async () => {
@@ -316,5 +325,56 @@ describe('API - Busy State Tracking', () => {
     expect(events[events.length - 1]).toBe(false);
 
     unsub();
+  });
+
+  it('passes steamstub action results through runAction', async () => {
+    const mockResult = {
+      success: true,
+      unpacked_count: 1,
+      steamstub: { relevant: true, stub_present: false, applied: true, label: 'Applied' },
+    };
+    mockInvoke.mockResolvedValueOnce(mockResult);
+
+    const res = await api.runAction({ action: 'steamstub-unpack', id: 'portal' });
+    expect(mockInvoke).toHaveBeenCalledWith('run_action', {
+      action: { action: 'steamstub-unpack', id: 'portal' },
+    });
+    expect(res).toEqual(mockResult);
+    expect(res.steamstub.applied).toBe(true);
+  });
+
+  it('registers listener on state-changed event in desktop mode', async () => {
+    const mockUnlisten = vi.fn();
+    mockListen.mockResolvedValueOnce(mockUnlisten);
+    const cb = vi.fn();
+    const unsub = api.onStateChange(cb);
+
+    expect(mockListen).toHaveBeenCalledWith('state-changed', expect.any(Function));
+
+    // Simulate event delivery
+    const handler = mockListen.mock.calls[0][1];
+    handler({ payload: null });
+    expect(cb).toHaveBeenCalledWith({ payload: null });
+
+    // Wait for the listen promise to resolve
+    await Promise.resolve();
+    unsub();
+    expect(mockUnlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it('unsubscribes cleanly if unsub is called before listen resolves', async () => {
+    let resolveListen;
+    const listenPromise = new Promise((resolve) => {
+      resolveListen = resolve;
+    });
+    mockListen.mockReturnValueOnce(listenPromise);
+    const mockUnlisten = vi.fn();
+
+    const unsub = api.onStateChange(vi.fn());
+    unsub(); // unlisten before listen resolves
+
+    resolveListen(mockUnlisten);
+    await Promise.resolve();
+    expect(mockUnlisten).toHaveBeenCalledTimes(1);
   });
 });

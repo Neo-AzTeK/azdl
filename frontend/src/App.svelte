@@ -9,9 +9,17 @@
   import GamePageView from './views/GamePageView.svelte';
   import ConfirmModal from './components/ConfirmModal.svelte';
 
-  import { getState, getRunners, launchGame, stopGame, onBusyChange, isSteamRunning, startSteam } from './api.js';
+  import {
+    getState,
+    getRunners,
+    launchGame,
+    stopGame,
+    onBusyChange,
+    onStateChange,
+    isSteamRunning,
+  } from './api.js';
   import { applyTheme, onSystemThemeChange } from './theme.js';
-  import { notifications, dismissNotification, notify } from './notifications.js';
+  import { notifications, dismissNotification, notify, notifyError } from './notifications.js';
   import { reconcileData } from './state.js';
 
   // Navigation state
@@ -119,7 +127,38 @@
     notify(message, type);
   }
 
+  let isMounted = false;
+  let pollTimeoutId = null;
+
+  function scheduleAdaptivePoll() {
+    if (!isMounted) return;
+    if (pollTimeoutId) {
+      clearTimeout(pollTimeoutId);
+      pollTimeoutId = null;
+    }
+    // Fast polling (1s) when downloads, unpacks or tasks are active;
+    // relaxed polling (15s) when the launcher is idle.
+    const delay = (hasActiveJobs || hasActiveTasks) ? 1000 : 15000;
+    pollTimeoutId = setTimeout(async () => {
+      if (!isMounted) return;
+      if (document.visibilityState === 'visible') {
+        await refreshState(false);
+      }
+      scheduleAdaptivePoll();
+    }, delay);
+  }
+
+  // React to transitions between active and idle states to adjust polling cadence immediately
+  $effect(() => {
+    const _isActive = hasActiveJobs || hasActiveTasks;
+    if (isMounted) {
+      scheduleAdaptivePoll();
+    }
+  });
+
   onMount(() => {
+    isMounted = true;
+
     // Initial theme application
     updateTheme();
 
@@ -135,25 +174,38 @@
       isApiBusy = busy;
     });
 
+    // Listen for backend state change events (Tauri IPC event)
+    const unsubStateChange = onStateChange(() => {
+      if (document.visibilityState === 'visible') {
+        refreshState(false);
+      }
+    });
+
     // Fetch initial backend state
     refreshState();
     refreshRunners();
 
     const refreshWhenVisible = () => {
-      if (document.visibilityState === 'visible') refreshState(false);
+      if (document.visibilityState === 'visible') {
+        refreshState(false);
+        scheduleAdaptivePoll();
+      }
     };
     document.addEventListener('visibilitychange', refreshWhenVisible);
 
-    // Polling timer for reactive process tracking and download speeds
-    const interval = setInterval(() => {
-      if (document.visibilityState === 'visible') refreshState(false);
-    }, 1500);
+    // Initial adaptive polling schedule
+    scheduleAdaptivePoll();
 
     return () => {
+      isMounted = false;
       unsubSystemTheme();
       unsubBusy();
+      unsubStateChange();
       document.removeEventListener('visibilitychange', refreshWhenVisible);
-      clearInterval(interval);
+      if (pollTimeoutId) {
+        clearTimeout(pollTimeoutId);
+        pollTimeoutId = null;
+      }
     };
   });
 
@@ -165,36 +217,51 @@
   }
 
   let isRefreshingState = false;
+  let refreshPending = false;
   const seenTaskFailures = new Map();
   async function refreshState(showErrors = true) {
-    if (isRefreshingState) return;
+    if (isRefreshingState) {
+      refreshPending = true;
+      return;
+    }
     isRefreshingState = true;
     try {
-      const state = await getState();
-      if (state) {
-        const failedIds = new Set();
-        for (const task of state.tasks || []) {
-          if (task.status !== 'failed') continue;
-          failedIds.add(task.id);
-          if (seenTaskFailures.get(task.id) !== task.log_tail) {
-            seenTaskFailures.set(task.id, task.log_tail);
-            notify.error(task.log_tail || `${task.label} failed.`);
+      do {
+        refreshPending = false;
+        const state = await getState();
+        if (state) {
+          const failedIds = new Set();
+          for (const task of state.tasks || []) {
+            if (task.status !== 'failed') continue;
+            failedIds.add(task.id);
+            if (seenTaskFailures.get(task.id) !== task.log_tail) {
+              seenTaskFailures.set(task.id, task.log_tail);
+              notify.error(task.log_tail || `${task.label} failed.`);
+            }
+          }
+          for (const id of seenTaskFailures.keys()) {
+            if (!failedIds.has(id)) seenTaskFailures.delete(id);
+          }
+          const reconciledState = reconcileData(appState, state);
+          if (reconciledState !== appState) appState = reconciledState;
+          // Keep viewed game reference in sync
+          if (viewedGame) {
+            const vId = (viewedGame.id || '').toLowerCase();
+            const vQId = (viewedGame.qualified_id || '').toLowerCase();
+            const vTitle = (viewedGame.title || '').trim().toLowerCase();
+            const updated = (state.library || []).find(
+              (g) =>
+                (g.id && g.id.toLowerCase() === vId) ||
+                (g.qualified_id && g.qualified_id.toLowerCase() === vQId) ||
+                (g.title && g.title.trim().toLowerCase() === vTitle)
+            );
+            if (updated) {
+              const reconciledGame = reconcileData(viewedGame, { ...viewedGame, ...updated });
+              if (reconciledGame !== viewedGame) viewedGame = reconciledGame;
+            }
           }
         }
-        for (const id of seenTaskFailures.keys()) {
-          if (!failedIds.has(id)) seenTaskFailures.delete(id);
-        }
-        const reconciledState = reconcileData(appState, state);
-        if (reconciledState !== appState) appState = reconciledState;
-        // Keep viewed game reference in sync
-        if (viewedGame) {
-          const updated = state.library.find((g) => g.id === viewedGame.id);
-          if (updated) {
-            const reconciledGame = reconcileData(viewedGame, { ...viewedGame, ...updated });
-            if (reconciledGame !== viewedGame) viewedGame = reconciledGame;
-          }
-        }
-      }
+      } while (refreshPending);
     } catch (e) {
       if (showErrors) console.error('Failed to get state:', e);
     } finally {
@@ -231,7 +298,12 @@
       await launchGame(gameId);
       await refreshState();
     } catch (e) {
-      showToast(`Launch error: ${e}`, 'error');
+      notifyError(e, {
+        onOpenSettings: (category) => {
+          activeTab = 'settings';
+          settingsCategory = category || 'runners';
+        },
+      });
     }
   }
 
@@ -253,20 +325,6 @@
     await executeLaunch(gameId);
   }
 
-  async function handleStartSteamAndLaunch() {
-    if (!pendingSteamLaunchGame) return;
-    const targetGame = pendingSteamLaunchGame;
-    try {
-      showToast('Launching Steam in background...', 'info');
-      await startSteam();
-      await new Promise((r) => setTimeout(r, 1200));
-    } catch (e) {
-      showToast(`Failed to start Steam: ${e}`, 'warning');
-    }
-    await executeLaunch(targetGame.id);
-    pendingSteamLaunchGame = null;
-  }
-
   async function handleLaunchWithoutSteam() {
     if (!pendingSteamLaunchGame) return;
     const targetGame = pendingSteamLaunchGame;
@@ -279,7 +337,7 @@
       await stopGame(gameId);
       await refreshState();
     } catch (e) {
-      showToast(`Stop error: ${e}`, 'error');
+      notifyError(e);
     }
   }
 </script>
@@ -325,6 +383,7 @@
           jobs={appState.jobs}
           tasks={appState.tasks}
           plugins={appState.plugins}
+          settings={appState.settings}
           searchQuery={tabSearches.catalog}
           onSelectGame={(game) => handleSelectGame(game, 'catalog')}
           onRefresh={refreshState}
@@ -382,23 +441,38 @@
       {#each $notifications as n (n.id)}
         <div class="toast-snackbar {n.type}">
           <span class="toast-text">{n.message}</span>
+          {#if n.action}
+            <button
+              type="button"
+              onclick={() => {
+                try {
+                  n.action.onClick();
+                } catch (err) {
+                  console.error('Error executing toast action:', err);
+                } finally {
+                  dismissNotification(n.id);
+                }
+              }}
+              class="toast-action-btn"
+            >
+              {n.action.label}
+            </button>
+          {/if}
           <button onclick={() => dismissNotification(n.id)} class="toast-dismiss" aria-label="Dismiss">✕</button>
         </div>
       {/each}
     </div>
   {/if}
 
-  <!-- Online-Fix Steam Launch Prompt Modal -->
+  <!-- Online-Fix compatibility notice -->
   <ConfirmModal
     bind:open={showSteamPromptModal}
     title="Steam Is Not Running"
-    message="{pendingSteamLaunchGame?.title || 'This game'} uses an Online-Fix / SteamFix multiplayer runtime that requires Steam running in the background. Would you like azdl to start Steam for you?"
-    confirmText="Start Steam & Launch"
-    altText="Launch Without Steam"
+    message="{pendingSteamLaunchGame?.title || 'This game'} uses an Online-Fix / SteamFix multiplayer runtime that may require Steam running in the background."
+    confirmText="Launch Anyway"
     cancelText="Cancel"
     isDestructive={false}
-    onConfirm={handleStartSteamAndLaunch}
-    onAlt={handleLaunchWithoutSteam}
+    onConfirm={handleLaunchWithoutSteam}
     onCancel={() => { pendingSteamLaunchGame = null; }}
   />
 </div>
@@ -553,6 +627,29 @@
     background: var(--md-sys-color-secondary-container);
     color: var(--md-sys-color-on-secondary-container);
     border: 1px solid var(--md-sys-color-outline-variant);
+  }
+
+  .toast-action-btn {
+    background: var(--md-sys-color-primary, #6750a4);
+    color: var(--md-sys-color-on-primary, #ffffff);
+    border: none;
+    border-radius: var(--md-sys-shape-full, 9999px);
+    padding: 4px 12px;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: filter 0.15s ease, opacity 0.15s ease;
+    flex-shrink: 0;
+  }
+
+  .toast-action-btn:hover {
+    filter: brightness(1.15);
+  }
+
+  .toast-snackbar.error .toast-action-btn {
+    background: var(--md-sys-color-error, #b3261e);
+    color: var(--md-sys-color-on-error, #ffffff);
   }
 
   .toast-dismiss {

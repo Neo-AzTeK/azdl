@@ -1,5 +1,6 @@
 // In-Process Tauri v2 IPC Client for azdl (Zero HTTP overhead)
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 export function isDesktop() {
   if (typeof window === 'undefined') return false;
@@ -13,6 +14,44 @@ export function isDesktop() {
   } catch {
     return false;
   }
+}
+
+export function onStateChange(callback) {
+  if (!isDesktop()) {
+    return () => {};
+  }
+  let unlistenFn = null;
+  let active = true;
+
+  listen('state-changed', (event) => {
+    try {
+      callback(event);
+    } catch (err) {
+      console.error('Error in state-changed listener:', err);
+    }
+  })
+    .then((unlisten) => {
+      if (active) {
+        unlistenFn = unlisten;
+      } else if (typeof unlisten === 'function') {
+        unlisten();
+      }
+    })
+    .catch((err) => {
+      console.warn('Failed to listen for state-changed event:', err);
+    });
+
+  return () => {
+    active = false;
+    if (unlistenFn) {
+      try {
+        unlistenFn();
+      } catch (err) {
+        console.warn('Error during unlisten for state-changed:', err);
+      }
+      unlistenFn = null;
+    }
+  };
 }
 
 // Busy state tracker for global UI indicator
@@ -67,16 +106,32 @@ export async function getState() {
   // Fallback for browser preview / development
   return {
     library: [],
-    sources: [],
     plugins: [],
     plugin_store: [],
     jobs: [],
     running_games: {},
     tasks: [],
     pending: [],
+    settings: {
+      storage_drives: [],
+      default_drive: null,
+      default_runner: 'auto',
+      global_arguments: [],
+      steamstub_auto_unpack: true,
+      onlinefix_overlay_enabled: true,
+      theme_mode: 'system',
+      theme_seed_color: '#3f51b5',
+      window_effect: 'none',
+    },
+    diagnostics: [],
     data_dir: '/preview/azdl',
     platform: 'linux',
   };
+}
+
+export async function getGameDlc(id) {
+  if (!isDesktop()) return { available: [], installed: [] };
+  return await withBusy(() => invoke('get_game_dlc', { id }));
 }
 
 export async function getRunners() {
@@ -227,12 +282,8 @@ export async function removePlugin(id) {
   return await runAction({ action: 'plugin-remove', id });
 }
 
-export async function installPluginBundle(location) {
-  return await runAction({ action: 'plugin-install', location });
-}
-
-export async function createPlugin(id, name, version, catalogUrl) {
-  return await runAction({ action: 'plugin-create', id, plugin_name: name, version, catalog_url: catalogUrl });
+export async function setFavoritePlugin(id) {
+  return await runAction({ action: 'plugin-favorite-set', id });
 }
 
 export async function downloadProtonGE() {
@@ -244,13 +295,6 @@ export async function isSteamRunning() {
     return await invoke('is_steam_running');
   }
   return false;
-}
-
-export async function startSteam() {
-  if (isDesktop()) {
-    return await invoke('start_steam');
-  }
-  return true;
 }
 
 export async function syncSteamShortcuts() {
@@ -295,4 +339,37 @@ export async function resolveGameArtwork(query) {
     }
   }
   return null;
+}
+
+/**
+ * Normalize and parse structured launcher errors returned from backend IPC or HTTP.
+ * @param {any} err
+ * @returns {{ code: string, message: string, [key: string]: any }}
+ */
+export function parseLauncherError(err) {
+  if (!err) return { code: 'general', message: 'An unknown error occurred.' };
+
+  if (typeof err === 'object') {
+    return {
+      code: err.code || 'general',
+      message: err.message || JSON.stringify(err),
+      ...err,
+    };
+  }
+
+  if (typeof err === 'string') {
+    try {
+      const parsed = JSON.parse(err);
+      if (parsed && typeof parsed === 'object') {
+        return {
+          code: parsed.code || 'general',
+          message: parsed.message || err,
+          ...parsed,
+        };
+      }
+    } catch {}
+    return { code: 'general', message: err };
+  }
+
+  return { code: 'general', message: String(err) };
 }
