@@ -7,7 +7,7 @@ use crate::sha256::file_sha256;
 use crate::{Game, Result, validate_id};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -120,6 +120,24 @@ fn check_target(install: &Path, relative: &Path) -> Result<PathBuf> {
         }
     }
     Ok(target)
+}
+
+fn is_prefix_of(source: &Path, candidate: &Path) -> Result<bool> {
+    let mut source = File::open(source)?;
+    let mut candidate = File::open(candidate)?;
+    let mut actual = [0_u8; 64 * 1024];
+    let mut expected = [0_u8; 64 * 1024];
+    loop {
+        let count = candidate.read(&mut actual)?;
+        if count == 0 {
+            return Ok(true);
+        }
+        if source.read_exact(&mut expected[..count]).is_err()
+            || actual[..count] != expected[..count]
+        {
+            return Ok(false);
+        }
+    }
 }
 
 fn read_manifest(state: &Path, game: &Game, dlc_id: &str) -> Result<DlcManifest> {
@@ -318,7 +336,17 @@ pub fn install_archive(
             if fs::symlink_metadata(&target).is_ok() {
                 return Err("DLC target changed during installation".into());
             }
-            fs::rename(&staged_target, &target)?;
+            if fs::hard_link(&staged_target, &target).is_err() {
+                // Removable filesystems may not support hard links.
+                let mut input = File::open(&staged_target)?;
+                let mut output = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target)?;
+                io::copy(&mut input, &mut output)?;
+                output.sync_all()?;
+            }
+            fs::remove_file(&staged_target)?;
         }
         fs::remove_dir_all(state.join("payload"))?;
         File::create(state.join("complete"))?.sync_all()?;
@@ -424,15 +452,23 @@ fn recover_unlocked(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
         }
     }
     // Verify all installed targets before deleting staging files or the state record.
+    let mut partial = Vec::new();
     for file in &manifest.files {
         let target = check_target(&manifest.install_dir, &file.path)?;
         if target.exists() && file_sha256(&target)? != file.sha256 {
-            return Err(
-                format!("Interrupted DLC file was modified: {}", file.path.display()).into(),
-            );
+            let payload = state.join("payload").join(&file.path);
+            if !payload.is_file() || !is_prefix_of(&payload, &target)? {
+                return Err(
+                    format!("Interrupted DLC file was modified: {}", file.path.display()).into(),
+                );
+            }
+            partial.push(target);
         }
     }
     for path in staged {
+        fs::remove_file(path)?;
+    }
+    for path in partial {
         fs::remove_file(path)?;
     }
     remove_unlocked(game, data_dir, dlc_id)
@@ -588,6 +624,14 @@ mod tests {
         let staged = game_dir.join(&manifest.files[0].staged_path);
         fs::write(&staged, b"partial").unwrap();
         assert_eq!(list_interrupted(&game, &root).unwrap(), vec!["bonus2"]);
+        let target = game_dir.join("Content/DLC/bonus.dat");
+        fs::write(&target, b"changed").unwrap();
+        assert!(recover_interrupted(&game, &root, "bonus2").is_err());
+        assert!(staged.exists());
+        let payload = interrupted.join("payload/Content/DLC/bonus.dat");
+        fs::create_dir_all(payload.parent().unwrap()).unwrap();
+        fs::write(&payload, b"bonus").unwrap();
+        fs::write(&target, b"bon").unwrap();
         recover_interrupted(&game, &root, "bonus2").unwrap();
         assert!(!staged.exists());
         assert!(!game_dir.join("Content/DLC/bonus.dat").exists());
