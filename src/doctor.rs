@@ -1,7 +1,7 @@
 use crate::multiplayer::{FixKind, detect_fix};
 use crate::patch::active_patch;
 use crate::runtime::resolve_runner;
-use crate::steam::{steam_command, steam_root};
+use crate::steam::steam_root;
 use crate::{Game, Runner, clean_command, resolve_launch};
 use serde::Serialize;
 use std::env;
@@ -169,9 +169,11 @@ pub fn diagnose_game(game: &Game, data_dir: &Path) -> DiagnosticReport {
             Some(format!("proton:{}", path.display()))
         }
         Ok(Runner::Steam(app_id)) => {
-            if !command_available(&steam_command()) {
-                add(&mut checks, Severity::Error, "Steam command is unavailable");
-            }
+            add(
+                &mut checks,
+                Severity::Error,
+                "Steam client launches are unavailable; choose a local executable and runner",
+            );
             Some(format!("steam:{app_id}"))
         }
         Ok(Runner::Auto | Runner::ProtonAuto) => None,
@@ -298,12 +300,31 @@ pub fn system_diagnostics() -> Vec<SystemCheck> {
             true,
             "--version",
         ),
-        check_binary(
-            "bsdtar",
-            "Multi-format archive extraction (ZIP, 7z, TAR, ISO)",
-            true,
-            "--version",
-        ),
+        if cfg!(windows) {
+            let bsdtar_check = check_binary(
+                "bsdtar",
+                "Multi-format archive extraction (ZIP, 7z, TAR, ISO)",
+                true,
+                "--version",
+            );
+            if bsdtar_check.available {
+                bsdtar_check
+            } else {
+                check_binary(
+                    "tar",
+                    "Windows built-in archive extraction engine (ZIP, 7z, TAR)",
+                    true,
+                    "--version",
+                )
+            }
+        } else {
+            check_binary(
+                "bsdtar",
+                "Multi-format archive extraction (ZIP, 7z, TAR, ISO)",
+                true,
+                "--version",
+            )
+        },
         check_binary(
             "unrar",
             "Proprietary RAR 4/5 archive decompression",

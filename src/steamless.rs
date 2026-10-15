@@ -203,16 +203,11 @@ pub fn download_steamless(data_dir: &Path) -> Result<PathBuf> {
     let steamless_dir = data_dir.join("steamless");
     fs::create_dir_all(&steamless_dir)?;
 
-    let unpack_status = clean_command("bsdtar")
-        .args(["-xzf"])
-        .arg(&archive_path)
-        .arg("-C")
-        .arg(&steamless_dir)
-        .status()?;
+    let extract_res = crate::archive::extract_checked(&archive_path, &steamless_dir);
     let _ = fs::remove_file(&archive_path);
     let _ = fs::remove_dir_all(&temp_dir);
-    if !unpack_status.success() {
-        return Err("failed to extract Steamless archive".into());
+    if let Err(e) = extract_res {
+        return Err(format!("failed to extract Steamless archive: {e}").into());
     }
 
     find_steamless_cli(data_dir)

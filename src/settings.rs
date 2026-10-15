@@ -1,5 +1,5 @@
 use crate::discovery::discover_executables;
-use crate::{Game, Library, Result, Runner, clean_command, save_library, validate_id};
+use crate::{Game, Library, Result, Runner, save_library, validate_id};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Write;
@@ -54,6 +54,9 @@ pub struct LauncherSettings {
     pub translucency: String,
     #[serde(default)]
     pub plugin_store_urls: Vec<String>,
+    /// Preferred installed provider for one-click game downloads.
+    #[serde(default)]
+    pub favorite_plugin_id: Option<String>,
 }
 
 fn default_runner_str() -> String {
@@ -106,6 +109,7 @@ impl LauncherSettings {
             theme_mode: "dark".into(),
             translucency: "none".into(),
             plugin_store_urls: Vec::new(),
+            favorite_plugin_id: None,
         }
     }
 
@@ -298,6 +302,24 @@ pub fn scan_drives_for_games(data_dir: &Path, library: &mut Library) -> Result<u
     Ok(newly_added)
 }
 
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let entry_type = entry.file_type()?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry_type.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else if entry_type.is_file() {
+            fs::copy(&from, &to)?;
+        } else {
+            return Err(format!("Cannot copy unsupported game entry: {}", from.display()).into());
+        }
+    }
+    Ok(())
+}
+
 pub fn move_game_to_drive(
     data_dir: &Path,
     library: &mut Library,
@@ -315,6 +337,10 @@ pub fn move_game_to_drive(
         .games
         .get_mut(game_id)
         .ok_or_else(|| format!("Game '{game_id}' not found in library"))?;
+
+    if !crate::dlc::list_installed(game, data_dir)?.is_empty() {
+        return Err("Remove installed DLC before moving this game to another drive".into());
+    }
 
     let old_dir = &game.install_dir;
     if !old_dir.exists() {
@@ -335,13 +361,9 @@ pub fn move_game_to_drive(
 
     // Attempt fs::rename, or fallback to copy and delete if across filesystems
     if fs::rename(old_dir, &new_dir).is_err() {
-        let status = clean_command("cp")
-            .arg("-r")
-            .arg(old_dir)
-            .arg(&new_dir)
-            .status()?;
-        if !status.success() {
-            return Err("Failed to copy game files to destination drive".into());
+        if let Err(error) = copy_dir_all(old_dir, &new_dir) {
+            let _ = fs::remove_dir_all(&new_dir);
+            return Err(error);
         }
         let _ = fs::remove_dir_all(old_dir);
     }

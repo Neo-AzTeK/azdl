@@ -1,5 +1,4 @@
-use crate::marker::read_install_marker;
-use crate::{Library, Result, add_game, select_launch_option};
+use crate::{Library, Result, add_game};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -61,7 +60,13 @@ fn excluded(name: &str) -> bool {
         "launcher_helper",
     ];
     let lower = name.to_ascii_lowercase();
-    if EXACT.contains(&lower.as_str()) || PARTS.iter().any(|part| lower.contains(part)) {
+    if EXACT.contains(&lower.as_str())
+        || PARTS.iter().any(|part| lower.contains(part))
+        || lower.ends_with(".so")
+        || lower.contains(".so.")
+        || lower.ends_with(".dll")
+        || lower.ends_with(".dylib")
+    {
         return true;
     }
     let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
@@ -71,17 +76,33 @@ fn excluded(name: &str) -> bool {
 }
 
 fn native_executable(path: &Path, _metadata: &fs::Metadata) -> Result<bool> {
+    let Ok(mut file) = File::open(path) else {
+        return Ok(false);
+    };
+    let mut header = [0u8; 4];
+    let count = file.read(&mut header).unwrap_or(0);
+    let is_elf = count >= 4 && header == [0x7f, b'E', b'L', b'F'];
+    let is_script = count >= 2
+        && header[..2] == *b"#!"
+        && !path.extension().is_some_and(|ext| {
+            ext.eq_ignore_ascii_case("txt")
+                || ext.eq_ignore_ascii_case("log")
+                || ext.eq_ignore_ascii_case("md")
+        });
+    if !is_elf && !is_script {
+        return Ok(false);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         if _metadata.permissions().mode() & 0o111 == 0 {
-            return Ok(false);
+            let _ = fs::set_permissions(
+                path,
+                fs::Permissions::from_mode(_metadata.permissions().mode() | 0o755),
+            );
         }
     }
-    let mut file = File::open(path)?;
-    let mut header = [0u8; 4];
-    let count = file.read(&mut header)?;
-    Ok((count >= 4 && header == [0x7f, b'E', b'L', b'F']) || (count >= 2 && header[..2] == *b"#!"))
+    Ok(true)
 }
 
 /// List likely game executables, best candidate first. Symlinks are ignored.
@@ -162,6 +183,18 @@ pub fn discover_executables(root: &Path, title: &str) -> Result<Vec<Candidate>> 
             if stem.contains("launcher") || stem.contains("bootstrap") || stem.contains("patcher") {
                 score -= 100;
             }
+            #[cfg(unix)]
+            if !windows_exe {
+                score += 300;
+                #[cfg(target_arch = "x86_64")]
+                if name.ends_with("x86_64") || name.ends_with("64") || stem.ends_with("64") {
+                    score += 50;
+                }
+            }
+            #[cfg(windows)]
+            if windows_exe {
+                score += 300;
+            }
             results.push(Candidate {
                 path,
                 relative_path,
@@ -180,15 +213,6 @@ pub fn discover_executables(root: &Path, title: &str) -> Result<Vec<Candidate>> 
 
 pub fn import_game(library: &mut Library, id: &str, title: &str, root: &Path) -> Result<PathBuf> {
     let _ = crate::archive::normalize_windows_paths(root);
-    if let Some(marker) = read_install_marker(root)
-        && let Some(executable) = marker.preferred_executable
-    {
-        add_game(library, id, title, root, &executable)?;
-        if let Some(game) = library.games.get_mut(id) {
-            select_launch_option(game, marker.selected_option_id.as_deref())?;
-        }
-        return Ok(executable);
-    }
     let candidates = discover_executables(root, title)?;
     let Some(first) = candidates.first() else {
         return Err(

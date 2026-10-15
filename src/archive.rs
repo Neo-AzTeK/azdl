@@ -7,8 +7,23 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn tar_command() -> std::process::Command {
+    #[cfg(windows)]
+    {
+        if clean_command("bsdtar").arg("--version").output().is_ok() {
+            clean_command("bsdtar")
+        } else {
+            clean_command("tar")
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        clean_command("bsdtar")
+    }
+}
+
 fn archive_listing(archive: &Path, verbose: bool) -> Result<String> {
-    let output = clean_command("bsdtar")
+    let output = tar_command()
         .arg(if verbose { "-tvf" } else { "-tf" })
         .arg(archive)
         .output()?;
@@ -317,7 +332,7 @@ pub fn extract_checked_with_passphrase(
         normalize_windows_paths(destination)?;
         return Ok(());
     }
-    let mut command = clean_command("bsdtar");
+    let mut command = tar_command();
     command
         .args(["-x", "-f"])
         .arg(archive)
@@ -326,14 +341,16 @@ pub fn extract_checked_with_passphrase(
     if let Some(passphrase) = passphrase {
         command.arg("--passphrase").arg(passphrase);
     }
-    let status = command
-        .args([
-            "--no-same-owner",
-            "--no-same-permissions",
-            "--no-xattrs",
-            "--no-acls",
-        ])
-        .status()?;
+    #[cfg(unix)]
+    command.args([
+        "--no-same-owner",
+        "--no-same-permissions",
+        "--no-xattrs",
+        "--no-acls",
+    ]);
+    #[cfg(not(unix))]
+    command.args(["--no-same-owner", "--no-same-permissions"]);
+    let status = command.status()?;
     if !status.success() {
         return Err(format!("archive extraction failed ({status})").into());
     }
@@ -350,6 +367,25 @@ pub fn install_archive(
     title: &str,
     archive: &Path,
 ) -> Result<PathBuf> {
+    install_archive_in(
+        library,
+        data_dir,
+        &data_dir.join("games"),
+        id,
+        title,
+        archive,
+    )
+}
+
+/// Install an archive into a configured library drive while retaining azdl's data directory for jobs.
+pub fn install_archive_in(
+    library: &mut Library,
+    _data_dir: &Path,
+    games: &Path,
+    id: &str,
+    title: &str,
+    archive: &Path,
+) -> Result<PathBuf> {
     validate_id(id)?;
     if title.trim().is_empty() || library.games.contains_key(id) {
         return Err("title is empty or game ID already exists".into());
@@ -358,8 +394,7 @@ pub fn install_archive(
     if !archive.is_file() {
         return Err("archive path is not a file".into());
     }
-    let games = data_dir.join("games");
-    fs::create_dir_all(&games)?;
+    fs::create_dir_all(games)?;
     let final_dir = games.join(id);
     if fs::symlink_metadata(&final_dir).is_ok() {
         return Err(format!("install directory already exists: {}", final_dir.display()).into());
@@ -382,6 +417,27 @@ pub fn install_archive(
 pub fn fetch_archive(
     library: &mut Library,
     data_dir: &Path,
+    id: &str,
+    title: &str,
+    url: &str,
+    archive_name: &Path,
+) -> Result<PathBuf> {
+    fetch_archive_in(
+        library,
+        data_dir,
+        &data_dir.join("games"),
+        id,
+        title,
+        url,
+        archive_name,
+    )
+}
+
+/// Download and install a portable archive into a configured library drive.
+pub fn fetch_archive_in(
+    library: &mut Library,
+    data_dir: &Path,
+    games: &Path,
     id: &str,
     title: &str,
     url: &str,
@@ -410,7 +466,7 @@ pub fn fetch_archive(
         banner_url: None,
     };
     let archive = recorded_download(data_dir, &game, url, archive_name, JobKind::Archive)?;
-    let result = install_archive(library, data_dir, id, title, &archive);
+    let result = install_archive_in(library, data_dir, games, id, title, &archive);
     if result.is_ok() {
         let _ = fs::remove_dir_all(&downloads);
         let job_id = crate::jobs::job_id_for_target(&archive);
@@ -478,6 +534,27 @@ pub fn fetch_archive_parts(
     first_name: &Path,
     urls: &[String],
 ) -> Result<PathBuf> {
+    fetch_archive_parts_in(
+        library,
+        data_dir,
+        &data_dir.join("games"),
+        id,
+        title,
+        first_name,
+        urls,
+    )
+}
+
+/// Fetch multipart archives into a configured library drive.
+pub fn fetch_archive_parts_in(
+    library: &mut Library,
+    data_dir: &Path,
+    games: &Path,
+    id: &str,
+    title: &str,
+    first_name: &Path,
+    urls: &[String],
+) -> Result<PathBuf> {
     validate_id(id)?;
     if title.trim().is_empty() || library.games.contains_key(id) {
         return Err("title is empty or game ID already exists".into());
@@ -502,7 +579,7 @@ pub fn fetch_archive_parts(
     };
     let first_archive =
         recorded_multipart_download(data_dir, &game, first_name, urls, JobKind::Archive)?;
-    let result = install_archive(library, data_dir, id, title, &first_archive);
+    let result = install_archive_in(library, data_dir, games, id, title, &first_archive);
     if result.is_ok() {
         let _ = fs::remove_dir_all(&downloads);
     }
@@ -667,6 +744,21 @@ mod tests {
         assert_eq!(
             library.games["example"].executable.file_name().unwrap(),
             "Example Game.exe"
+        );
+        let other_drive = root.join("other-drive");
+        let installed_elsewhere = install_archive_in(
+            &mut library,
+            &root,
+            &other_drive,
+            "example-elsewhere",
+            "Example Game",
+            &archive,
+        )
+        .unwrap();
+        assert!(installed_elsewhere.starts_with(&other_drive));
+        assert_eq!(
+            library.games["example-elsewhere"].install_dir,
+            installed_elsewhere
         );
         fs::remove_dir_all(root).unwrap();
     }

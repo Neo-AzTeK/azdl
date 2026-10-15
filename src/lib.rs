@@ -13,10 +13,11 @@ pub mod bundled_fix;
 pub mod catalog;
 pub mod cmd;
 pub mod discovery;
+pub mod dlc;
 pub mod doctor;
+pub mod error;
 pub mod fixes;
 pub mod jobs;
-mod marker;
 pub mod multiplayer;
 pub mod overlay;
 pub mod patch;
@@ -33,10 +34,10 @@ pub mod steam_discovery;
 pub mod steam_shortcuts;
 pub mod steamless;
 pub mod torrent;
-pub mod updates;
 
 pub use archive::normalize_windows_paths;
 pub use cmd::{clean_command, sanitize_command};
+pub use error::LauncherError;
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -172,9 +173,7 @@ pub fn add_game(
     if !executable.is_file() || !executable.starts_with(&dir) {
         return Err("executable must be a file within the install directory".into());
     }
-    let launch_options = marker::read_install_marker(&dir)
-        .map(|marker| marker.options)
-        .unwrap_or_default();
+    let launch_options = Vec::new();
     library.games.insert(
         id.to_string(),
         Game {
@@ -250,6 +249,8 @@ pub fn remove_game(library: &mut Library, data_dir: &Path, id: &str) -> Result<(
 
     // Clean up leftover download files / staging for this game ID
     let _ = cleanup_leftovers(data_dir, Some(id));
+    let _ = fs::remove_dir_all(data_dir.join("dlc").join(id));
+    let _ = fs::remove_dir_all(data_dir.join("dlc-downloads").join(id));
 
     // Clean up any jobs associated with this game
     if let Ok(jobs) = jobs::list_jobs(data_dir) {
@@ -428,11 +429,32 @@ pub fn fetch_game(
     url: &str,
     filename: &Path,
 ) -> Result<()> {
+    fetch_game_in(
+        library,
+        data_dir,
+        &data_dir.join("games"),
+        id,
+        title,
+        url,
+        filename,
+    )
+}
+
+/// Download a runnable file directly into a configured library drive.
+pub fn fetch_game_in(
+    library: &mut Library,
+    data_dir: &Path,
+    games_dir: &Path,
+    id: &str,
+    title: &str,
+    url: &str,
+    filename: &Path,
+) -> Result<()> {
     validate_id(id)?;
     if title.trim().is_empty() || library.games.contains_key(id) {
         return Err("title is empty or game ID already exists".into());
     }
-    let install_dir = data_dir.join("games").join(id);
+    let install_dir = games_dir.join(id);
     fs::create_dir_all(&install_dir)?;
     let game = Game {
         id: id.to_string(),
@@ -522,17 +544,9 @@ pub fn set_runner(game: &mut Game, value: &str) -> Result<()> {
             }
             Runner::Proton(path)
         }
-        path if path.starts_with("steam:") => {
-            let app_id = path[6..].parse()?;
-            if app_id == 0 {
-                return Err("Steam app ID must be positive".into());
-            }
-            Runner::Steam(app_id)
-        }
         _ => {
             return Err(
-                "runner must be auto, native, wine, proton:auto, proton:/path/to/proton, or steam:<appid>"
-                    .into(),
+                "runner must be auto, native, wine, proton:auto, or proton:/path/to/proton".into(),
             );
         }
     };
@@ -674,6 +688,9 @@ pub fn resolve_launch(game: &Game) -> Result<ResolvedLaunch> {
 }
 
 pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Result<Child> {
+    if matches!(game.runner, Runner::Steam(_)) {
+        return Err("Steam client launches are outside this standalone launcher; choose a local executable and runner".into());
+    }
     let launch = if matches!(game.runner, Runner::Steam(_)) {
         None
     } else {
@@ -714,11 +731,7 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
             ]);
             cmd
         }
-        Runner::Steam(app_id) => {
-            let mut cmd = clean_command(steam::steam_command());
-            cmd.arg("-applaunch").arg(app_id.to_string());
-            cmd
-        }
+        Runner::Steam(_) => unreachable!(),
         Runner::Auto | Runner::ProtonAuto => unreachable!(),
     };
     if let Ok(Some(msg)) =

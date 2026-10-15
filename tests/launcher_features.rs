@@ -1,11 +1,12 @@
-use azdl::catalog::{add_source, find_game, list_games, load_sources, save_sources};
+use azdl::catalog::parse_feed;
 use azdl::discovery::discover_executables;
 use azdl::doctor::diagnose_game;
 use azdl::multiplayer::{detect_fix, prepare_game_launch};
 use azdl::overlay::{overlay_status, set_overlay_enabled};
 use azdl::patch::{active_patch, apply_patch, disable_patch, enable_patch, rollback_patch};
 use azdl::settings::{
-    add_storage_drive, load_settings, remove_storage_drive, save_settings, set_default_drive,
+    add_storage_drive, load_settings, move_game_to_drive, remove_storage_drive, save_settings,
+    set_default_drive,
 };
 use azdl::{
     Game, Runner, add_game, add_launch_option, load_library, save_library, select_launch_option,
@@ -27,7 +28,7 @@ fn temp_workspace(name: &str) -> PathBuf {
 }
 
 #[test]
-fn test_catalog_source_management_and_search() {
+fn test_catalog_feed_parsing_and_search() {
     let ws = temp_workspace("catalog");
     let feed_path = ws.join("test-feed.json");
 
@@ -60,22 +61,7 @@ fn test_catalog_source_management_and_search() {
     }"#;
     fs::write(&feed_path, feed_content).unwrap();
 
-    let mut sources = load_sources(&ws).unwrap();
-    add_source(
-        &ws,
-        &mut sources,
-        "official-ryuu",
-        &feed_path.to_string_lossy(),
-    )
-    .unwrap();
-    save_sources(&ws, &sources).unwrap();
-
-    // Verify sources persistence
-    let reloaded_sources = load_sources(&ws).unwrap();
-    assert!(reloaded_sources.sources.contains_key("official-ryuu"));
-
-    // Verify games listing
-    let all_games = list_games(&ws, &reloaded_sources).unwrap();
+    let all_games = parse_feed(feed_content.as_bytes(), "official-ryuu").unwrap();
     assert_eq!(all_games.len(), 2);
 
     // Verify search by title
@@ -94,8 +80,10 @@ fn test_catalog_source_management_and_search() {
     assert_eq!(rpg_results.len(), 1);
     assert_eq!(rpg_results[0].title, "Cyberpunk 2077");
 
-    // Verify find_game by qualified ID
-    let found = find_game(&ws, &reloaded_sources, "official-ryuu:steam-1091500")
+    // Verify find game by ID
+    let found = all_games
+        .iter()
+        .find(|g| g.id == "steam-1091500")
         .expect("game should be found");
     assert_eq!(found.title, "Cyberpunk 2077");
     assert_eq!(found.genres, vec!["Action", "RPG", "Cyberpunk"]);
@@ -429,6 +417,181 @@ fn test_plugin_store_settings_and_transient_job_cleanup() {
     assert_eq!(filtered_jobs.len(), 0);
     // After clear, job file should be removed from disk
     assert!(azdl::jobs::load_job(&ws, &job_id).is_err());
+
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn test_move_game_across_drives_migrates_tree_and_remaps_executable() {
+    let ws = temp_workspace("drive-migration");
+    let drive_a = ws.join("drive_a");
+    let drive_b = ws.join("drive_b");
+    fs::create_dir_all(&drive_a).unwrap();
+    fs::create_dir_all(&drive_b).unwrap();
+
+    let mut settings =
+        load_settings(&ws).unwrap_or_else(|_| azdl::settings::LauncherSettings::default_for(&ws));
+    settings.storage_drives = vec![
+        azdl::settings::StorageDrive {
+            id: "drive-a".into(),
+            label: "Drive A".into(),
+            path: drive_a.clone(),
+            is_default: true,
+        },
+        azdl::settings::StorageDrive {
+            id: "drive-b".into(),
+            label: "Drive B".into(),
+            path: drive_b.clone(),
+            is_default: false,
+        },
+    ];
+    save_settings(&ws, &settings).unwrap();
+
+    // Setup game tree in drive A with nested shipping binary and assets
+    let game_dir = drive_a.join("test-game");
+    let shipping_dir = game_dir.join("Binaries").join("Win64");
+    fs::create_dir_all(&shipping_dir).unwrap();
+    let exe = shipping_dir.join("game.exe");
+    fs::write(&exe, b"MZ_GAME_BIN").unwrap();
+    let asset = game_dir.join("Data").join("assets.pak");
+    fs::create_dir_all(asset.parent().unwrap()).unwrap();
+    fs::write(&asset, b"PAK_DATA").unwrap();
+
+    let mut library = azdl::load_library(&ws).unwrap();
+    add_game(&mut library, "test-game", "Test Game", &game_dir, &exe).unwrap();
+    save_library(&ws, &library).unwrap();
+
+    // Migrate to drive B
+    let new_path = move_game_to_drive(&ws, &mut library, "test-game", "drive-b").unwrap();
+    assert_eq!(new_path, drive_b.join("test-game"));
+
+    // Verify files on destination drive
+    assert!(drive_b.join("test-game/Binaries/Win64/game.exe").is_file());
+    assert!(drive_b.join("test-game/Data/assets.pak").is_file());
+
+    // Verify source files purged
+    assert!(!game_dir.exists());
+
+    // Verify library metadata remapped
+    let moved_game = &library.games["test-game"];
+    assert_eq!(moved_game.install_dir, drive_b.join("test-game"));
+    assert_eq!(
+        moved_game.executable,
+        drive_b.join("test-game/Binaries/Win64/game.exe")
+    );
+
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn test_native_runner_prepares_online_fix_and_propagates_payload() {
+    let ws = temp_workspace("native-fix-prep");
+    let game_dir = ws.join("space-game");
+    let shipping_dir = game_dir.join("Space").join("Binaries").join("Win64");
+    fs::create_dir_all(&shipping_dir).unwrap();
+
+    let exe = shipping_dir.join("SpaceGame-Win64-Shipping.exe");
+    fs::write(&exe, b"MZ_SPACE_GAME").unwrap();
+
+    // Plant OnlineFix files in the root
+    fs::write(game_dir.join("OnlineFix64.dll"), b"DLL_PAYLOAD").unwrap();
+    fs::write(
+        game_dir.join("OnlineFix.ini"),
+        b"[Main]\r\nFakeAppId=480\r\n",
+    )
+    .unwrap();
+
+    let game = Game {
+        id: "space-game".into(),
+        title: "Space Game".into(),
+        install_dir: game_dir.clone(),
+        executable: exe.clone(),
+        runner: Runner::Native,
+        arguments: Vec::new(),
+        environment: BTreeMap::new(),
+        last_played_unix: None,
+        origin: None,
+        steam_app_id: None,
+        launch_options: Vec::new(),
+        selected_launch_option_id: None,
+        cover_url: None,
+        banner_url: None,
+    };
+
+    assert_eq!(
+        detect_fix(&game).unwrap(),
+        azdl::multiplayer::FixKind::OnlineFix
+    );
+
+    // Call prepare_game_launch with Runner::Native for the shipping working directory
+    let prep = prepare_game_launch(&game, &Runner::Native, &shipping_dir).unwrap();
+
+    assert!(prep.notice.is_some());
+    assert!(prep.notice.unwrap().contains("Online Fix"));
+
+    // Verify steam_appid.txt is placed beside shipping exe
+    let appid_file = shipping_dir.join("steam_appid.txt");
+    assert!(appid_file.is_file());
+    assert_eq!(fs::read_to_string(&appid_file).unwrap().trim(), "480");
+
+    // Verify OnlineFix64.dll and OnlineFix.ini were propagated downward to the shipping binary folder
+    assert!(shipping_dir.join("OnlineFix64.dll").is_file());
+    assert!(shipping_dir.join("OnlineFix.ini").is_file());
+
+    let _ = fs::remove_dir_all(&ws);
+}
+
+#[test]
+fn test_plugin_install_with_catalog_url_and_missing_native_library() {
+    let ws = temp_workspace("plugin-bundle-install");
+    let bundle_src = ws.join("bundle");
+    fs::create_dir_all(&bundle_src).unwrap();
+
+    // Manifest with a catalog URL and a C++ library name that does not exist on disk
+    fs::write(
+        bundle_src.join("plugin.json"),
+        r#"{
+            "id": "remote-provider",
+            "name": "Remote Provider",
+            "version": "1.0.0",
+            "apiVersion": 4,
+            "library": "nonexistent_lib",
+            "catalogUrl": "https://example.org/catalog.json"
+        }"#,
+    )
+    .unwrap();
+
+    let archive = ws.join("remote-provider.arach");
+    // Pack using zip/bsdtar
+    let status = azdl::clean_command("tar")
+        .args(["-a", "-c", "-f"])
+        .arg(&archive)
+        .arg("-C")
+        .arg(&ws)
+        .arg("bundle")
+        .status();
+    if status.is_err() || !status.unwrap().success() {
+        // Fallback to bsdtar if tar without -a
+        let _ = azdl::clean_command("bsdtar")
+            .args(["--format", "zip", "-cf"])
+            .arg(&archive)
+            .arg("-C")
+            .arg(&ws)
+            .arg("bundle")
+            .status();
+    }
+
+    if archive.is_file() {
+        let manifest = azdl::plugins::install_bundle(&ws, &archive).unwrap();
+        assert_eq!(manifest.id, "remote-provider");
+        assert_eq!(
+            manifest.catalog_url.as_deref(),
+            Some("https://example.org/catalog.json")
+        );
+
+        let installed = azdl::plugins::list_plugins(&ws).unwrap();
+        assert!(installed.iter().any(|p| p.id == "remote-provider"));
+    }
 
     let _ = fs::remove_dir_all(&ws);
 }

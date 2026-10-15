@@ -144,23 +144,46 @@ pub fn run_setup(
     if !extension.eq_ignore_ascii_case("exe") && !extension.eq_ignore_ascii_case("msi") {
         return Err("installer must be an .exe or .msi file".into());
     }
-    let prefix = data_dir.join("prefixes").join(id);
-    fs::create_dir_all(&prefix)?;
-    let mut command = clean_command("wine");
-    command.env("WINEPREFIX", fs::canonicalize(&prefix)?);
-    command.current_dir(installer.parent().ok_or("installer has no parent")?);
-    if extension.eq_ignore_ascii_case("msi") {
-        command.args(["msiexec", "/i"]);
+    #[cfg(windows)]
+    {
+        let _ = data_dir;
+        let mut command = if extension.eq_ignore_ascii_case("msi") {
+            let mut cmd = clean_command("msiexec");
+            cmd.args(["/i", installer.to_str().ok_or("non-UTF-8 installer path")?]);
+            cmd
+        } else {
+            clean_command(&installer)
+        };
+        command.args(arguments);
+        if let Some(parent) = installer.parent() {
+            command.current_dir(parent);
+        }
+        let status = command.status()?;
+        if !status.success() {
+            return Err(format!("installer exited with {status}").into());
+        }
+        Ok(SetupOutcome::NeedsSelection(Vec::new()))
     }
-    let status = command.arg(installer).args(arguments).status()?;
-    if !status.success() {
-        return Err(format!(
-            "installer exited with {status}; Wine prefix and installed files remain at {}",
-            prefix.display()
-        )
-        .into());
+    #[cfg(not(windows))]
+    {
+        let prefix = data_dir.join("prefixes").join(id);
+        fs::create_dir_all(&prefix)?;
+        let mut command = clean_command("wine");
+        command.env("WINEPREFIX", fs::canonicalize(&prefix)?);
+        command.current_dir(installer.parent().ok_or("installer has no parent")?);
+        if extension.eq_ignore_ascii_case("msi") {
+            command.args(["msiexec", "/i"]);
+        }
+        let status = command.arg(installer).args(arguments).status()?;
+        if !status.success() {
+            return Err(format!(
+                "installer exited with {status}; Wine prefix and installed files remain at {}",
+                prefix.display()
+            )
+            .into());
+        }
+        import_setup(library, data_dir, id, title)
     }
-    import_setup(library, data_dir, id, title)
 }
 
 /// Download an HTTPS setup executable, then run it in the game's Wine prefix.

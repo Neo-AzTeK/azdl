@@ -5,8 +5,9 @@ use crate::validate_id;
 use crate::{Game, Result};
 #[cfg(target_os = "linux")]
 use std::env;
+use std::fs;
 #[cfg(target_os = "linux")]
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 #[cfg(target_os = "linux")]
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -168,24 +169,91 @@ pub fn remove_shortcut(game: &Game, data_dir: &Path, directory: Option<&Path>) -
     Ok(true)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+fn desktop_directory(override_dir: Option<&Path>) -> Result<PathBuf> {
+    if let Some(directory) = override_dir {
+        return Ok(directory.to_path_buf());
+    }
+    if let Some(userprofile) = std::env::var_os("USERPROFILE") {
+        let desktop = PathBuf::from(userprofile).join("Desktop");
+        if desktop.is_dir() {
+            return Ok(desktop);
+        }
+    }
+    if let Some(onedrive) = std::env::var_os("OneDrive") {
+        let desktop = PathBuf::from(onedrive).join("Desktop");
+        if desktop.is_dir() {
+            return Ok(desktop);
+        }
+    }
+    Err("could not locate Windows Desktop directory".into())
+}
+
+#[cfg(windows)]
+fn windows_shortcut_path(game: &Game, directory: Option<&Path>) -> Result<PathBuf> {
+    let desktop = desktop_directory(directory)?;
+    let clean_title = game
+        .title
+        .replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_");
+    Ok(desktop.join(format!("{clean_title}.url")))
+}
+
+#[cfg(windows)]
+pub fn create_shortcut(
+    game: &Game,
+    _data_dir: &Path,
+    _launcher: &Path,
+    directory: Option<&Path>,
+) -> Result<PathBuf> {
+    let path = windows_shortcut_path(game, directory)?;
+    let exe = game.executable.to_string_lossy().replace('/', "\\");
+    let content = format!(
+        "[InternetShortcut]\r\nURL=azdl://launch/{}\r\nIconFile={exe}\r\nIconIndex=0\r\n[azdl]\r\nGameId={}\r\n",
+        game.id, game.id
+    );
+    fs::write(&path, content)?;
+    Ok(path)
+}
+
+#[cfg(windows)]
+pub fn shortcut_status(game: &Game, _data_dir: &Path, directory: Option<&Path>) -> Result<bool> {
+    let path = windows_shortcut_path(game, directory)?;
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let content = fs::read_to_string(&path)?;
+    Ok(content.contains(&format!("azdl://launch/{}", game.id))
+        || content.contains(&format!("GameId={}", game.id)))
+}
+
+#[cfg(windows)]
+pub fn remove_shortcut(game: &Game, data_dir: &Path, directory: Option<&Path>) -> Result<bool> {
+    if !shortcut_status(game, data_dir, directory)? {
+        return Ok(false);
+    }
+    let path = windows_shortcut_path(game, directory)?;
+    fs::remove_file(path)?;
+    Ok(true)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn create_shortcut(
     _game: &Game,
     _data_dir: &Path,
     _launcher: &Path,
     _directory: Option<&Path>,
 ) -> Result<PathBuf> {
-    Err("desktop shortcuts are currently supported on Linux only".into())
+    Err("desktop shortcuts are currently supported on Linux and Windows only".into())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn shortcut_status(_game: &Game, _data_dir: &Path, _directory: Option<&Path>) -> Result<bool> {
-    Err("desktop shortcuts are currently supported on Linux only".into())
+    Err("desktop shortcuts are currently supported on Linux and Windows only".into())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn remove_shortcut(_game: &Game, _data_dir: &Path, _directory: Option<&Path>) -> Result<bool> {
-    Err("desktop shortcuts are currently supported on Linux only".into())
+    Err("desktop shortcuts are currently supported on Linux and Windows only".into())
 }
 
 #[cfg(all(test, target_os = "linux"))]

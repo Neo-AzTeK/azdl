@@ -1,9 +1,8 @@
-use crate::{Game, Library, Result, Runner, clean_command};
+use crate::{Game, Library, Result, Runner};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
 
 #[derive(Debug, Clone)]
 enum Value {
@@ -281,7 +280,7 @@ pub fn import_steam(library: &mut Library, root: &Path, app_id: u32) -> Result<S
             title: game.title,
             install_dir: fs::canonicalize(game.install_dir)?,
             executable: PathBuf::new(),
-            runner: Runner::Steam(app_id),
+            runner: Runner::Auto,
             arguments: Vec::new(),
             environment: BTreeMap::new(),
             last_played_unix: None,
@@ -294,40 +293,6 @@ pub fn import_steam(library: &mut Library, root: &Path, app_id: u32) -> Result<S
         },
     );
     Ok(id)
-}
-
-pub fn steam_command() -> PathBuf {
-    if let Some(program) = env::var_os("AZDL_STEAM_COMMAND") {
-        return PathBuf::from(program);
-    }
-    #[cfg(windows)]
-    if let Ok(root) = steam_root() {
-        return root.join("steam.exe");
-    }
-    PathBuf::from("steam")
-}
-
-pub fn request_install(app_id: u32) -> Result<()> {
-    if app_id == 0 {
-        return Err("Steam app ID must be positive".into());
-    }
-    clean_command(steam_command())
-        .arg(format!("steam://install/{app_id}"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    Ok(())
-}
-
-/// Launch the official Steam desktop client in the background.
-pub fn launch_steam() -> Result<()> {
-    clean_command(steam_command())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -365,7 +330,10 @@ mod tests {
         assert!(games.iter().all(|game| game.installed));
         let mut library = Library::default();
         assert_eq!(import_steam(&mut library, &main, 200).unwrap(), "steam-200");
-        assert_eq!(library.games["steam-200"].runner, Runner::Steam(200));
+        assert_eq!(library.games["steam-200"].runner, Runner::Auto);
+        assert!(
+            crate::set_runner(library.games.get_mut("steam-200").unwrap(), "steam:200").is_err()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

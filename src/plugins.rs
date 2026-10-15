@@ -1,5 +1,5 @@
 use crate::archive::extract_checked;
-use crate::catalog::{CatalogGame, PackageType, load_sources, parse_feed};
+use crate::catalog::{CatalogGame, PackageType, parse_feed};
 use crate::validate_id;
 use crate::{Result, clean_command};
 use libloading::Library as SharedLibrary;
@@ -524,14 +524,25 @@ fn install_bundle_impl(
         if expected_id.is_some_and(|id| id != manifest.id) {
             return Err("plugin package ID does not match the store entry".into());
         }
-        if load_sources(data_dir)?.sources.contains_key(&manifest.id) {
-            return Err("plugin ID conflicts with a catalog source".into());
-        }
         let destination = plugins.join(&manifest.id);
         if fs::symlink_metadata(&destination).is_ok() {
             return Err("plugin ID is already installed".into());
         }
-        open_api(&library_file(&root, &manifest)?)?;
+        if let Ok(lib_path) = library_file(&root, &manifest) {
+            match open_api(&lib_path) {
+                Ok(_) => {}
+                Err(err) => {
+                    if manifest.catalog_url.is_none() && cfg!(target_os = "linux") {
+                        return Err(err);
+                    }
+                    eprintln!(
+                        "Notice: plugin native library could not be dynamically loaded ({err}); installed for catalog URL and bundled kits."
+                    );
+                }
+            }
+        } else if manifest.catalog_url.is_none() {
+            return Err("plugin library file is missing".into());
+        }
         fs::rename(&root, destination)?;
         Ok(manifest)
     })();

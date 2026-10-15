@@ -53,17 +53,30 @@ fn stage_linux(kit: &Path, staging: &Path, payload: &Path, bits: u8) -> Result<(
             copy_file(&unpack.join(name), &payload.join(name))?;
         }
     } else {
-        let optional = staging.join("x86");
-        fs::create_dir(&optional)?;
-        extract_checked(&unpack.join("x86_optional.zip"), &optional)?;
-        for name in ["OnlineFix.dll", "SteamOverlay32.dll"] {
-            copy_file(&optional.join(name), &payload.join(name))?;
+        let win_x86 = kit.join("windows/x86_optional.zip");
+        if win_x86.is_file() {
+            let optional = staging.join("x86");
+            fs::create_dir(&optional)?;
+            extract_checked(&win_x86, &optional)?;
+            copy_file(
+                &optional.join("SteamFix32.dll"),
+                &payload.join("SteamFix32.dll"),
+            )?;
+            copy_file(&optional.join("winmm32.dll"), &payload.join("winmm.dll"))?;
+            fs::write(payload.join("winmm.txt"), b"SteamFix32.dll")?;
+        } else {
+            let optional = staging.join("x86");
+            fs::create_dir(&optional)?;
+            extract_checked(&unpack.join("x86_optional.zip"), &optional)?;
+            for name in ["OnlineFix.dll", "SteamOverlay32.dll"] {
+                copy_file(&optional.join(name), &payload.join(name))?;
+            }
+            copy_file(&optional.join("winmm32.dll"), &payload.join("winmm.dll"))?;
+            fs::write(
+                payload.join("dlllist.txt"),
+                b"OnlineFix.dll\r\nSteamOverlay32.dll\r\n",
+            )?;
         }
-        copy_file(&optional.join("winmm32.dll"), &payload.join("winmm.dll"))?;
-        fs::write(
-            payload.join("dlllist.txt"),
-            b"OnlineFix.dll\r\nSteamOverlay32.dll\r\n",
-        )?;
     }
     Ok(())
 }

@@ -55,7 +55,10 @@ fn validate_manifest_archive(path: &Path, app_id: u32) -> Result<()> {
     let mut file = fs::File::open(path)?;
     let mut signature = [0u8; 4];
     if file.read_exact(&mut signature).is_err()
-        || !matches!(signature, [b'P', b'K', 3, 4] | [b'P', b'K', 5, 6] | [b'P', b'K', 7, 8])
+        || !matches!(
+            signature,
+            [b'P', b'K', 3, 4] | [b'P', b'K', 5, 6] | [b'P', b'K', 7, 8]
+        )
     {
         return Err(format!(
             "No usable download manifest is available for Steam App ID {app_id}: the selected plugin's provider did not return a ZIP manifest"
@@ -451,6 +454,17 @@ pub fn install_steam_manifest_game(
     game: &CatalogGame,
     app_id: u32,
 ) -> Result<InstallOutcome> {
+    install_steam_manifest_game_in(library, data_dir, &data_dir.join("games"), game, app_id)
+}
+
+/// Install a manifest game into a selected library drive.
+pub fn install_steam_manifest_game_in(
+    library: &mut Library,
+    data_dir: &Path,
+    games_dir: &Path,
+    game: &CatalogGame,
+    app_id: u32,
+) -> Result<InstallOutcome> {
     validate_id(&game.id)?;
 
     // 1. If installed in local Steam, import directly
@@ -579,8 +593,7 @@ pub fn install_steam_manifest_game(
     }
 
     // 6. Target installation directory
-    let games_dir = data_dir.join("games");
-    fs::create_dir_all(&games_dir)?;
+    fs::create_dir_all(games_dir)?;
     let target_dir = games_dir.join(&game.id);
     fs::create_dir_all(&target_dir)?;
 
@@ -678,7 +691,9 @@ mod tests {
                 .as_nanos()
         ));
         fs::write(&path, br#"{"error":"app not found"}"#).unwrap();
-        let error = validate_manifest_archive(&path, 620).unwrap_err().to_string();
+        let error = validate_manifest_archive(&path, 620)
+            .unwrap_err()
+            .to_string();
         fs::remove_file(&path).unwrap();
         assert!(error.contains("No usable download manifest"));
         assert!(error.contains("620"));

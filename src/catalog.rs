@@ -1,29 +1,15 @@
-use crate::archive::{fetch_archive, fetch_archive_parts, multipart_names};
+use crate::archive::{fetch_archive_in, fetch_archive_parts_in, multipart_names};
 use crate::jobs::{JobKind, recorded_download_with_sha256};
 use crate::patch::{fetch_patch_archive, fetch_patch_archive_parts};
-use crate::plugins;
 use crate::setup::{SetupOutcome, fetch_setup, fetch_setup_archive, fetch_setup_archive_parts};
 use crate::steam::{import_steam, scan_steam, steam_root};
 use crate::torrent::fetch_magnet;
-use crate::{CatalogOrigin, Game, Library, Result, Runner, clean_command, fetch_game, validate_id};
-use serde::{Deserialize, Serialize};
+use crate::{CatalogOrigin, Game, Library, Result, Runner, fetch_game_in, validate_id};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CatalogSource {
-    pub id: String,
-    pub location: String,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct CatalogSources {
-    #[serde(default)]
-    pub sources: BTreeMap<String, CatalogSource>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackageType {
@@ -93,176 +79,6 @@ pub enum InstallOutcome {
     Installed(String),
     SteamRequested(u32),
     NeedsSelection(String),
-}
-
-pub fn load_sources(data_dir: &Path) -> Result<CatalogSources> {
-    match fs::read(data_dir.join("catalog-sources.json")) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(CatalogSources::default()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-pub fn save_sources(data_dir: &Path, sources: &CatalogSources) -> Result<()> {
-    fs::create_dir_all(data_dir)?;
-    let target = data_dir.join("catalog-sources.json");
-    let temp = data_dir.join("catalog-sources.json.tmp");
-    let mut file = File::create(&temp)?;
-    serde_json::to_writer_pretty(&mut file, sources)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    #[cfg(windows)]
-    if target.exists() {
-        fs::remove_file(&target)?;
-    }
-    fs::rename(temp, target)?;
-    Ok(())
-}
-
-fn is_remote(location: &str) -> bool {
-    location.starts_with("https://")
-}
-
-fn cached_feed(data_dir: &Path, id: &str) -> PathBuf {
-    data_dir.join("catalog-cache").join(format!("{id}.json"))
-}
-
-fn source_payload(data_dir: &Path, source: &CatalogSource) -> Result<Vec<u8>> {
-    if is_remote(&source.location) {
-        Ok(fs::read(cached_feed(data_dir, &source.id))?)
-    } else {
-        Ok(fs::read(&source.location)?)
-    }
-}
-
-pub fn add_source(
-    data_dir: &Path,
-    sources: &mut CatalogSources,
-    id: &str,
-    location: &str,
-) -> Result<usize> {
-    validate_id(id)?;
-    if location.contains("://") && !is_remote(location) {
-        return Err("remote catalog URL must use HTTPS".into());
-    }
-    if sources.sources.contains_key(id) {
-        return Err("catalog source ID already exists".into());
-    }
-    if fs::symlink_metadata(data_dir.join("plugins").join(id)).is_ok() {
-        return Err("catalog source ID belongs to an installed plugin".into());
-    }
-    let location = if is_remote(location) {
-        location.to_string()
-    } else {
-        let path = fs::canonicalize(location)?;
-        if !path.is_file() {
-            return Err("catalog path is not a file".into());
-        }
-        path.to_string_lossy().into_owned()
-    };
-    let source = CatalogSource {
-        id: id.to_string(),
-        location,
-    };
-    let count = if is_remote(&source.location) {
-        refresh_source(data_dir, &source)?
-    } else {
-        parse_feed(&fs::read(&source.location)?, id)?.len()
-    };
-    sources.sources.insert(id.to_string(), source);
-    Ok(count)
-}
-
-pub fn refresh_source(data_dir: &Path, source: &CatalogSource) -> Result<usize> {
-    if !is_remote(&source.location) {
-        return Ok(parse_feed(&fs::read(&source.location)?, &source.id)?.len());
-    }
-    let target = cached_feed(data_dir, &source.id);
-    fs::create_dir_all(target.parent().ok_or("invalid catalog cache path")?)?;
-    let temp = target.with_extension("json.tmp");
-    if fs::symlink_metadata(&temp).is_ok_and(|metadata| !metadata.is_file()) {
-        return Err("temporary catalog path is not a regular file".into());
-    }
-    let status = clean_command("curl")
-        .args([
-            "--fail",
-            "--location",
-            "--retry",
-            "3",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-        ])
-        .arg("--output")
-        .arg(&temp)
-        .arg(&source.location)
-        .status()?;
-    if !status.success() {
-        return Err(format!("catalog download failed ({status})").into());
-    }
-    let count = parse_feed(&fs::read(&temp)?, &source.id)?.len();
-    #[cfg(windows)]
-    if target.exists() {
-        fs::remove_file(&target)?;
-    }
-    fs::rename(temp, target)?;
-    Ok(count)
-}
-
-pub fn list_games(data_dir: &Path, sources: &CatalogSources) -> Result<Vec<CatalogGame>> {
-    let mut games = Vec::new();
-    for source in sources.sources.values() {
-        match source_payload(data_dir, source) {
-            Ok(payload) => match parse_feed(&payload, &source.id) {
-                Ok(feed_games) => games.extend(feed_games),
-                Err(err) => {
-                    eprintln!(
-                        "Warning: failed to parse feed for source '{}': {err}",
-                        source.id
-                    );
-                }
-            },
-            Err(err) => {
-                eprintln!(
-                    "Warning: failed to load feed for source '{}': {err}",
-                    source.id
-                );
-            }
-        }
-    }
-    match plugins::catalog_games(data_dir) {
-        Ok(plugin_games) => games.extend(plugin_games),
-        Err(err) => {
-            eprintln!("Warning: failed to load plugin catalog games: {err}");
-        }
-    }
-    games.sort_by(|a, b| {
-        a.title
-            .to_lowercase()
-            .cmp(&b.title.to_lowercase())
-            .then_with(|| a.qualified_id().cmp(&b.qualified_id()))
-    });
-    Ok(games)
-}
-
-pub fn find_game(
-    data_dir: &Path,
-    sources: &CatalogSources,
-    qualified_id: &str,
-) -> Result<CatalogGame> {
-    let (source_id, id) = qualified_id
-        .split_once(':')
-        .ok_or("use source-id:game-id")?;
-    let games = if let Some(source) = sources.sources.get(source_id) {
-        parse_feed(&source_payload(data_dir, source)?, source_id)?
-    } else {
-        plugins::catalog_for(data_dir, source_id)?
-    };
-    games
-        .into_iter()
-        .find(|game| game.id == id)
-        .ok_or_else(|| "unknown catalog game".into())
 }
 
 fn text_field<'a>(entry: &'a Value, key: &str) -> Option<&'a str> {
@@ -826,6 +642,7 @@ pub fn clear_pending_setup_origin(data_dir: &Path, id: &str) -> Result<()> {
 fn install_plugin_game(
     library: &mut Library,
     data_dir: &Path,
+    games_dir: &Path,
     game: &CatalogGame,
 ) -> Result<InstallOutcome> {
     let steam_app_id = game.steam_app_id.or_else(|| {
@@ -837,7 +654,9 @@ fn install_plugin_game(
     if game.source_id == "steamidra"
         && let Some(app_id) = steam_app_id
     {
-        return crate::steam_depot::install_steam_manifest_game(library, data_dir, game, app_id);
+        return crate::steam_depot::install_steam_manifest_game_in(
+            library, data_dir, games_dir, game, app_id,
+        );
     }
 
     if let Some(url) = &game.uri {
@@ -852,7 +671,15 @@ fn install_plugin_game(
         };
         let filename_path = Path::new(filename);
         prefetch.file(filename, url, game.sha256.as_deref())?;
-        fetch_archive(library, data_dir, &id, &game.title, url, filename_path)?;
+        crate::archive::fetch_archive_in(
+            library,
+            data_dir,
+            games_dir,
+            &id,
+            &game.title,
+            url,
+            filename_path,
+        )?;
         return Ok(InstallOutcome::Installed(id));
     }
 
@@ -868,8 +695,18 @@ pub fn install_game(
     data_dir: &Path,
     game: &CatalogGame,
 ) -> Result<InstallOutcome> {
+    install_game_in(library, data_dir, &data_dir.join("games"), game)
+}
+
+/// Install a plugin game into a selected library drive.
+pub fn install_game_in(
+    library: &mut Library,
+    data_dir: &Path,
+    games_dir: &Path,
+    game: &CatalogGame,
+) -> Result<InstallOutcome> {
     match game.package_type {
-        PackageType::Plugin => install_plugin_game(library, data_dir, game),
+        PackageType::Plugin => install_plugin_game(library, data_dir, games_dir, game),
         PackageType::Steam(app_id) => {
             if let Ok(root) = steam_root()
                 && scan_steam(&root)?
@@ -921,14 +758,23 @@ pub fn install_game(
                     } else {
                         prefetch.parts(filename, &game.archive_parts, &game.archive_part_hashes)?;
                     }
-                    let pending = data_dir.join("games").join(&id);
+                    let pending = games_dir.join(&id);
                     let existed_before = fs::symlink_metadata(&pending).is_ok();
                     let result = if game.archive_parts.is_empty() {
-                        fetch_archive(library, data_dir, &id, &game.title, url, filename_path)
-                    } else {
-                        fetch_archive_parts(
+                        fetch_archive_in(
                             library,
                             data_dir,
+                            games_dir,
+                            &id,
+                            &game.title,
+                            url,
+                            filename_path,
+                        )
+                    } else {
+                        fetch_archive_parts_in(
+                            library,
+                            data_dir,
+                            games_dir,
                             &id,
                             &game.title,
                             filename_path,
@@ -945,9 +791,20 @@ pub fn install_game(
                 }
                 PackageType::Executable => {
                     prefetch.file(filename, url, game.sha256.as_deref())?;
-                    fetch_game(library, data_dir, &id, &game.title, url, filename_path)?;
+                    fetch_game_in(
+                        library,
+                        data_dir,
+                        games_dir,
+                        &id,
+                        &game.title,
+                        url,
+                        filename_path,
+                    )?;
                 }
                 PackageType::Setup => {
+                    if games_dir != data_dir.join("games") {
+                        return Err("Setup packages currently require the built-in Default Library directory".into());
+                    }
                     prefetch.file(filename, url, game.sha256.as_deref())?;
                     let (_, outcome) =
                         fetch_setup(library, data_dir, &id, &game.title, url, filename_path, &[])?;
@@ -957,6 +814,9 @@ pub fn install_game(
                     }
                 }
                 PackageType::SetupArchive => {
+                    if games_dir != data_dir.join("games") {
+                        return Err("Setup packages currently require the built-in Default Library directory".into());
+                    }
                     if game.archive_parts.is_empty() {
                         prefetch.file(filename, url, game.sha256.as_deref())?;
                     } else {
@@ -994,6 +854,12 @@ pub fn install_game(
             Ok(InstallOutcome::Installed(id))
         }
         PackageType::Magnet => {
+            if games_dir != data_dir.join("games") {
+                return Err(
+                    "Magnet packages currently require the built-in Default Library directory"
+                        .into(),
+                );
+            }
             let id = install_id(game);
             let uri = game
                 .uri
@@ -1450,24 +1316,12 @@ mod tests {
     }
 
     #[test]
-    fn local_source_search_and_lookup() {
-        let root = std::env::temp_dir().join(format!("azdl-catalog-{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
-        let feed = root.join("feed.json");
-        fs::write(&feed, br#"{"games":[{"id":"one","title":"Game One","downloadUrl":"https://example.org/one.exe"}]}"#).unwrap();
-        let mut sources = CatalogSources::default();
-        assert_eq!(
-            add_source(&root, &mut sources, "local", feed.to_str().unwrap()).unwrap(),
-            1
-        );
-        save_sources(&root, &sources).unwrap();
-        let loaded = load_sources(&root).unwrap();
-        assert_eq!(list_games(&root, &loaded).unwrap().len(), 1);
-        assert_eq!(
-            find_game(&root, &loaded, "local:one").unwrap().package_type,
-            PackageType::Executable
-        );
-        fs::remove_dir_all(root).unwrap();
+    fn local_feed_search_and_lookup() {
+        let feed = br#"{"games":[{"id":"one","title":"Game One","downloadUrl":"https://example.org/one.exe"}]}"#;
+        let games = parse_feed(feed, "local").unwrap();
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].id, "one");
+        assert_eq!(games[0].package_type, PackageType::Executable);
     }
 
     #[test]
@@ -1504,6 +1358,7 @@ mod tests {
         fs::create_dir_all(&downloads).unwrap();
         assert!(
             std::process::Command::new("bsdtar")
+                .arg("-a")
                 .arg("-cf")
                 .arg(downloads.join("3892270.zip"))
                 .arg("-C")

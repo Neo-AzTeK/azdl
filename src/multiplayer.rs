@@ -671,7 +671,7 @@ pub fn steam_running() -> bool {
 
 /// Detect and report multiplayer fix markers before game launch without requiring Steam to be running.
 pub fn prepare_fix_launch(game: &Game, runner: &Runner) -> Result<Option<String>> {
-    if !matches!(runner, Runner::Wine | Runner::Proton(_)) {
+    if !matches!(runner, Runner::Wine | Runner::Proton(_) | Runner::Native) {
         return Ok(None);
     }
     prepare_fix_launch_for_kind(detect_fix(game)?)
@@ -691,12 +691,16 @@ pub fn prepare_game_launch(
     runner: &Runner,
     working_directory: &Path,
 ) -> Result<LaunchFixPreparation> {
-    if !matches!(runner, Runner::Wine | Runner::Proton(_)) {
+    if !matches!(runner, Runner::Wine | Runner::Proton(_) | Runner::Native) {
         return Ok(LaunchFixPreparation::default());
     }
     let locations = fix_locations(game)?;
     let kind = detected_fix(&locations)?;
-    let environment = fix_environment_for_locations(game, &locations, kind)?;
+    let environment = if matches!(runner, Runner::Wine | Runner::Proton(_)) {
+        fix_environment_for_locations(game, &locations, kind)?
+    } else {
+        std::collections::BTreeMap::new()
+    };
     let warnings = prepare_fix_files_for_locations(game, working_directory, &locations, kind)?;
     let notice = prepare_fix_launch_for_kind(kind)?;
     Ok(LaunchFixPreparation {
