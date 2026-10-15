@@ -162,7 +162,7 @@ azdl steam install 620 steamidra
 
 The Plugin Store installs `.arach` bundles and verifies their package digests. The desktop game page lists installed plugins as download choices. A favorite plugin can be set in Settings; it is used automatically for installs, while multiple installed plugins without a favorite require an explicit choice. Search results are Steam games whether or not any installed plugin can download them. Steam Store search and featured routes are used without a bundled Web API key; these Store endpoints are less stable than Valve's documented keyed `IStoreService/GetAppList`. Network acceptance could not be verified in an offline build environment.
 
-For installed games, the game page shows DLC entries explicitly supplied by the source plugin. Archive DLC is installed additively and recorded with file hashes for safe removal. Steam Store DLC listings alone do not provide downloadable content, and plugin-owned DLC installers are not yet supported. Installing to a selected storage drive is supported for archive, executable, and Steam depot packages; setup and magnet packages currently require the built-in Default Library directory.
+For installed games, the game page shows DLC entries explicitly supplied by the source plugin. Archive DLC is installed additively and recorded with file hashes for safe removal. Steam Store DLC listings alone do not provide downloadable content, and plugin-owned DLC installers are not yet supported. Remove installed DLC before moving a game to another drive. Installing to a selected storage drive is supported for archive, executable, and Steam depot packages; setup and magnet packages currently require the built-in Default Library directory.
 
 ```sh
 azdl list
@@ -198,7 +198,7 @@ azdl fix-status my-game
 azdl remove my-game
 ```
 
-On Linux, `auto` runs an `.exe` with an installed Proton when a Steam client directory is available, then falls back to Wine. Other files launch natively. `azdl runners` lists Proton installations found in Steam libraries, Steam's `compatibilitytools.d`, and `AZDL_DATA_DIR/runners`. Use `proton:auto` to require an installed Proton, or `proton:/path/to/proton` to choose one. Set `AZDL_STEAM_ROOT` or `STEAM_COMPAT_CLIENT_INSTALL_PATH` when Steam is in a nonstandard location. A Proton profile uses its own compatibility data directory per game. The launcher does not start the official Steam client. Removing a managed game deletes its installed files and local state.
+On Linux, `auto` runs an `.exe` with an installed Proton when a Steam client directory is available, then falls back to Wine. Other files launch natively. `azdl runners` lists Proton installations found in Steam libraries, Steam's `compatibilitytools.d`, and `AZDL_DATA_DIR/runners`. Use `proton:auto` to require an installed Proton, or `proton:/path/to/proton` to choose one. Set `AZDL_STEAM_ROOT` or `STEAM_COMPAT_CLIENT_INSTALL_PATH` when Steam is in a nonstandard location. A Proton profile uses its own compatibility data directory per game. The launcher does not start the official Steam client. Desktop Uninstall deletes managed game files and local state; CLI `azdl remove` only removes the library entry.
 
 `doctor` reports local launch prerequisites for one game, including its resolved runner, missing executable or Wine/Proton/Steam command, patch state, and detected fix markers. It exits with an error when a required local file or runner is unavailable. A clean result does not verify game startup or multiplayer.
 
