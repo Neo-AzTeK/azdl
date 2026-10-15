@@ -4,7 +4,9 @@
 
 The launcher installs a DLC only when the installed game's source plugin supplies an explicit HTTPS archive or multipart archive with `kind: "dlc"`. The host downloads and checks any supplied SHA-256 digest, extracts with archive path and symlink checks, and adds files without overwriting the base game. A per-DLC manifest records owned files and hashes for safe removal. A failed or interrupted copy can be recovered from the game page; recovery refuses to remove files changed after installation began. DLC records follow the game when it moves to another drive.
 
-Steam Store DLC metadata is descriptive. It is not a download source. A catalog entry with a DLC ID but no artifact is shown as unavailable.
+Steam Store DLC metadata is descriptive. It is not a download source. Catalog entries explicitly marked unavailable disable installation. The parser currently defaults availability to true when the flag is absent, so an entry without an artifact can still fail after Install is clicked; deriving availability from a validated artifact is part of the evolution plan.
+
+The researched evolution plan is in [DLC_PLAN.md](DLC_PLAN.md). Steam depot DLC can reuse the existing depotkit transport once exact depot selection, compatibility checks, and content receipts are implemented; the generic provider session ABI below is a separate extension.
 
 ## Provider-owned delivery
 

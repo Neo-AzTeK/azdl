@@ -1,0 +1,115 @@
+# DLC discovery, planning, and installation
+
+Proposed implementation plan, researched on 2026-10-15. This document describes future work; the currently shipped capability remains additive archive DLC.
+
+The next milestone is a Steam content resolver that joins DLC identities, depot metadata, available artifacts, and installation receipts. Reuse the existing depotkit transport and DLC recovery machinery. A general plugin download-session ABI is a later extension, not a prerequisite for Steam depot DLC.
+
+## Evidence and current gaps
+
+Steam supports content included in base game files and content delivered separately. One DLC can require multiple depots for different platforms, architectures, or languages. The older DLC guide describes base-app-managed depots; the depot guide also documents the newer option to manage depots under a DLC App ID. The resolver must support both arrangements. See [Valve's DLC guide](https://partner.steamgames.com/doc/store/application/dlc?l=english) and [depot rules](https://partner.steamgames.com/doc/store/application/depots?l=english).
+
+| Source | Useful information | Limits |
+| --- | --- | --- |
+| Steam Store `appdetails` | Base game's `dlc` IDs; DLC `type`, name, artwork, and `fullgame.appid` | Presentation and discovery; missing entries or failed requests do not establish that DLC does not exist. No download plan or ownership proof. |
+| Steam appinfo | Observed `extended.listofdlc`, depot `dlcappid`, `config`, `manifests.<branch>.gid`, sizes, branch build IDs, and `depotfromapp` | Availability varies; preserve source, retrieval time, and completeness. A public manifest ID does not establish download access. |
+| Binary depot manifest | Depot ID, manifest ID, file paths, sizes, hashes, chunks, and file flags | Describes one content snapshot; does not by itself identify the DLC, its parent game, or account ownership. Filenames may be encrypted. |
+| Provider manifest bundle | The Lua parser currently extracts depot key references and requested manifest IDs, then pairs them with `.manifest` files | This provider format is not Steam appinfo. The existing parser does not establish DLC membership, target platform, branch, or build compatibility. |
+| Local installation receipt | Exact committed files and content revisions | Authoritative only for operations recorded and verified by azdl. Old installations have incomplete provenance. |
+
+SteamKit exposes product information through [PICS](https://github.com/SteamRE/SteamKit/blob/master/SteamKit2/SteamKit2/Steam/Handlers/SteamApps/SteamApps.cs). Its [manifest implementation](https://github.com/SteamRE/SteamKit/blob/master/SteamKit2/SteamKit2/Types/DepotManifest.cs) provides the binary fields above. [DepotDownloader](https://github.com/SteamRE/DepotDownloader/blob/master/DepotDownloader/ContentDownloader.cs) demonstrates branch manifest resolution and following `depotfromapp` references.
+
+A live read on the research date returned these observations:
+
+- [Elden Ring Store metadata](https://store.steampowered.com/api/appdetails?appids=1245620&l=english) listed DLC IDs `3655690`, `2778590`, and `2778580`.
+- [Shadow of the Erdtree Store metadata](https://store.steampowered.com/api/appdetails?appids=2778580&l=english) identified itself as `type: dlc` with parent `1245620`.
+- [The appinfo relay response](https://api.steamcmd.net/v1/info/1245620) listed nine DLC IDs in `extended.listofdlc`. Depot `2778580` had `dlcappid: 2778580` and a public manifest. Several other DLC depot entries lacked a public manifest. This is an observed third-party relay snapshot, not a direct authenticated PICS query or proof of downloadable content.
+
+The relay is the open-source [steamcmd/api service](https://github.com/steamcmd/api), also used by the Arachnel reference implementation for size metadata. Treat it as a replaceable metadata adapter with bounded timeouts and cached responses. No game content or provider manifest archive was downloaded during this research.
+
+Repository findings:
+
+- `src/dlc.rs::available_for_game` explicitly returns no DLC for `steamidra`; other sources expose only catalog add-ons.
+- `src-tauri/src/main.rs` drops Store DLC fields from its presentation payload. Keep that payload small and introduce a dedicated core DLC metadata result.
+- `src/catalog.rs::parse_addons` defaults `content_available` to true, even without a usable artifact. A declaration must not be sufficient to enable Install.
+- `src/steam_depot.rs::parse_lua_manifests` ignores its App ID parameter, loses manifest IDs from the returned type, silently skips missing files, and can fall back to an arbitrary matching manifest when the requested one is absent.
+- `install_steam_manifest_game_in` downloads all parsed depots into the game directory, with no DLC, OS, language, or branch selection and no persistent depot receipt.
+- `download_steam_depots` already accepts an explicit depot subset and destination. It can target staging. Its request has one App ID, so cross-app/shared depots need requests grouped by the resolved content-owner App ID.
+- The existing archive DLC transaction rejects all existing paths. Steam's ordered depot overlays can legitimately contain overlapping files, which requires a broader file ownership model before general support.
+
+## Proposed core model
+
+Keep these concepts independent:
+
+- `DlcDescriptor`: stable identity, optional Steam DLC App ID, parent App ID, source plugin identity, display metadata, and metadata provenance.
+- `DlcDelivery`: `Archive`, `SteamDepots`, `IncludedInBase`, `ProviderSession`, or `Unknown`. An empty depot response is `Unknown`, not evidence for `IncludedInBase`.
+- `DlcAvailability`: resolved capability and a reason such as missing manifest, incomplete metadata, unsupported target, unavailable provider, or incompatible base revision. Access/entitlement evidence, when supplied by a provider, is recorded separately from file presence.
+- `DlcInstallPlan`: immutable plan ID, game/source identity, target OS/architecture/language, branch, metadata snapshot, compatible base receipt revision, exact content-owner App IDs, depot IDs, manifest IDs, sizes, and proposed filesystem operations.
+- `InstalledContentReceipt`: base game and DLC content references, exact depot revisions, shared file ownership, hashes, rollback references, and transaction state. Use paths relative to the game root so drive moves remain valid.
+
+Manifest IDs are 64-bit values: keep them as `u64` in Rust and decimal strings in JSON sent to JavaScript. Retain depot credentials inside the backend/provider boundary and exclude them from UI payloads and logs.
+
+## Ordered implementation
+
+### 1. Discover DLC and report availability accurately
+
+Add `src/steam_metadata.rs` for typed Store/appinfo adapters, parsing, caching, and provenance. Merge Store IDs, appinfo relationships, provider catalog entries, and installed receipts by stable identity. A missing Store page must not remove an installed DLC record. Preserve unknown states after network failures.
+
+Start with the existing HTTPS transport and a replaceable appinfo relay adapter; keep room for direct PICS metadata supplied by a native provider. Cache display metadata longer than install metadata, deduplicate concurrent requests, limit response size and concurrency, and refresh plan inputs before installation. Query DLC appinfo where metadata indicates separately managed depots or base metadata leaves the mapping unresolved; bound recursive/shared-app lookups and reject cycles.
+
+Return one typed core result through Tauri's `get_game_dlc`. Display known DLC even when it cannot currently be downloaded, with a short actionable reason. Derive archive availability from a validated URL, filename, and transport rather than the existing boolean alone. Replace the hardcoded `steamidra` exclusion once its resolver can report explicit states.
+
+Completion evidence: captured minimal metadata fixtures cover missing Store pages, Store/appinfo disagreement, separately managed depots, failed requests, and an archive entry without an artifact. Discovery works without downloading content.
+
+### 2. Resolve exact depot plans
+
+Add a pure planner in `src/steam_content.rs`; keep I/O and native engine calls outside it. Evolve `DepotInfo` into an inventory with exact manifest identity and validation results. Parse provider data without executing Lua. Verify manifest headers against the requested depot/manifest pair, report missing artifacts explicitly, and reject ambiguous fallback selection.
+
+Resolve DLC membership using app metadata and explicit provider mappings. Never infer membership from similar titles, nearby IDs, or a depot filename. Filter by the game's target OS, architecture, and language; a Windows game using Proton still selects Windows depots on Linux. Resolve shared content references and include only the chosen DLC and its required content. Keep runtime redistributables distinct from DLC.
+
+Pin the plan to the installed base revision and the provider's content snapshot. Current public appinfo may describe a newer build than a supplied manifest bundle. If compatibility cannot be established, report it and require a compatible source revision or a coordinated base update. Separately managed apps can have different build IDs; equality of their build IDs is not a compatibility rule.
+
+Preserve actual depot mounting order where supplied. JSON key order and numeric depot order are not substitutes. If the metadata adapter loses ordering, reject conflicting overlays until an authoritative ordering is available. Preview download/disk estimates, using manifest totals when available and marking appinfo estimates as estimates.
+
+Completion evidence: the same inputs produce the same exact plan; no unselected DLC/language depot is included; wrong-manifest fallback, shared-reference cycles, and unknown compatibility produce specific errors. Include a Steam App ID with no provider manifest to verify the existing clear-error requirement.
+
+### 3. Persist content receipts and support staged depot DLC
+
+Write base depot receipts on new Steam installs before offering managed depot DLC. Extract the archive DLC commit/recovery machinery into a common staged-content transaction. Use the existing depotkit engine to fetch the planned subset into an isolated staging directory, grouped by content-owner App ID. Validate staged file types, paths, hashes, Windows case collisions, and the base receipt revision before committing.
+
+The first release supports additive files and identical shared files with reference tracking. Conflicting different-content paths get a clear unsupported/conflict result. This yields useful Steam DLC support without claiming compatibility with every depot overlay arrangement.
+
+Use one game mutation lock for install, DLC change, base update, move, and uninstall; refuse content changes while the game is running. Keep a durable transaction journal with enough per-file state to recover after any individual commit step. Rollback removes only files the transaction created and preserves unrelated modifications. Cleanup removes temporary downloads after success while retaining receipts and rollback data required for recovery.
+
+Completion evidence: interruption at each transaction stage, cancellation, disk-full failure, retry, removal, and drive movement preserve the base game. A real additive DLC completes on Linux and Windows and is checked inside the game separately from filesystem verification.
+
+### 4. Integrate selection and persistent background jobs
+
+Offer a DLC selector during base installation and management on the installed game page. Default new installs to base content with explicit DLC selection; retain selected DLC across updates. Use the same planner for base installation and later DLC changes so the existing path no longer downloads every depot in a bundle.
+
+Queue an operation and return its job ID immediately. Persist the plan and progress phases (`resolving`, `downloading`, `verifying`, `committing`, terminal result) so navigation and app restart do not lose the operation. Reuse the transfer drawer, activity indicator, state-change notifications, and notifications service. Tauri remains a command/event adapter; Svelte displays core state and available actions.
+
+Suggested visible states: Checking, Available, Downloading, Installed, Recovery needed, Included with base files, and Unavailable with a reason. Include `Update available` only after update planning exists. File installation does not establish that a game grants access to content; included content must not create a fake download or claim activation. Steam's game-facing APIs distinguish ownership and installation; their callbacks do not replace azdl's own job events. See [ISteamApps](https://partner.steamgames.com/doc/api/ISteamApps?l=english).
+
+Completion evidence: switching pages during installation, restarting after interruption, duplicate clicks, and provider removal retain consistent status. Notifications appear once and changed DLC state refreshes without reloading the app.
+
+### 5. Add ordered overlays, updates, and migration
+
+Extend receipts to track the ordered owners of each path and backups of overridden content. Removing one DLC must restore the next applicable version and retain files still required by the base game or another DLC. Reject user-modified conflicts rather than overwriting them silently. Coordinate base updates with selected DLC and existing launcher patches through the same journal and ownership model.
+
+An old game installed by today's downloader may already contain DLC files because all bundle depots were fetched. Mark it as an installation with unknown content provenance. Offer verification against exact known manifests and migrate only provable records; matching bytes alone must not grant deletion rights over imported/user-owned files. Do not delete unexplained files or claim DLC is missing merely because no DLC receipt exists. Import old additive archive receipts with backward-compatible defaults.
+
+Completion evidence: shared files, different-content overlays, DLC A/B removal order, modified files, base update plus DLC update, and old installations are covered by lifecycle tests. Live testing includes both an additive DLC and a DLC that overlaps base content.
+
+### 6. Extend provider capabilities when required
+
+Move the hardcoded manifest-provider URL and downloader discovery behind the game's selected source adapter. Define structured metadata and artifact-resolution capabilities, then implement them for the existing Steam path. Bind engine selection to an explicit provider capability instead of selecting any installed library with a matching symbol. Keep archive delivery compatible.
+
+A provider that needs its own download process can later implement the versioned session ABI described in [DLC.md](DLC.md), with staging, progress, cancellation, and artifact receipts. Implementing that ABI is independent of the Steam subset downloader. Built-in content and server-managed content remain explicit delivery states; this plan does not equate a metadata entry with an installable artifact.
+
+## First deliverable and validation boundary
+
+Implement steps 1 and 2 first: a populated DLC list plus a deterministic, inspectable plan explaining exactly what could be installed and why anything is unavailable. Then enable staged Steam downloads after receipts and transaction tests pass. Source adapter extraction for the existing Steam provider accompanies that work; the generic session ABI can wait.
+
+Required automated coverage includes 64-bit ID serialization, stale metadata, missing manifests, multiple depots per DLC, target filtering, both depot-management layouts, shared depots, no-separate-file/unknown delivery, interrupted transactions, base/DLC version changes, and migration. Run Rust tests and clippy, frontend tests/build for UI changes, and Linux/Windows CI.
+
+Research verified public metadata and inspected repository code. It did not verify provider artifact availability for the sample game, download DLC, validate in-game access, or establish Windows runtime acceptance. Those remain explicit implementation acceptance gates.
