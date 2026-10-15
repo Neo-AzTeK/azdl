@@ -29,6 +29,7 @@ pub mod setup;
 mod sha256;
 pub mod shortcuts;
 pub mod steam;
+pub mod steam_content;
 pub mod steam_depot;
 pub mod steam_discovery;
 pub mod steam_metadata;
@@ -252,6 +253,7 @@ pub fn remove_game(library: &mut Library, data_dir: &Path, id: &str) -> Result<(
     let _ = cleanup_leftovers(data_dir, Some(id));
     let _ = fs::remove_dir_all(data_dir.join("dlc").join(id));
     let _ = fs::remove_dir_all(data_dir.join("dlc-downloads").join(id));
+    let _ = fs::remove_file(data_dir.join("content-receipts").join(format!("{id}.json")));
 
     // Clean up any jobs associated with this game
     if let Ok(jobs) = jobs::list_jobs(data_dir) {

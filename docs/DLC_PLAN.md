@@ -1,6 +1,6 @@
 # DLC discovery, planning, and installation
 
-Proposed implementation plan, researched on 2026-10-15. This document describes future work; the currently shipped capability remains additive archive DLC.
+Implementation plan, researched on 2026-10-15. Discovery, exact provider revision matching, managed base receipts, additive staged depot DLC, and background desktop tasks have initial implementations. Live DLC installation and game access remain unverified.
 
 The next milestone is a Steam content resolver that joins DLC identities, depot metadata, available artifacts, and installation receipts. Reuse the existing depotkit transport and DLC recovery machinery. A general plugin download-session ABI is a later extension, not a prerequisite for Steam depot DLC.
 

@@ -262,6 +262,48 @@ pub fn install_archive(
     validate_id(&game.id)?;
     validate_id(dlc_id)?;
     let _lock = lock_game(data_dir, &game.id)?;
+    let archive = fs::canonicalize(archive)?;
+    if !archive.is_file() {
+        return Err("DLC archive is missing".into());
+    }
+    install_payload_unlocked(game, data_dir, dlc_id, |payload| {
+        extract_checked(&archive, payload)
+    })
+}
+
+/// Install files already downloaded into an isolated directory using the DLC transaction.
+pub fn install_staged(
+    game: &Game,
+    data_dir: &Path,
+    dlc_id: &str,
+    source_dir: &Path,
+) -> Result<usize> {
+    validate_id(&game.id)?;
+    validate_id(dlc_id)?;
+    let _lock = lock_game(data_dir, &game.id)?;
+    let source_dir = fs::canonicalize(source_dir)?;
+    if !source_dir.is_dir() {
+        return Err("DLC staging directory is missing".into());
+    }
+    install_payload_unlocked(game, data_dir, dlc_id, |payload| {
+        let mut files = Vec::new();
+        collect_files(&source_dir, &source_dir, &mut files)?;
+        for relative in files {
+            let from = source_dir.join(&relative);
+            let to = payload.join(&relative);
+            fs::create_dir_all(to.parent().ok_or("invalid DLC path")?)?;
+            fs::copy(from, to)?;
+        }
+        Ok(())
+    })
+}
+
+fn install_payload_unlocked(
+    game: &Game,
+    data_dir: &Path,
+    dlc_id: &str,
+    prepare_payload: impl FnOnce(&Path) -> Result<()>,
+) -> Result<usize> {
     let install = fs::canonicalize(&game.install_dir)?;
     if !install.is_dir() {
         return Err("Base game installation is missing".into());
@@ -269,10 +311,6 @@ pub fn install_archive(
     let state = state_dir(data_dir, &game.id, dlc_id);
     if fs::symlink_metadata(&state).is_ok() {
         return Err("DLC is already installed or has an interrupted installation".into());
-    }
-    let archive = fs::canonicalize(archive)?;
-    if !archive.is_file() {
-        return Err("DLC archive is missing".into());
     }
     let parent = state.parent().ok_or("invalid DLC state directory")?;
     fs::create_dir_all(parent)?;
@@ -282,7 +320,7 @@ pub fn install_archive(
     let result = (|| -> Result<usize> {
         let payload = staging.join("payload");
         fs::create_dir(&payload)?;
-        extract_checked(&archive, &payload)?;
+        prepare_payload(&payload)?;
         let mut files = Vec::new();
         collect_files(&payload, &payload, &mut files)?;
         files.sort();
@@ -628,6 +666,15 @@ mod tests {
         remove(&game, &root, "bonus").unwrap();
         assert_eq!(fs::read(game_dir.join("base.exe")).unwrap(), b"base");
         assert!(!game_dir.join("Content/DLC/bonus.dat").exists());
+        assert_eq!(
+            install_staged(&game, &root, "depot-dlc", &source).unwrap(),
+            1
+        );
+        assert_eq!(
+            fs::read(game_dir.join("Content/DLC/bonus.dat")).unwrap(),
+            b"bonus"
+        );
+        remove(&game, &root, "depot-dlc").unwrap();
         install_archive(&game, &root, "bonus2", &archive).unwrap();
         let interrupted = state_dir(&root, &game.id, "bonus2");
         let manifest: DlcManifest =

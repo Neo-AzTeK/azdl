@@ -2,11 +2,11 @@
 
 ## Supported today
 
-The launcher installs a DLC only when the installed game's source plugin supplies an explicit HTTPS archive or multipart archive with `kind: "dlc"`. The host downloads and checks any supplied SHA-256 digest, extracts with archive path and symlink checks, and adds files without overwriting the base game. A per-DLC manifest records owned files and hashes for safe removal. A failed or interrupted copy can be recovered from the game page; recovery refuses to remove files changed after installation began. DLC records follow the game when it moves to another drive.
+The launcher installs source supplied HTTPS DLC archives and has an experimental Steam depot DLC path for managed `steamidra` base installs. Archive downloads check any supplied SHA-256 digest. Both paths stage files, reject archive path traversal and symlinks, and add files without overwriting the base game. A per-DLC manifest records owned files and hashes for safe removal. A failed or interrupted copy can be recovered from the game page; recovery refuses to remove files changed after installation began. DLC records follow the game when it moves to another drive.
 
-Steam Store DLC metadata is descriptive. It is not a download source. Catalog DLC is enabled only when its source supplies a valid HTTPS archive artifact and does not explicitly mark the entry unavailable. Steam Store and appinfo relationships can be shown in the game page, but depot DLC remains unavailable until matching provider manifests are resolved.
+Steam Store DLC metadata is descriptive and is not a download source. Catalog DLC is enabled only when its source supplies a valid HTTPS archive artifact and does not explicitly mark the entry unavailable. For Steam depot DLC, the game page checks that the base install has a content receipt, then the installer resolves exact matching provider manifests for the selected DLC. Old or imported base installs have unknown content provenance and cannot use this path yet. Filesystem conflicts are reported rather than overwritten.
 
-The researched evolution plan is in [DLC_PLAN.md](DLC_PLAN.md). Steam depot DLC can reuse the existing depotkit transport once exact depot selection, compatibility checks, and content receipts are implemented; the generic provider session ABI below is a separate extension.
+The researched evolution plan is in [DLC_PLAN.md](DLC_PLAN.md). The Steam depot path reuses depotkit and the archive DLC transaction. Live DLC installation, game access, Windows behavior, overlap handling, and old-install migration still need acceptance tests. The generic provider session ABI below is a separate extension.
 
 ## Provider-owned delivery
 

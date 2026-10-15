@@ -5,7 +5,7 @@ use crate::jobs::{
     job_id_for_target, load_job, now, save_job,
 };
 use crate::steam::{import_steam, scan_steam, steam_root};
-use crate::{Library, Result, clean_command, discovery, validate_id};
+use crate::{Game, Library, Result, clean_command, discovery, validate_id};
 use std::ffi::{CStr, CString, c_char, c_double, c_int, c_void};
 use std::fs;
 use std::io::Read;
@@ -67,6 +67,61 @@ fn validate_manifest_archive(path: &Path, app_id: u32) -> Result<()> {
         .into());
     }
     Ok(())
+}
+
+fn fetch_provider_bundle(root: &Path, app_id: u32) -> Result<PathBuf> {
+    fs::create_dir_all(root)?;
+    let archive = root.join(format!("{app_id}.zip"));
+    if fs::symlink_metadata(&archive).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err("Manifest archive path is a symbolic link".into());
+    }
+    let url = format!("https://ryuu.badkiko.ru/v1/download/{app_id}");
+    if !archive.is_file() || archive.metadata()?.len() == 0 {
+        let output = clean_command("curl")
+            .args([
+                "--fail",
+                "--location",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "30",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "--write-out",
+                "%{http_code}",
+                "--output",
+            ])
+            .arg(&archive)
+            .arg(&url)
+            .output()?;
+        if !output.status.success() {
+            let _ = fs::remove_file(&archive);
+            let code = String::from_utf8_lossy(&output.stdout);
+            if matches!(code.trim(), "404" | "410") {
+                return Err(format!(
+                    "No download manifest is available for Steam App ID {app_id} from the selected plugin's provider"
+                )
+                .into());
+            }
+            return Err(format!(
+                "Manifest provider could not be reached for Steam App ID {app_id}"
+            )
+            .into());
+        }
+    }
+    validate_manifest_archive(&archive, app_id)?;
+    let unpacked = root.join("manifest");
+    if let Ok(meta) = fs::symlink_metadata(&unpacked) {
+        if !meta.is_dir() || meta.file_type().is_symlink() {
+            return Err("Manifest staging path is not a directory".into());
+        }
+        fs::remove_dir_all(&unpacked)?;
+    }
+    fs::create_dir(&unpacked)?;
+    extract_checked(&archive, &unpacked)?;
+    Ok(unpacked)
 }
 
 /// Resolve each provider depot to exactly one manifest revision.
@@ -443,6 +498,121 @@ pub fn download_steam_depots(
     Ok(())
 }
 
+/// Download selected Steam DLC depots and commit additive files to the managed game.
+pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<usize> {
+    validate_id(&game.id)?;
+    if dlc_id == 0 {
+        return Err("DLC App ID is missing".into());
+    }
+    let app_id = game.steam_app_id.ok_or("This game has no Steam App ID")?;
+    let source = game
+        .origin
+        .as_ref()
+        .and_then(|origin| origin.qualified_id.split_once(':'))
+        .map(|(source, _)| source);
+    if source != Some("steamidra") {
+        return Err("This game's source does not provide Steam depot DLC".into());
+    }
+    let receipt = crate::steam_content::load_base_receipt(data_dir, &game.id)?
+        .ok_or("Base game content revision is unknown; a managed base install is required")?;
+    let metadata = crate::steam_metadata::fetch_appinfo(app_id)?;
+    crate::steam_content::validate_base_revision(&receipt, &metadata)?;
+
+    let root = data_dir
+        .join("dlc-downloads")
+        .join(&game.id)
+        .join(dlc_id.to_string());
+    let run = (|| -> Result<usize> {
+        let (content_app_id, depots) = if metadata
+            .depots
+            .iter()
+            .any(|depot| depot.dlc_app_id == Some(dlc_id))
+        {
+            let unpacked = fetch_provider_bundle(&root.join("base-provider"), app_id)?;
+            let available = parse_lua_manifests(&unpacked, app_id)?;
+            let selected = crate::steam_content::select_dlc_depots(
+                &available, &metadata, dlc_id, "windows", "english",
+            )?;
+            (app_id, selected)
+        } else {
+            let child = crate::steam_metadata::fetch_appinfo(dlc_id)?;
+            let unpacked = fetch_provider_bundle(&root.join("dlc-provider"), dlc_id)?;
+            let available = parse_lua_manifests(&unpacked, dlc_id)?;
+            let selected = crate::steam_content::select_separate_dlc_depots(
+                &available, &child, app_id, "windows", "english",
+            )?;
+            (dlc_id, selected)
+        };
+        let lib_path = find_depotkit_library(data_dir).map_err(
+            |_| "The selected download plugin does not provide a usable depot downloader",
+        )?;
+        let payload = root.join("payload");
+        fs::create_dir_all(&payload)?;
+        let job_id = job_id_for_target(&payload);
+        let mut job = DownloadJob {
+            id: job_id.clone(),
+            kind: JobKind::Dlc,
+            url: format!("steam://{content_app_id}/dlc/{dlc_id}"),
+            target: payload.clone(),
+            status: JobStatus::Running,
+            pid: Some(std::process::id()),
+            error: None,
+            updated_unix: now()?,
+            expected_sha256: None,
+            install: Some(InstallPlan {
+                game_id: game.id.clone(),
+                title: format!("{} DLC {dlc_id}", game.title),
+                kind: InstallKind::Archive,
+            }),
+            install_state: Some(InstallState::Installing),
+            install_error: None,
+            progress_bytes: Some(0),
+            total_bytes: None,
+        };
+        save_job(data_dir, &job)?;
+        let result = (|| -> Result<usize> {
+            download_steam_depots(
+                &lib_path,
+                &payload,
+                content_app_id,
+                &depots,
+                data_dir,
+                &job_id,
+            )?;
+            normalize_windows_paths(&payload)?;
+            crate::dlc::install_staged(game, data_dir, &dlc_id.to_string(), &payload)
+        })();
+        job.updated_unix = now()?;
+        match &result {
+            Ok(_) => {
+                job.status = JobStatus::Complete;
+                job.install_state = Some(InstallState::Complete);
+            }
+            Err(error) => {
+                let cancelled = load_job(data_dir, &job_id)
+                    .is_ok_and(|current| current.status == JobStatus::Cancelled);
+                job.status = if cancelled {
+                    JobStatus::Cancelled
+                } else {
+                    JobStatus::Failed
+                };
+                job.install_state = Some(InstallState::Failed);
+                job.error = Some(error.to_string());
+            }
+        }
+        if let Ok(current) = load_job(data_dir, &job_id) {
+            job.progress_bytes = current.progress_bytes;
+            job.total_bytes = current.total_bytes;
+        }
+        save_job(data_dir, &job)?;
+        result
+    })();
+    if run.is_ok() {
+        let _ = fs::remove_dir_all(&root);
+    }
+    run
+}
+
 /// Perform end-to-end installation of a Steam manifest-based catalog game:
 /// downloads manifest and addons, invokes native depotkit engine, normalizes paths,
 /// overlays addons, registers into library, and tracks full progress in the transfers drawer.
@@ -585,10 +755,13 @@ pub fn install_steam_manifest_game_in(
         .map_err(|_| "The selected download plugin does not provide a usable depot downloader")?;
 
     // 5. Parse depots from Lua manifests
-    let depots = parse_lua_manifests(&unpack_dir, app_id)?;
-    if depots.is_empty() {
+    let provider_depots = parse_lua_manifests(&unpack_dir, app_id)?;
+    if provider_depots.is_empty() {
         return Err(format!("No usable depot manifest was found for Steam App ID {app_id}").into());
     }
+    let appinfo = crate::steam_metadata::fetch_appinfo(app_id)?;
+    let depots =
+        crate::steam_content::select_base_depots(&provider_depots, &appinfo, "windows", "english")?;
 
     // 6. Target installation directory
     fs::create_dir_all(games_dir)?;
@@ -632,6 +805,20 @@ pub fn install_steam_manifest_game_in(
         }
         return Err(e);
     }
+    crate::steam_content::save_base_receipt(
+        data_dir,
+        &crate::steam_content::BaseContentReceipt {
+            game_id: game.id.clone(),
+            app_id,
+            depots: depots
+                .iter()
+                .map(|depot| crate::steam_content::DepotRevision {
+                    depot_id: depot.depot_id,
+                    manifest_id: depot.manifest_id.to_string(),
+                })
+                .collect(),
+        },
+    )?;
 
     // 9. Normalize backslash paths on Linux
     let _ = normalize_windows_paths(&target_dir);

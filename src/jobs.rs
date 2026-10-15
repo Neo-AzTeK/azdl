@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[serde(rename_all = "kebab-case")]
 pub enum JobKind {
     Game,
+    Dlc,
     Archive,
     Setup,
     SetupArchive,
@@ -609,6 +610,9 @@ pub fn retry_job(data_dir: &Path, id: &str) -> Result<PathBuf> {
 
 fn resume_job(data_dir: &Path, id: &str) -> Result<PathBuf> {
     let job = load_job(data_dir, id)?;
+    if job.kind == JobKind::Dlc {
+        return Err("DLC depot jobs must be restarted from the game page".into());
+    }
     if job.status == JobStatus::Cancelled {
         return Err("cancelled download jobs cannot be resumed".into());
     }

@@ -1922,12 +1922,69 @@ mod commands {
                     .games
                     .get(&id)
                     .ok_or_else(|| format!("Game {id} not found"))?;
+                if state
+                    .running_games
+                    .lock()
+                    .map_err(|_| "Running game state lock poisoned")?
+                    .contains_key(&id)
+                {
+                    return Err("Stop the game before installing DLC".into());
+                }
                 let addon = azdl::dlc::available_for_game(game, data_dir)?
                     .into_iter()
-                    .find(|addon| addon.id == dlc_id)
-                    .ok_or("DLC is not offered by this game's source plugin")?;
-                let count = azdl::dlc::install_catalog_dlc(game, data_dir, &addon)?;
-                Ok(json!({ "success": true, "files": count }))
+                    .find(|addon| addon.id == dlc_id && addon.content_available);
+                let steam_dlc_id = dlc_id.parse::<u32>().ok();
+                if addon.is_none() && steam_dlc_id.is_none() {
+                    return Err("DLC is not offered by this game's source plugin".into());
+                }
+                let task_id = format!("dlc-{}-{dlc_id}", game.id);
+                {
+                    let mut tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
+                    if tasks
+                        .iter()
+                        .any(|task| task.id == task_id && task.status == "running")
+                    {
+                        return Ok(
+                            json!({ "success": true, "already_working": true, "task_id": task_id }),
+                        );
+                    }
+                    tasks.retain(|task| task.id != task_id);
+                    tasks.push(TaskInfo {
+                        id: task_id.clone(),
+                        label: format!("Installing DLC for {}", game.title),
+                        status: "running".into(),
+                        pid: None,
+                        game_id: Some(game.id.clone()),
+                        log_tail: String::new(),
+                    });
+                }
+                let game = game.clone();
+                let state_clone = state.clone();
+                let task_id_clone = task_id.clone();
+                let thread_name = format!("azdl-dlc-{}", game.id);
+                std::thread::Builder::new()
+                    .name(thread_name)
+                    .spawn(move || {
+                        let result = if let Some(addon) = addon {
+                            azdl::dlc::install_catalog_dlc(&game, &state_clone.data_dir, &addon)
+                        } else {
+                            azdl::steam_depot::install_steam_dlc(
+                                &game,
+                                &state_clone.data_dir,
+                                steam_dlc_id.unwrap_or_default(),
+                            )
+                        };
+                        finish_install_task(
+                            &state_clone,
+                            &task_id_clone,
+                            result.err().map(|error| error.to_string()),
+                        );
+                    })
+                    .map_err(|error| {
+                        finish_install_task(state, &task_id, Some(error.to_string()));
+                        error.to_string()
+                    })?;
+                Ok(json!({ "success": true, "started": true, "task_id": task_id }))
             }
             Action::DlcRemove { id, dlc_id } => {
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
@@ -3130,6 +3187,29 @@ mod commands {
                     ids.extend(store_ids);
                 }
                 let ids = ids.into_iter().collect::<Vec<_>>();
+                let steam_source = game
+                    .origin
+                    .as_ref()
+                    .and_then(|origin| origin.qualified_id.split_once(':'))
+                    .is_some_and(|(source, _)| source == "steamidra");
+                let steam_eligibility = if steam_source {
+                    match azdl::steam_content::load_base_receipt(&data_dir, &game.id) {
+                        Ok(Some(receipt)) => match azdl::steam_metadata::fetch_appinfo(app_id) {
+                            Ok(metadata) => azdl::steam_content::validate_base_revision(
+                                &receipt, &metadata,
+                            )
+                            .map_err(|error| error.to_string()),
+                            Err(error) => Err(error.to_string()),
+                        },
+                        Ok(None) => Err(
+                            "Base game content revision is unknown; a managed base install is required"
+                                .to_string(),
+                        ),
+                        Err(error) => Err(error.to_string()),
+                    }
+                } else {
+                    Err("This game's source does not provide Steam depot DLC".to_string())
+                };
                 let names = ids
                     .chunks(4)
                     .take(3)
@@ -3170,16 +3250,13 @@ mod commands {
                     available.push(json!({
                         "id": id,
                         "title": names.get(&dlc_id).cloned().unwrap_or_else(|| format!("Steam DLC {dlc_id}")),
-                        "content_available": false,
+                        "content_available": steam_eligibility.is_ok(),
+                        "needs_provider_check": steam_eligibility.is_ok(),
                         "installed": installed.contains(&id),
                         "interrupted": interrupted.contains(&id),
                         "depot_count": related.map_or(0, Vec::len),
                         "public_manifest_count": manifest_count,
-                        "reason": if manifest_count > 0 {
-                            "The source has no matching DLC manifest available yet"
-                        } else {
-                            "No separate DLC depot is available from this source"
-                        },
+                        "reason": steam_eligibility.as_ref().err(),
                     }));
                 }
             }

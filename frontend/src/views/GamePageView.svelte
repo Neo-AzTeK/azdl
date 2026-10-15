@@ -72,6 +72,10 @@
   let dlcPending = $state('');
   let dlcToRemove = $state(null);
   let dlcToRecover = $state(null);
+  let activeDlcIds = $derived(new Set((tasks || [])
+    .filter((task) => task.status === 'running' && task.id?.startsWith(`dlc-${installedRecord?.id}-`))
+    .map((task) => task.id.slice(`dlc-${installedRecord.id}-`.length))));
+  let previousDlcTasks = new Set();
 
   async function refreshDlc(id) {
     try {
@@ -91,6 +95,15 @@
   });
 
   $effect(() => {
+    const id = installedRecord?.id;
+    const current = new Set((tasks || [])
+      .filter((task) => task.status === 'running' && task.id?.startsWith(`dlc-${id}-`))
+      .map((task) => task.id));
+    if (id && [...previousDlcTasks].some((taskId) => !current.has(taskId))) refreshDlc(id);
+    previousDlcTasks = current;
+  });
+
+  $effect(() => {
     if (game?.selected_dlc_id && isInstalled && dlcInfo.available.length > 0) {
       activeDetailTab = 'overview';
       tick().then(() => document.getElementById('section-dlc')?.scrollIntoView({ behavior: 'smooth' }));
@@ -101,9 +114,10 @@
     if (!installedRecord || dlcPending) return;
     dlcPending = addon.id;
     try {
-      await runAction({ action: 'dlc-install', id: installedRecord.id, dlc_id: addon.id });
-      notify.success(`${addon.title} installed`);
-      await refreshDlc(installedRecord.id);
+      const result = await runAction({ action: 'dlc-install', id: installedRecord.id, dlc_id: addon.id });
+      if (!result?.started && !result?.already_working) {
+        await refreshDlc(installedRecord.id);
+      }
       onRefresh?.();
     } catch (error) {
       notifyError(error);
@@ -1083,12 +1097,12 @@
                     {/if}
                   </span>
                   {#if addon.interrupted}
-                    <button class="md3-btn danger" disabled={!!dlcPending} onclick={() => dlcToRecover = addon}>Recover</button>
+                    <button class="md3-btn danger" disabled={!!dlcPending || activeDlcIds.has(addon.id)} onclick={() => dlcToRecover = addon}>Recover</button>
                   {:else if addon.installed}
-                    <button class="md3-btn danger" disabled={!!dlcPending} onclick={() => dlcToRemove = addon}>Remove</button>
+                    <button class="md3-btn danger" disabled={!!dlcPending || activeDlcIds.has(addon.id)} onclick={() => dlcToRemove = addon}>Remove</button>
                   {:else}
-                    <button class="md3-btn" disabled={!addon.content_available || !!dlcPending} onclick={() => installDlc(addon)}>
-                      {dlcPending === addon.id ? 'Installing...' : addon.content_available ? 'Install' : 'Unavailable'}
+                    <button class="md3-btn" disabled={!addon.content_available || !!dlcPending || activeDlcIds.has(addon.id)} onclick={() => installDlc(addon)}>
+                      {activeDlcIds.has(addon.id) || dlcPending === addon.id ? 'Installing...' : addon.needs_provider_check ? 'Check & Install' : addon.content_available ? 'Install' : 'Unavailable'}
                     </button>
                   {/if}
                 </div>
