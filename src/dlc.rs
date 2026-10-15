@@ -27,6 +27,7 @@ pub struct DlcManifest {
 
 /// DLC entries explicitly provided by the installed game's source plugin.
 pub fn available_for_game(game: &Game, data_dir: &Path) -> Result<Vec<CatalogAddon>> {
+    validate_id(&game.id)?;
     let Some(origin) = game.origin.as_ref() else {
         return Ok(Vec::new());
     };
@@ -119,6 +120,7 @@ fn read_manifest(state: &Path, game: &Game, dlc_id: &str) -> Result<DlcManifest>
 
 /// List DLC records installed for a game.
 pub fn list_installed(game: &Game, data_dir: &Path) -> Result<Vec<String>> {
+    validate_id(&game.id)?;
     let root = data_dir.join("dlc").join(&game.id);
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
@@ -304,6 +306,7 @@ pub fn install_catalog_dlc(game: &Game, data_dir: &Path, addon: &CatalogAddon) -
 
 /// Remove a DLC and all files recorded in its install manifest.
 pub fn remove(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
+    validate_id(&game.id)?;
     validate_id(dlc_id)?;
     let state = state_dir(data_dir, &game.id, dlc_id);
     let manifest = read_manifest(&state, game, dlc_id)?;
@@ -395,7 +398,10 @@ mod tests {
         assert!(install_archive(&game, &root, "another", &archive).is_err());
         fs::write(game_dir.join("Content/DLC/bonus.dat"), b"modified").unwrap();
         assert!(remove(&game, &root, "bonus").is_err());
-        assert_eq!(fs::read(game_dir.join("Content/DLC/bonus.dat")).unwrap(), b"modified");
+        assert_eq!(
+            fs::read(game_dir.join("Content/DLC/bonus.dat")).unwrap(),
+            b"modified"
+        );
         fs::write(game_dir.join("Content/DLC/bonus.dat"), b"bonus").unwrap();
         remove(&game, &root, "bonus").unwrap();
         assert_eq!(fs::read(game_dir.join("base.exe")).unwrap(), b"base");
