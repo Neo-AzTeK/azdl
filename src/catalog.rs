@@ -289,6 +289,15 @@ fn parse_addons(entry: &Value) -> Result<Vec<CatalogAddon>> {
         let (archive_parts, archive_part_hashes) = parts
             .map(|parts| (parts.urls, parts.hashes))
             .unwrap_or_default();
+        let downloadable_dlc = filename.as_deref().is_some_and(|name| {
+            matches!(
+                Path::new(name).components().collect::<Vec<_>>().as_slice(),
+                [Component::Normal(_)]
+            )
+        }) && (!archive_parts.is_empty()
+            || uri
+                .as_deref()
+                .is_some_and(|url| url.starts_with("https://")));
         addons.push(CatalogAddon {
             id: id.to_string(),
             title: text_field(addon, "title").unwrap_or(id).to_string(),
@@ -302,7 +311,8 @@ fn parse_addons(entry: &Value) -> Result<Vec<CatalogAddon>> {
                 .get("contentAvailable")
                 .or_else(|| addon.get("hasManifest"))
                 .and_then(Value::as_bool)
-                .unwrap_or(true),
+                .unwrap_or(true)
+                && (kind != AddonKind::Dlc || downloadable_dlc),
             referer,
         });
     }
@@ -901,6 +911,14 @@ pub(crate) fn stamp_origin(library: &mut Library, id: &str, game: &CatalogGame) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dlc_without_download_artifact_is_unavailable() {
+        let payload = br#"{"games":[{"id":"sample","title":"Sample","addons":[{"id":"200","kind":"dlc","title":"Metadata only"},{"id":"201","kind":"dlc","title":"Archive","downloadUrl":"https://example.org/dlc.zip"}]}]}"#;
+        let games = parse_feed(payload, "sample-source").unwrap();
+        assert!(!games[0].addons[0].content_available);
+        assert!(games[0].addons[1].content_available);
+    }
     use crate::add_game;
     use crate::jobs::{DownloadJob, JobKind, JobStatus};
     use std::process::Command;

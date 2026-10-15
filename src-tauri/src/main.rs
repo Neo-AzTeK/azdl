@@ -3057,9 +3057,80 @@ mod commands {
                         "content_available": addon.content_available,
                         "installed": installed.contains(&addon.id),
                         "interrupted": interrupted.contains(&addon.id),
+                        "reason": if addon.content_available { None } else { Some("The source has no downloadable DLC archive") },
                     })
                 })
                 .collect::<Vec<_>>();
+            let mut metadata_error = None;
+            if let Some(app_id) = game.steam_app_id {
+                let appinfo = azdl::steam_metadata::fetch_appinfo(app_id);
+                let store_ids = azdl::steam_metadata::fetch_store_dlc_ids(app_id);
+                let mut ids = std::collections::BTreeSet::new();
+                let mut depots = std::collections::BTreeMap::new();
+                match appinfo {
+                    Ok(metadata) => {
+                        depots = azdl::steam_metadata::dlc_depots(&metadata);
+                        ids.extend(metadata.dlc_ids);
+                    }
+                    Err(error) => metadata_error = Some(error.to_string()),
+                }
+                if let Ok(store_ids) = store_ids {
+                    ids.extend(store_ids);
+                }
+                let ids = ids.into_iter().collect::<Vec<_>>();
+                let names = ids
+                    .chunks(4)
+                    .take(3)
+                    .flat_map(|batch| {
+                        std::thread::scope(|scope| {
+                            let handles = batch
+                                .iter()
+                                .map(|dlc_id| {
+                                    scope.spawn(move || {
+                                        azdl::steam_metadata::fetch_appinfo(*dlc_id)
+                                            .ok()
+                                            .and_then(|details| {
+                                                (details.parent_app_id == Some(app_id))
+                                                    .then_some((*dlc_id, details.name))
+                                            })
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            handles
+                                .into_iter()
+                                .filter_map(|handle| handle.join().ok().flatten())
+                                .filter_map(|(id, name)| name.map(|name| (id, name)))
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect::<std::collections::HashMap<_, _>>();
+                for dlc_id in ids {
+                    let id = dlc_id.to_string();
+                    if available.iter().any(|addon| addon["id"] == id) {
+                        continue;
+                    }
+                    let related = depots.get(&dlc_id);
+                    let manifest_count = related
+                        .into_iter()
+                        .flatten()
+                        .filter(|depot| depot.public_manifest_id.is_some())
+                        .count();
+                    available.push(json!({
+                        "id": id,
+                        "title": names.get(&dlc_id).cloned().unwrap_or_else(|| format!("Steam DLC {dlc_id}")),
+                        "content_available": false,
+                        "installed": installed.contains(&id),
+                        "interrupted": interrupted.contains(&id),
+                        "depot_count": related.map_or(0, Vec::len),
+                        "public_manifest_count": manifest_count,
+                        "reason": if manifest_count > 0 {
+                            "The source has no matching DLC manifest available yet"
+                        } else {
+                            "No separate DLC depot is available from this source"
+                        },
+                    }));
+                }
+            }
             for dlc_id in &installed {
                 if !available.iter().any(|addon| addon["id"] == *dlc_id) {
                     available.push(json!({
@@ -3082,7 +3153,7 @@ mod commands {
                     }));
                 }
             }
-            Ok(json!({ "available": available, "installed": installed, "interrupted": interrupted }))
+            Ok(json!({ "available": available, "installed": installed, "interrupted": interrupted, "metadata_error": metadata_error }))
         })
         .await
         .map_err(|e| e.to_string())?

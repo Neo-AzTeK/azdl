@@ -28,10 +28,10 @@ The relay is the open-source [steamcmd/api service](https://github.com/steamcmd/
 
 Repository findings:
 
-- `src/dlc.rs::available_for_game` explicitly returns no DLC for `steamidra`; other sources expose only catalog add-ons.
+- `src/dlc.rs::available_for_game` explicitly returns no catalog DLC for `steamidra`; the desktop now lists Steam metadata separately through `get_game_dlc`.
 - `src-tauri/src/main.rs` drops Store DLC fields from its presentation payload. Keep that payload small and introduce a dedicated core DLC metadata result.
-- `src/catalog.rs::parse_addons` defaults `content_available` to true, even without a usable artifact. A declaration must not be sufficient to enable Install.
-- `src/steam_depot.rs::parse_lua_manifests` ignores its App ID parameter, loses manifest IDs from the returned type, silently skips missing files, and can fall back to an arbitrary matching manifest when the requested one is absent.
+- `src/catalog.rs::parse_addons` now requires a usable HTTPS artifact before enabling archive DLC.
+- `src/steam_depot.rs::parse_lua_manifests` now preserves exact manifest IDs and rejects missing or ambiguous revisions. Binary manifest headers and depot membership still need validation.
 - `install_steam_manifest_game_in` downloads all parsed depots into the game directory, with no DLC, OS, language, or branch selection and no persistent depot receipt.
 - `download_steam_depots` already accepts an explicit depot subset and destination. It can target staging. Its request has one App ID, so cross-app/shared depots need requests grouped by the resolved content-owner App ID.
 - The existing archive DLC transaction rejects all existing paths. Steam's ordered depot overlays can legitimately contain overlapping files, which requires a broader file ownership model before general support.

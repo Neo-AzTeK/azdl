@@ -79,7 +79,6 @@
       if (installedRecord?.id === id) dlcInfo = info;
     } catch (error) {
       if (installedRecord?.id === id) {
-        dlcInfo = { available: [], installed: [] };
         notifyError(error);
       }
     }
@@ -1070,7 +1069,12 @@
               <h3 class="section-heading">Downloadable Content</h3>
               {#each dlcInfo.available as addon (addon.id)}
                 <div class="dlc-row">
-                  <span>{addon.title}</span>
+                  <span class="dlc-details">
+                    <span>{addon.title}</span>
+                    {#if !addon.installed && !addon.interrupted && addon.reason}
+                      <small>{addon.reason}</small>
+                    {/if}
+                  </span>
                   {#if addon.interrupted}
                     <button class="md3-btn danger" disabled={!!dlcPending} onclick={() => dlcToRecover = addon}>Recover</button>
                   {:else if addon.installed}
@@ -1544,6 +1548,14 @@
     gap: 1rem;
     padding: 0.75rem 0;
     border-top: 1px solid var(--md-sys-color-outline-variant);
+  }
+  .dlc-details {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+  .dlc-details small {
+    color: var(--md-sys-color-on-surface-variant);
   }
   .game-page-view {
     position: relative;
