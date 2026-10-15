@@ -47,6 +47,7 @@ pub struct DepotkitProgress {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DepotInfo {
     pub depot_id: u32,
+    pub manifest_id: u64,
     pub manifest_path: PathBuf,
     pub depot_key: String,
 }
@@ -68,14 +69,14 @@ fn validate_manifest_archive(path: &Path, app_id: u32) -> Result<()> {
     Ok(())
 }
 
-/// Parse depot IDs, decryption keys, and manifest paths from unpacked Lua scripts and manifest files.
-pub fn parse_lua_manifests(manifest_dir: &Path, _app_id: u32) -> Result<Vec<DepotInfo>> {
+/// Resolve each provider depot to exactly one manifest revision.
+pub fn parse_lua_manifests(manifest_dir: &Path, app_id: u32) -> Result<Vec<DepotInfo>> {
     if !manifest_dir.is_dir() {
         return Err("manifest directory does not exist".into());
     }
 
     let mut raw_depots: Vec<(u32, String)> = Vec::new();
-    let mut manifest_ids: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    let mut manifest_ids: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
 
     // Scan for all .lua scripts in manifest_dir
     for entry in fs::read_dir(manifest_dir)?.flatten() {
@@ -90,72 +91,69 @@ pub fn parse_lua_manifests(manifest_dir: &Path, _app_id: u32) -> Result<Vec<Depo
     let mut depots = Vec::new();
 
     for (depot_id, depot_key) in raw_depots {
-        // Try to locate the matching .manifest file
-        let mut manifest_path = None;
-
-        // 1. Check with manifest_id if present: {depot_id}_{manifest_id}.manifest
-        if let Some(man_id) = manifest_ids.get(&depot_id) {
-            let candidate = manifest_dir.join(format!("{depot_id}_{man_id}.manifest"));
-            if candidate.is_file() {
-                manifest_path = Some(candidate);
-            }
+        let requested = manifest_ids.get(&depot_id).copied();
+        let mut matches = Vec::new();
+        let mut roots = vec![manifest_dir.to_path_buf()];
+        if let Some(parent) = manifest_dir.parent() {
+            roots.push(parent.join("depotcache"));
         }
-
-        // 2. Search manifest_dir for any matching {depot_id}_*.manifest or {depot_id}.manifest
-        if manifest_path.is_none() {
-            let prefix = format!("{depot_id}_");
-            if let Ok(entries) = fs::read_dir(manifest_dir) {
-                for e in entries.flatten() {
-                    let p = e.path();
-                    if p.extension().is_some_and(|ext| ext == "manifest") {
-                        let name = p.file_name().unwrap_or_default().to_string_lossy();
-                        if name.starts_with(&prefix) || name == format!("{depot_id}.manifest") {
-                            manifest_path = Some(p);
-                            break;
-                        }
+        for root in roots {
+            let entries = match fs::read_dir(&root) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            for entry in entries {
+                let entry = entry?;
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                let Some(id) = name
+                    .strip_prefix(&format!("{depot_id}_"))
+                    .and_then(|tail| tail.strip_suffix(".manifest"))
+                    .and_then(|id| id.parse::<u64>().ok())
+                else {
+                    continue;
+                };
+                if requested.is_none_or(|expected| expected == id) {
+                    let path = entry.path();
+                    let meta = fs::symlink_metadata(&path)?;
+                    if !meta.is_file() || meta.file_type().is_symlink() {
+                        return Err(
+                            format!("Depot {depot_id} manifest is not a regular file").into()
+                        );
                     }
+                    matches.push((id, path));
                 }
             }
         }
-
-        // 3. Fallback to depotcache/ directory
-        if manifest_path.is_none()
-            && let Some(parent) = manifest_dir.parent()
-        {
-            let depotcache = parent.join("depotcache");
-            if depotcache.is_dir() {
-                let prefix = format!("{depot_id}_");
-                if let Ok(entries) = fs::read_dir(&depotcache) {
-                    for e in entries.flatten() {
-                        let p = e.path();
-                        if p.extension().is_some_and(|ext| ext == "manifest") {
-                            let name = p.file_name().unwrap_or_default().to_string_lossy();
-                            if name.starts_with(&prefix) || name == format!("{depot_id}.manifest") {
-                                manifest_path = Some(p);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(path) = manifest_path {
-            depots.push(DepotInfo {
-                depot_id,
-                manifest_path: path,
-                depot_key,
-            });
-        }
+        matches.sort_by(|a, b| a.1.cmp(&b.1));
+        matches.dedup_by(|a, b| a.0 == b.0);
+        let (manifest_id, manifest_path) = match matches.len() {
+            1 => matches.remove(0),
+            0 => return Err(format!(
+                "No exact manifest for Steam App ID {app_id}, depot {depot_id}{}",
+                requested.map_or(String::new(), |id| format!(", revision {id}"))
+            ).into()),
+            _ => return Err(format!(
+                "Multiple manifest revisions for Steam App ID {app_id}, depot {depot_id}; the provider must specify one"
+            ).into()),
+        };
+        depots.push(DepotInfo {
+            depot_id,
+            manifest_id,
+            manifest_path,
+            depot_key,
+        });
     }
 
+    depots.sort_by_key(|depot| depot.depot_id);
     Ok(depots)
 }
 
 fn parse_lua_content(
     content: &str,
     depots: &mut Vec<(u32, String)>,
-    manifest_ids: &mut std::collections::HashMap<u32, String>,
+    manifest_ids: &mut std::collections::HashMap<u32, u64>,
 ) {
     for line in content.lines() {
         let line = line.trim();
@@ -191,8 +189,8 @@ fn parse_lua_content(
                     && let Ok(depot_id) = tokens[0].parse::<u32>()
                 {
                     let man_id = tokens[1].trim_matches(|c| c == '"' || c == '\'');
-                    if !man_id.is_empty() {
-                        manifest_ids.insert(depot_id, man_id.to_string());
+                    if let Ok(man_id) = man_id.parse::<u64>() {
+                        manifest_ids.insert(depot_id, man_id);
                     }
                 }
             }
@@ -716,10 +714,34 @@ mod tests {
             depots[0].1,
             "90695be6010d5ec2e8890f1d742357316f4d5f74a8a9d22b2ae076b184797167"
         );
-        assert_eq!(
-            manifest_ids.get(&3892271).map(|s| s.as_str()),
-            Some("4322338465787944513")
-        );
+        assert_eq!(manifest_ids.get(&3892271), Some(&4322338465787944513));
+    }
+
+    #[test]
+    fn rejects_another_revision_when_requested_manifest_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-manifest-selection-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::write(
+            root.join("123.lua"),
+            "addappid(456,0,\"0123456789abcdef0123456789abcdef\")\nsetManifestid(456,\"789\")",
+        )
+        .unwrap();
+        fs::write(root.join("456_788.manifest"), b"manifest").unwrap();
+        let error = parse_lua_manifests(&root, 123).unwrap_err().to_string();
+        assert!(error.contains("depot 456, revision 789"));
+        fs::write(root.join("456_789.manifest"), b"manifest").unwrap();
+        let selected = parse_lua_manifests(&root, 123).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].manifest_id, 789);
+        assert_eq!(selected[0].manifest_path, root.join("456_789.manifest"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
