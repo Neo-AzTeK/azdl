@@ -56,7 +56,7 @@ Add `src/steam_metadata.rs` for typed Store/appinfo adapters, parsing, caching, 
 
 Start with the existing HTTPS transport and a replaceable appinfo relay adapter; keep room for direct PICS metadata supplied by a native provider. Cache display metadata longer than install metadata, deduplicate concurrent requests, limit response size and concurrency, and refresh plan inputs before installation. Query DLC appinfo where metadata indicates separately managed depots or base metadata leaves the mapping unresolved; bound recursive/shared-app lookups and reject cycles.
 
-Return one typed core result through Tauri's `get_game_dlc`. Display known DLC even when it cannot currently be downloaded, with a short actionable reason. Derive archive availability from a validated URL, filename, and transport rather than the existing boolean alone. Replace the hardcoded `steamidra` exclusion once its resolver can report explicit states.
+Return one typed core result through Tauri's `get_game_dlc`. Display known DLC even when it cannot currently be downloaded, with a short actionable reason. Derive archive availability from a validated URL, filename, and transport rather than the existing boolean alone. Replace the hardcoded `steamidra` exclusion once its resolver can report explicit states. Index DLC titles and IDs for the existing catalog search and preserve their parent-game link. The current catalog parser skips top-level entries with `kind: "dlc"`, so search cannot yet find them as independent results.
 
 Completion evidence: captured minimal metadata fixtures cover missing Store pages, Store/appinfo disagreement, separately managed depots, failed requests, and an archive entry without an artifact. Discovery works without downloading content.
 
@@ -82,15 +82,17 @@ Use one game mutation lock for install, DLC change, base update, move, and unins
 
 Completion evidence: interruption at each transaction stage, cancellation, disk-full failure, retry, removal, and drive movement preserve the base game. A real additive DLC completes on Linux and Windows and is checked inside the game separately from filesystem verification.
 
-### 4. Integrate selection and persistent background jobs
+### 4. Support search, install actions, and persistent background jobs
 
-Offer a DLC selector during base installation and management on the installed game page. Default new installs to base content with explicit DLC selection; retain selected DLC across updates. Use the same planner for base installation and later DLC changes so the existing path no longer downloads every depot in a bundle.
+Keep the existing DLC section on the installed game's page as the management surface. Add DLC matches to the existing catalog search. A DLC search result shows its parent game and availability; selecting it opens that game's page at the DLC section. For an uninstalled parent game, lead to the existing base-game installation flow and keep the DLC discoverable afterward. Do not create a separate DLC page or require a DLC selector during base installation. Use the same planner for base installation and later DLC changes so the existing base path no longer downloads every depot in a bundle. Retain installed DLC selections across updates.
 
 Queue an operation and return its job ID immediately. Persist the plan and progress phases (`resolving`, `downloading`, `verifying`, `committing`, terminal result) so navigation and app restart do not lose the operation. Reuse the transfer drawer, activity indicator, state-change notifications, and notifications service. Tauri remains a command/event adapter; Svelte displays core state and available actions.
 
+In `GamePageView.svelte`, replace the current `content_available`/`installed` booleans and local `dlcPending` flag with the typed state and persisted job ID. Keep Install, Remove, and Recover actions in the existing section. Show a short reason next to a disabled action, progress while a job runs, and one completion notification through `notifications.js`. A metadata lookup error should leave existing DLC records visible and show a refreshable error; the current view clears the list on failure. Use the existing `SectionCard.svelte`, `ConfirmModal.svelte`, app-wide busy indicator, and `m3-svelte` controls. The backend state event should refresh the DLC result for the currently displayed game; polling after restart reconstructs it from persisted jobs.
+
 Suggested visible states: Checking, Available, Downloading, Installed, Recovery needed, Included with base files, and Unavailable with a reason. Include `Update available` only after update planning exists. File installation does not establish that a game grants access to content; included content must not create a fake download or claim activation. Steam's game-facing APIs distinguish ownership and installation; their callbacks do not replace azdl's own job events. See [ISteamApps](https://partner.steamgames.com/doc/api/ISteamApps?l=english).
 
-Completion evidence: switching pages during installation, restarting after interruption, duplicate clicks, and provider removal retain consistent status. Notifications appear once and changed DLC state refreshes without reloading the app.
+Completion evidence: searching by DLC title, DLC ID, and parent title opens the correct parent game; installed and uninstalled parents route correctly. Switching pages during installation, restarting after interruption, duplicate clicks, and provider removal retain consistent status. Notifications appear once and changed DLC state refreshes without reloading the app.
 
 ### 5. Add ordered overlays, updates, and migration
 
