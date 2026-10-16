@@ -214,6 +214,7 @@ pub fn validate_id(id: &str) -> Result<()> {
 /// along with any associated prefixes, shortcuts, and leftover download/staging files.
 pub fn remove_game(library: &mut Library, data_dir: &Path, id: &str) -> Result<()> {
     validate_id(id)?;
+    let _lock = dlc::lock_game(data_dir, id)?;
     let game = library
         .games
         .remove(id)
@@ -1154,6 +1155,44 @@ mod tests {
         let reloaded = load_library(&root).unwrap();
         assert!(!reloaded.games.contains_key("removable-game"));
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remove_game_waits_for_dlc_file_mutation() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let root = scratch();
+        let game_dir = root.join("games").join("locked-game");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("game.bin"), b"binary").unwrap();
+        let mut library = Library::default();
+        add_game(
+            &mut library,
+            "locked-game",
+            "Locked Game",
+            &game_dir,
+            Path::new("game.bin"),
+        )
+        .unwrap();
+        let lock = dlc::lock_game(&root, "locked-game").unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker_root = root.clone();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx
+                .send(remove_game(&mut library, &worker_root, "locked-game").is_ok())
+                .unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(game_dir.exists());
+        drop(lock);
+        assert!(done_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        worker.join().unwrap();
+        assert!(!game_dir.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

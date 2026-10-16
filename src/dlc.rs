@@ -61,18 +61,15 @@ fn state_dir(data_dir: &Path, game_id: &str, dlc_id: &str) -> PathBuf {
 }
 
 pub(crate) fn lock_game(data_dir: &Path, game_id: &str) -> Result<File> {
-    let root = data_dir.join("dlc");
+    validate_id(game_id)?;
+    let root = data_dir.join("content-locks");
     if fs::symlink_metadata(&root).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        return Err("DLC state root is a symbolic link".into());
+        return Err("Game lock root is a symbolic link".into());
     }
-    let parent = root.join(game_id);
-    fs::create_dir_all(&parent)?;
-    if fs::symlink_metadata(&parent)?.file_type().is_symlink() {
-        return Err("DLC game state is a symbolic link".into());
-    }
-    let path = parent.join(".game.lock");
+    fs::create_dir_all(&root)?;
+    let path = root.join(format!("{game_id}.lock"));
     if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        return Err("DLC lock path is a symbolic link".into());
+        return Err("Game lock path is a symbolic link".into());
     }
     let file = fs::OpenOptions::new()
         .read(true)

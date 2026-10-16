@@ -1898,6 +1898,21 @@ mod commands {
                 Ok(json!({ "success": true, "executable": executable }))
             }
             Action::GameRemove { id } => {
+                if state
+                    .tasks
+                    .lock()
+                    .map_err(|_| "State lock poisoned")?
+                    .iter()
+                    .any(|task| {
+                        task.game_id.as_deref() == Some(&id)
+                            && task.status == "running"
+                            && task.id.starts_with("dlc-")
+                    })
+                {
+                    return Err(
+                        "Wait for the DLC install to finish before removing this game".into(),
+                    );
+                }
                 let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
                 azdl::remove_game(&mut library, data_dir, &id).map_err(|e| e.to_string())?;
                 if let Ok(mut tasks) = state.tasks.lock() {
