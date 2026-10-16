@@ -14,6 +14,8 @@ For a shared Steam depot, the DLC resolver follows `depotfromapp` when the curre
 
 The optional `tests/live_dlc_manifest.rs` check verifies an external staged snapshot with `AZDL_LIVE_DLC_MANIFEST`, `AZDL_LIVE_DLC_STAGING`, `AZDL_LIVE_DLC_DEPOT_ID`, and `AZDL_LIVE_DLC_MANIFEST_ID`; run it with `cargo test --test live_dlc_manifest -- --ignored`. On 2026-10-16, the exact provider manifest for depot `3875100`, revision `5309998554743987160`, matched an isolated copy of the real 539,727,136 byte DLC file. This checks staged content and path safety, not a new CDN download or in-game access.
 
+The optional `tests/live_dlc_install.rs` check uses `AZDL_LIVE_DLC_LIBRARY_DIR`, `AZDL_LIVE_DLC_DATA_DIR`, `AZDL_LIVE_DLC_GAME_ID`, and `AZDL_LIVE_DLC_APP_ID`. Its data directory must contain a copied base game under `games/live-dlc-acceptance` and the installed provider under `plugins/steamidra`. Run it with `cargo test --test live_dlc_install -- --ignored`; it downloads DLC, installs managed files, removes them, and compares the copied base file names and sizes. On 2026-10-16, this passed on Linux for DLC `3875100` through the current grouped staging path. It does not establish in-game access or multi-App shared-depot behavior.
+
 ## Provider-owned delivery
 
 Arachnel API 4 exposes a JSON catalog boundary, but its C ABI does not expose the C++ `startOwnedDownload` method. Rust must not call C++ virtual methods or infer a depot URL from a Store DLC ID. A future provider-owned DLC adapter should use a versioned C ABI with an opaque session handle:

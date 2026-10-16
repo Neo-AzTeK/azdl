@@ -1,6 +1,6 @@
 # DLC discovery, planning, and installation
 
-Implementation plan, researched on 2026-10-15. Discovery, exact provider revision matching, managed base receipts, additive staged depot DLC, and background desktop tasks have initial implementations. An isolated live DLC download, commit, and removal succeeded on Linux on 2026-10-16. Installation into a real base game and in-game access remain unverified.
+Implementation plan, researched on 2026-10-15. Discovery, exact provider revision matching, managed base receipts, additive staged depot DLC, and background desktop tasks have initial implementations. Live DLC download, commit, and removal into an isolated copy of a real base game succeeded on Linux on 2026-10-16. In-game access remains unverified.
 
 The next milestone is a complete Steam content resolver that joins DLC identities, depot metadata, available artifacts, and installation receipts, including old-install migration and shared file ownership. A general plugin download-session ABI is a later extension, not a prerequisite for Steam depot DLC.
 
@@ -47,6 +47,8 @@ The same existing game's required base depot passed a separate read-only verific
 The missing-DLC path was then exercised on Linux against a separate copy of the real base game with DLC `3875100` omitted. The copy passed strict legacy base verification, downloaded the DLC from Steam, committed one 539,727,136 byte file, and recorded its SHA-256 and managed ownership. A checksum comparison found no changed base files. DLC removal deleted that file while preserving the verified base receipt. The original installed game was untouched. This verifies filesystem delivery and removal with real base content; it does not establish in-game access or Windows acceptance.
 
 After staged manifest verification was added, an isolated copy of that real DLC file passed `tests/live_dlc_manifest.rs` against depot `3875100`, revision `5309998554743987160`, on 2026-10-16. The temporary copy was removed afterward. This validates the new exact-content gate with real bytes, while grouped shared-depot transport and in-game access remain unverified.
+
+The current grouped staging path then passed `tests/live_dlc_install.rs` on a fresh isolated copy of the real base game on 2026-10-16. It verified the legacy base, downloaded DLC `3875100` (539,727,136 bytes), verified both the per-group and combined staging payloads, committed one managed file, removed it, and returned the copied base directory to its original file names and sizes. The 2.1 GB temporary copy was deleted. This covers a single content App ID through the new grouping path; multi-App shared depot transport, Windows runtime, and in-game access remain unverified.
 
 ## Proposed core model
 
@@ -126,4 +128,4 @@ Implement steps 1 and 2 first: a populated DLC list plus a deterministic, inspec
 
 Required automated coverage includes 64-bit ID serialization, stale metadata, missing manifests, multiple depots per DLC, target filtering, both depot-management layouts, shared depots, no-separate-file/unknown delivery, interrupted transactions, base/DLC version changes, and migration. Run Rust tests and clippy, frontend tests/build for UI changes, and Linux/Windows CI.
 
-Research verified public metadata and inspected repository code. A later isolated Linux check verified provider artifact availability, DLC download, additive commit, and removal for the sample DLC. Actual base-game compatibility, in-game access, and Windows runtime acceptance remain implementation gates.
+Research verified public metadata and inspected repository code. Linux checks verified provider artifact availability, exact staged content, and DLC download, additive commit, and removal against a copy of the sample base game. In-game access, multi-App shared-depot download, and Windows runtime acceptance remain implementation gates.
