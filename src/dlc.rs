@@ -17,6 +17,16 @@ pub struct DlcFile {
     pub sha256: String,
     #[serde(default)]
     pub staged_path: PathBuf,
+    /// Whether azdl may remove this file after the last managed DLC reference is gone.
+    #[serde(default = "default_true")]
+    pub managed: bool,
+    /// Whether this transaction created the target rather than reusing existing bytes.
+    #[serde(default = "default_true")]
+    pub created: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,29 +334,54 @@ fn install_payload_unlocked(
         if files.is_empty() {
             return Err("DLC archive contains no files".into());
         }
+        let installed_manifests = list_installed(game, data_dir)?
+            .into_iter()
+            .map(|id| read_manifest(&state_dir(data_dir, &game.id, &id), game, &id))
+            .collect::<Result<Vec<_>>>()?;
         let mut entries = Vec::with_capacity(files.len());
         for relative in files {
             let target = check_target(&install, &relative)?;
-            if fs::symlink_metadata(&target).is_ok() {
-                return Err(format!(
-                    "DLC would overwrite an existing game file: {}",
-                    relative.display()
-                )
-                .into());
-            }
+            let sha256 = file_sha256(&payload.join(&relative))?;
+            let created = match fs::symlink_metadata(&target) {
+                Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
+                    if file_sha256(&target)? != sha256 {
+                        return Err(format!(
+                            "DLC conflicts with an existing game file: {}",
+                            relative.display()
+                        )
+                        .into());
+                    }
+                    false
+                }
+                Ok(_) => return Err("DLC target has an incompatible file type".into()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+                Err(error) => return Err(error.into()),
+            };
+            let managed = created
+                || installed_manifests.iter().any(|manifest| {
+                    manifest
+                        .files
+                        .iter()
+                        .any(|file| file.path == relative && file.sha256 == sha256 && file.managed)
+                });
             let name = relative
                 .file_name()
                 .ok_or("DLC file has no name")?
                 .to_string_lossy();
-            let staged_path =
-                relative.with_file_name(format!(".{name}.azdl-{dlc_id}-{nonce}.partial"));
-            if fs::symlink_metadata(check_target(&install, &staged_path)?).is_ok() {
+            let staged_path = if created {
+                relative.with_file_name(format!(".{name}.azdl-{dlc_id}-{nonce}.partial"))
+            } else {
+                PathBuf::new()
+            };
+            if created && fs::symlink_metadata(check_target(&install, &staged_path)?).is_ok() {
                 return Err("DLC staging path already exists".into());
             }
             entries.push(DlcFile {
-                sha256: file_sha256(&payload.join(&relative))?,
+                sha256,
                 path: relative,
                 staged_path,
+                managed,
+                created,
             });
         }
         let manifest = DlcManifest {
@@ -361,6 +396,13 @@ fn install_payload_unlocked(
         output.sync_all()?;
         fs::rename(&staging, &state)?;
         for entry in &manifest.files {
+            if !entry.created {
+                let target = check_target(&install, &entry.path)?;
+                if file_sha256(&target)? != entry.sha256 {
+                    return Err("Shared DLC file changed during installation".into());
+                }
+                continue;
+            }
             let target = check_target(&install, &entry.path)?;
             let staged_target = check_target(&install, &entry.staged_path)?;
             if fs::symlink_metadata(&target).is_ok() {
@@ -499,6 +541,9 @@ fn recover_unlocked(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
     // Verify all installed targets before deleting staging files or the state record.
     let mut partial = Vec::new();
     for file in &manifest.files {
+        if !file.created {
+            continue;
+        }
         let target = check_target(&manifest.install_dir, &file.path)?;
         if target.exists() && file_sha256(&target)? != file.sha256 {
             let payload = state.join("payload").join(&file.path);
@@ -555,7 +600,17 @@ fn remove_unlocked(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
     let state = state_dir(data_dir, &game.id, dlc_id);
     let manifest = read_manifest(&state, game, dlc_id)?;
     let install = &manifest.install_dir;
+    let complete = fs::symlink_metadata(state.join("complete"))
+        .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink());
+    let other_manifests = list_installed(game, data_dir)?
+        .into_iter()
+        .filter(|id| id != dlc_id)
+        .map(|id| read_manifest(&state_dir(data_dir, &game.id, &id), game, &id))
+        .collect::<Result<Vec<_>>>()?;
     for file in &manifest.files {
+        if !file.managed || (!complete && !file.created) {
+            continue;
+        }
         let target = check_target(install, &file.path)?;
         if target.exists() && file_sha256(&target)? != file.sha256 {
             return Err(format!(
@@ -566,6 +621,16 @@ fn remove_unlocked(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
         }
     }
     for file in manifest.files.iter().rev() {
+        if !file.managed || (!complete && !file.created) {
+            continue;
+        }
+        if other_manifests.iter().any(|manifest| {
+            manifest.files.iter().any(|other| {
+                other.path == file.path && other.sha256 == file.sha256 && other.managed
+            })
+        }) {
+            continue;
+        }
         let target = check_target(install, &file.path)?;
         if target.exists() {
             fs::remove_file(&target)?;
@@ -591,6 +656,70 @@ mod tests {
     use crate::{Library, Runner};
     use std::collections::BTreeMap;
     use std::process::Command;
+
+    #[test]
+    fn identical_shared_files_keep_their_original_owner() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-dlc-shared-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let install = root.join("games/base");
+        let source = root.join("source");
+        fs::create_dir_all(&install).unwrap();
+        fs::create_dir_all(&source).unwrap();
+        let target = install.join("shared.bin");
+        fs::write(&target, b"same bytes").unwrap();
+        fs::write(source.join("shared.bin"), b"same bytes").unwrap();
+        let game = Game {
+            id: "base".into(),
+            title: "Base".into(),
+            install_dir: install,
+            executable: PathBuf::from("base.exe"),
+            runner: Runner::Auto,
+            arguments: Vec::new(),
+            environment: BTreeMap::new(),
+            last_played_unix: None,
+            origin: None,
+            steam_app_id: None,
+            launch_options: Vec::new(),
+            selected_launch_option_id: None,
+            cover_url: None,
+            banner_url: None,
+        };
+
+        fs::write(&target, b"different").unwrap();
+        assert!(install_staged(&game, &root, "conflict", &source).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"different");
+        fs::write(&target, b"same bytes").unwrap();
+
+        install_staged(&game, &root, "base-shared", &source).unwrap();
+        let base_shared = read_manifest(
+            &state_dir(&root, "base", "base-shared"),
+            &game,
+            "base-shared",
+        )
+        .unwrap();
+        assert!(!base_shared.files[0].managed);
+        assert!(!base_shared.files[0].created);
+        remove(&game, &root, "base-shared").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"same bytes");
+
+        fs::remove_file(&target).unwrap();
+        install_staged(&game, &root, "dlc-a", &source).unwrap();
+        install_staged(&game, &root, "dlc-b", &source).unwrap();
+        let shared = read_manifest(&state_dir(&root, "base", "dlc-b"), &game, "dlc-b").unwrap();
+        assert!(shared.files[0].managed);
+        assert!(!shared.files[0].created);
+        remove(&game, &root, "dlc-b").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"same bytes");
+        remove(&game, &root, "dlc-a").unwrap();
+        assert!(!target.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn installs_and_removes_additive_dlc_without_touching_base_files() {
@@ -660,7 +789,10 @@ mod tests {
                 .contains(&"bonus".to_string())
         );
         let game_dir = moved;
-        assert!(install_archive(&game, &root, "another", &archive).is_err());
+        assert_eq!(
+            install_archive(&game, &root, "another", &archive).unwrap(),
+            1
+        );
         fs::write(game_dir.join("Content/DLC/bonus.dat"), b"modified").unwrap();
         assert!(remove(&game, &root, "bonus").is_err());
         assert_eq!(
@@ -670,6 +802,11 @@ mod tests {
         fs::write(game_dir.join("Content/DLC/bonus.dat"), b"bonus").unwrap();
         remove(&game, &root, "bonus").unwrap();
         assert_eq!(fs::read(game_dir.join("base.exe")).unwrap(), b"base");
+        assert_eq!(
+            fs::read(game_dir.join("Content/DLC/bonus.dat")).unwrap(),
+            b"bonus"
+        );
+        remove(&game, &root, "another").unwrap();
         assert!(!game_dir.join("Content/DLC/bonus.dat").exists());
         assert_eq!(
             install_staged(&game, &root, "depot-dlc", &source).unwrap(),
