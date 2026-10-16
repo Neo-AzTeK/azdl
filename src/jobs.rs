@@ -491,6 +491,42 @@ pub fn begin_dlc_commit(data_dir: &Path, id: &str) -> Result<()> {
     save_job(data_dir, &job)
 }
 
+/// Check for cancellation before a DLC worker starts another costly step.
+pub(crate) fn check_dlc_cancelled(data_dir: &Path, id: &str) -> Result<()> {
+    if cancel_path(data_dir, id)?.exists() {
+        return Err("Download cancelled by user".into());
+    }
+    Ok(())
+}
+
+/// Persist a DLC worker's terminal state without racing a cancellation request.
+pub(crate) fn finish_dlc_job(data_dir: &Path, id: &str, error: Option<&str>) -> Result<bool> {
+    let _lock = lock_dlc_phase(data_dir, id)?;
+    let mut job = load_job(data_dir, id)?;
+    if job.kind != JobKind::Dlc {
+        return Err("job is not a DLC download".into());
+    }
+    let cancelled = job.status == JobStatus::Cancelled || cancel_path(data_dir, id)?.exists();
+    job.status = if cancelled {
+        JobStatus::Cancelled
+    } else if error.is_some() {
+        JobStatus::Failed
+    } else {
+        JobStatus::Complete
+    };
+    job.install_state = Some(if error.is_some() || cancelled {
+        InstallState::Failed
+    } else {
+        InstallState::Complete
+    });
+    job.pid = None;
+    job.error = error.map(str::to_owned);
+    job.updated_unix = now()?;
+    save_job(data_dir, &job)?;
+    clear_cancel(data_dir, id)?;
+    Ok(cancelled)
+}
+
 enum TransferOutcome {
     Complete(PathBuf),
     Paused,
@@ -1204,6 +1240,62 @@ mod tests {
         );
         assert!(cancel_job(&root, commit_id).is_err());
         clear_job(&root, commit_id).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dlc_worker_records_early_failure_and_cancellation() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-dlc-early-job-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for id in ["00000000000000b1", "00000000000000b2"] {
+            save_job(
+                &root,
+                &DownloadJob {
+                    id: id.into(),
+                    kind: JobKind::Dlc,
+                    url: "steam://100/dlc/200".into(),
+                    target: root.join(id).join("payload"),
+                    status: JobStatus::Running,
+                    pid: Some(std::process::id()),
+                    error: None,
+                    updated_unix: now().unwrap(),
+                    expected_sha256: None,
+                    install: None,
+                    install_state: Some(InstallState::Pending),
+                    install_error: None,
+                    progress_bytes: Some(0),
+                    total_bytes: None,
+                },
+            )
+            .unwrap();
+        }
+        let failed_id = "00000000000000b1";
+        let cancelled_id = "00000000000000b2";
+        let failed_worker = lock_dlc_worker(&root, failed_id).unwrap();
+        let cancelled_worker = lock_dlc_worker(&root, cancelled_id).unwrap();
+
+        assert!(!finish_dlc_job(&root, failed_id, Some("metadata unavailable")).unwrap());
+        let failed = load_job(&root, failed_id).unwrap();
+        assert_eq!(failed.status, JobStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some("metadata unavailable"));
+        assert!(failed.pid.is_none());
+
+        cancel_job(&root, cancelled_id).unwrap();
+        assert!(check_dlc_cancelled(&root, cancelled_id).is_err());
+        assert!(finish_dlc_job(&root, cancelled_id, None).unwrap());
+        let cancelled = load_job(&root, cancelled_id).unwrap();
+        assert_eq!(cancelled.status, JobStatus::Cancelled);
+        assert!(!cancel_path(&root, cancelled_id).unwrap().exists());
+        assert!(cancel_job(&root, cancelled_id).is_err());
+
+        drop(failed_worker);
+        drop(cancelled_worker);
         fs::remove_dir_all(root).unwrap();
     }
 

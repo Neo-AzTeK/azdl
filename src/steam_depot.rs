@@ -699,9 +699,6 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
     if source != Some("steamidra") {
         return Err("This game's source does not provide Steam depot DLC".into());
     }
-    let receipt = crate::steam_content::load_base_receipt(data_dir, &game.id)?;
-    let metadata = crate::steam_metadata::fetch_appinfo(app_id)?;
-
     let root = data_dir
         .join("dlc-downloads")
         .join(&game.id)
@@ -709,7 +706,32 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
     let payload = root.join("payload");
     let job_id = job_id_for_target(&payload);
     let _active_worker = crate::jobs::lock_dlc_worker(data_dir, &job_id)?;
+    prepare_dlc_retry(data_dir, &payload, &job_id)?;
+    let job = DownloadJob {
+        id: job_id.clone(),
+        kind: JobKind::Dlc,
+        url: format!("steam://{app_id}/dlc/{dlc_id}"),
+        target: payload.clone(),
+        status: JobStatus::Running,
+        pid: Some(std::process::id()),
+        error: None,
+        updated_unix: now()?,
+        expected_sha256: None,
+        install: Some(InstallPlan {
+            game_id: game.id.clone(),
+            title: format!("{} DLC {dlc_id}", game.title),
+            kind: InstallKind::Archive,
+        }),
+        install_state: Some(InstallState::Pending),
+        install_error: None,
+        progress_bytes: Some(0),
+        total_bytes: None,
+    };
+    save_job(data_dir, &job)?;
     let run = (|| -> Result<usize> {
+        let receipt = crate::steam_content::load_base_receipt(data_dir, &game.id)?;
+        let metadata = crate::steam_metadata::fetch_appinfo(app_id)?;
+        crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
         let (source_metadata, selected_ids) = if metadata
             .depots
             .iter()
@@ -738,6 +760,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             (child, selected_ids)
         };
         let downloads = resolve_dlc_download_groups(&root, &source_metadata, &selected_ids)?;
+        crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
         let check_lock = crate::dlc::lock_game(data_dir, &game.id)?;
         let mut all_present = true;
         for depot in &downloads.depots {
@@ -749,6 +772,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             if !crate::steam_manifest::verify_installed(&manifest, &game.install_dir)?.complete() {
                 all_present = false;
             }
+            crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
         }
         if all_present {
             crate::steam_content::save_observation(
@@ -780,35 +804,15 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             }
         };
         crate::steam_content::validate_base_revision(&receipt, &metadata)?;
+        crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
         let lib_path = find_depotkit_library(data_dir).map_err(
             |_| "The selected download plugin does not provide a usable depot downloader",
         )?;
-        prepare_dlc_retry(data_dir, &payload, &job_id)?;
         fs::create_dir_all(&payload)?;
-        let mut job = DownloadJob {
-            id: job_id.clone(),
-            kind: JobKind::Dlc,
-            url: format!("steam://{app_id}/dlc/{dlc_id}"),
-            target: payload.clone(),
-            status: JobStatus::Running,
-            pid: Some(std::process::id()),
-            error: None,
-            updated_unix: now()?,
-            expected_sha256: None,
-            install: Some(InstallPlan {
-                game_id: game.id.clone(),
-                title: format!("{} DLC {dlc_id}", game.title),
-                kind: InstallKind::Archive,
-            }),
-            install_state: Some(InstallState::Pending),
-            install_error: None,
-            progress_bytes: Some(0),
-            total_bytes: None,
-        };
-        save_job(data_dir, &job)?;
         drop(check_lock);
-        let result = (|| -> Result<usize> {
+        (|| -> Result<usize> {
             for (content_app_id, group) in &downloads.groups {
+                crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
                 let group_dir = root.join(format!("group-{content_app_id}"));
                 remove_staging_dir(&group_dir)?;
                 fs::create_dir_all(&group_dir)?;
@@ -848,32 +852,13 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             crate::steam_manifest::verify_staged_exact(&manifests, &payload)?;
             crate::jobs::begin_dlc_commit(data_dir, &job_id)?;
             crate::dlc::install_staged(game, data_dir, &dlc_id.to_string(), &payload)
-        })();
-        job.updated_unix = now()?;
-        match &result {
-            Ok(_) => {
-                job.status = JobStatus::Complete;
-                job.install_state = Some(InstallState::Complete);
-            }
-            Err(error) => {
-                let cancelled = load_job(data_dir, &job_id)
-                    .is_ok_and(|current| current.status == JobStatus::Cancelled);
-                job.status = if cancelled {
-                    JobStatus::Cancelled
-                } else {
-                    JobStatus::Failed
-                };
-                job.install_state = Some(InstallState::Failed);
-                job.error = Some(error.to_string());
-            }
-        }
-        if let Ok(current) = load_job(data_dir, &job_id) {
-            job.progress_bytes = current.progress_bytes;
-            job.total_bytes = current.total_bytes;
-        }
-        save_job(data_dir, &job)?;
-        result
+        })()
     })();
+    let error = run.as_ref().err().map(ToString::to_string);
+    let cancelled = crate::jobs::finish_dlc_job(data_dir, &job_id, error.as_deref())?;
+    if cancelled {
+        return Err("Download cancelled by user".into());
+    }
     if run.is_ok() {
         let _ = fs::remove_dir_all(&root);
     }
