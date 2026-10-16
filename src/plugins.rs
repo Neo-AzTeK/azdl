@@ -60,11 +60,24 @@ fn library_file(root: &Path, manifest: &PluginManifest) -> Result<PathBuf> {
     ];
     for name in candidates {
         let path = root.join(name);
-        if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) {
+        if fs::symlink_metadata(&path)
+            .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
+        {
             return Ok(path);
         }
     }
     Err("plugin library file is missing".into())
+}
+
+/// Resolve the library declared by one installed plugin, without searching other providers.
+pub(crate) fn installed_library_file(data_dir: &Path, id: &str) -> Result<PathBuf> {
+    validate_id(id)?;
+    let root = plugin_dir(data_dir).join(id);
+    let manifest = read_manifest(&root)?;
+    if manifest.id != id {
+        return Err("plugin folder does not match its ID".into());
+    }
+    library_file(&root, &manifest)
 }
 
 fn bundle_root(staging: &Path) -> Result<PathBuf> {
@@ -664,6 +677,49 @@ void arachnel_plugin_catalog_json_free(char *ptr) { free(ptr); }
 #[cfg(test)]
 mod steam_selection_tests {
     use super::*;
+
+    #[test]
+    fn depot_library_resolves_only_the_declared_provider_file() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-depot-provider-select-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let other = root.join("plugins/other");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join("engine"), b"other plugin").unwrap();
+        fs::write(
+            other.join("plugin.json"),
+            br#"{"id":"other","name":"Other","version":"1","apiVersion":4,"library":"engine"}"#,
+        )
+        .unwrap();
+        assert!(installed_library_file(&root, "steamidra").is_err());
+
+        let selected = root.join("plugins/steamidra");
+        fs::create_dir_all(&selected).unwrap();
+        fs::write(selected.join("engine"), b"selected plugin").unwrap();
+        fs::write(selected.join("unlisted"), b"not declared").unwrap();
+        fs::write(
+            selected.join("plugin.json"),
+            br#"{"id":"steamidra","name":"Steamidra","version":"1","apiVersion":4,"library":"engine"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            installed_library_file(&root, "steamidra").unwrap(),
+            selected.join("engine")
+        );
+
+        fs::write(
+            selected.join("plugin.json"),
+            br#"{"id":"other","name":"Other","version":"1","apiVersion":4,"library":"engine"}"#,
+        )
+        .unwrap();
+        assert!(installed_library_file(&root, "steamidra").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn selected_plugin_is_resolved_only_for_the_requested_app() {

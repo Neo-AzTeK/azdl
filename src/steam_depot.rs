@@ -291,69 +291,14 @@ fn has_depotkit_symbol(path: &Path) -> bool {
     }
 }
 
-/// Find installed native Steam depot engine library (such as steamidra plugin).
+/// Find the native Steam depot engine declared by the installed steamidra plugin.
 pub fn find_depotkit_library(data_dir: &Path) -> Result<PathBuf> {
-    // 1. Check data_dir/plugins/steamidra
-    let steamidra_dir = data_dir.join("plugins").join("steamidra");
-    if steamidra_dir.is_dir()
-        && let Ok(entries) = fs::read_dir(&steamidra_dir)
-    {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if (name.starts_with("lib")
-                || name.ends_with(".so")
-                || name.ends_with(".dll")
-                || name.ends_with(".dylib"))
-                && has_depotkit_symbol(&path)
-            {
-                return Ok(path);
-            }
-        }
+    let path = crate::plugins::installed_library_file(data_dir, "steamidra")
+        .map_err(|_| "Steam depot downloader engine not found in the installed steamidra plugin")?;
+    if !has_depotkit_symbol(&path) {
+        return Err("The installed steamidra plugin does not provide a depot downloader".into());
     }
-
-    // 2. Search all plugin subdirectories
-    let plugins_dir = data_dir.join("plugins");
-    if plugins_dir.is_dir()
-        && let Ok(plugins) = fs::read_dir(&plugins_dir)
-    {
-        for plugin in plugins.flatten() {
-            if plugin.path().is_dir()
-                && let Ok(entries) = fs::read_dir(plugin.path())
-            {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let name = path.file_name().unwrap_or_default().to_string_lossy();
-                    if (name.contains("steamidra")
-                        || name.ends_with(".so")
-                        || name.ends_with(".dll")
-                        || name.ends_with(".dylib"))
-                        && has_depotkit_symbol(&path)
-                    {
-                        return Ok(path);
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Fallback to executable directory
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
-    {
-        for cand in [
-            "libsteamidra_plugin.so",
-            "steamidra_plugin.dll",
-            "libsteamidra.so",
-        ] {
-            let p = parent.join(cand);
-            if p.is_file() && has_depotkit_symbol(&p) {
-                return Ok(p);
-            }
-        }
-    }
-
-    Err("Steam depot downloader engine not found. Ensure the steamidra plugin is installed.".into())
+    Ok(path)
 }
 
 struct ProgressContext<'a> {
