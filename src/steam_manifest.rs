@@ -2,7 +2,7 @@
 
 use crate::Result;
 use sha1::{Digest, Sha1};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
@@ -299,6 +299,88 @@ pub fn verify_installed(
     Ok(result)
 }
 
+fn collect_staged_files(root: &Path, relative: &Path, files: &mut BTreeSet<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(root.join(relative))? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !fs::canonicalize(&path)?.starts_with(root) {
+            return Err("Staged depot contains a symbolic link or escaping path".into());
+        }
+        let relative_path = relative.join(entry.file_name());
+        if metadata.is_dir() {
+            collect_staged_files(root, &relative_path, files)?;
+        } else if metadata.is_file() {
+            files.insert(relative_path);
+        } else {
+            return Err("Staged depot contains a non-regular file".into());
+        }
+    }
+    Ok(())
+}
+
+/// Verify the complete staged payload against every selected depot manifest.
+/// Reject unlisted files and conflicting path ownership before any game file is changed.
+pub fn verify_staged_exact(manifests: &[DepotManifest], staged_dir: &Path) -> Result<()> {
+    if manifests.is_empty() {
+        return Err("No depot manifests were selected for staging verification".into());
+    }
+    let metadata = fs::symlink_metadata(staged_dir)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("DLC staging payload is not a regular directory".into());
+    }
+    let root = fs::canonicalize(staged_dir)?;
+    let mut expected = BTreeMap::<String, &ManifestFile>::new();
+    for manifest in manifests {
+        for file in &manifest.files {
+            if file.path.as_os_str().is_empty()
+                || file
+                    .path
+                    .components()
+                    .any(|component| !matches!(component, Component::Normal(_)))
+            {
+                return Err("Selected depot manifest has an unsafe file path".into());
+            }
+            let portable = file.path.to_string_lossy().to_lowercase();
+            if let Some(previous) = expected.insert(portable, file)
+                && (previous.path != file.path
+                    || previous.size != file.size
+                    || previous.sha1 != file.sha1)
+            {
+                return Err(format!(
+                    "Selected depots require conflicting content at {}",
+                    file.path.display()
+                )
+                .into());
+            }
+        }
+    }
+    let mut staged = BTreeSet::new();
+    collect_staged_files(&root, Path::new(""), &mut staged)?;
+    let allowed = expected
+        .values()
+        .map(|file| file.path.clone())
+        .collect::<BTreeSet<_>>();
+    if let Some(extra) = staged.difference(&allowed).next() {
+        return Err(format!(
+            "Staged depot contains an unlisted file: {}",
+            extra.display()
+        )
+        .into());
+    }
+    for manifest in manifests {
+        let result = verify_installed(manifest, &root)?;
+        if !result.complete() {
+            return Err(format!(
+                "Staged depot {} does not match manifest {} ({} missing, {} changed)",
+                manifest.depot_id, manifest.manifest_id, result.missing, result.changed
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,6 +463,60 @@ mod tests {
         assert!(read_manifest(&source, 201, 300).is_err());
         fs::write(&source, fixture("../escape", b"content")).unwrap();
         assert!(read_manifest(&source, 200, 300).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staged_verification_rejects_missing_changed_extra_and_conflicting_files() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-staged-manifest-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("payload/data")).unwrap();
+        let source = root.join("depot.manifest");
+        fs::write(&source, fixture("data/addon.bin", b"content")).unwrap();
+        let manifest = read_manifest(&source, 200, 300).unwrap();
+        let payload = root.join("payload");
+
+        let missing = verify_staged_exact(std::slice::from_ref(&manifest), &payload)
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("1 missing"), "{missing}");
+        fs::write(payload.join("data/addon.bin"), b"changed").unwrap();
+        let changed = verify_staged_exact(std::slice::from_ref(&manifest), &payload)
+            .unwrap_err()
+            .to_string();
+        assert!(changed.contains("1 changed"), "{changed}");
+        fs::write(payload.join("data/addon.bin"), b"content").unwrap();
+        verify_staged_exact(&[manifest.clone(), manifest.clone()], &payload).unwrap();
+
+        let mut conflict = manifest.clone();
+        conflict.depot_id = 201;
+        conflict.files[0].sha1 = Sha1::digest(b"other").into();
+        let error = verify_staged_exact(&[manifest.clone(), conflict], &payload)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("conflicting content"), "{error}");
+
+        fs::write(payload.join("unlisted.bin"), b"extra").unwrap();
+        let extra = verify_staged_exact(&[manifest], &payload)
+            .unwrap_err()
+            .to_string();
+        assert!(extra.contains("unlisted file"), "{extra}");
+        #[cfg(unix)]
+        {
+            fs::remove_file(payload.join("unlisted.bin")).unwrap();
+            std::os::unix::fs::symlink(&source, payload.join("linked.manifest")).unwrap();
+            let linked =
+                verify_staged_exact(&[read_manifest(&source, 200, 300).unwrap()], &payload)
+                    .unwrap_err()
+                    .to_string();
+            assert!(linked.contains("symbolic link"), "{linked}");
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -311,8 +311,17 @@ fn dlc_active_lock_path(data_dir: &Path, id: &str) -> Result<PathBuf> {
     Ok(job_path(data_dir, id)?.with_extension("active-lock"))
 }
 
+/// Exclusive lock owned by one in-process DLC worker.
+pub struct DlcWorkerLock(File);
+
+impl Drop for DlcWorkerLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 /// Hold this lock for the entire in-process DLC depot download and commit.
-pub fn lock_dlc_worker(data_dir: &Path, id: &str) -> Result<File> {
+pub fn lock_dlc_worker(data_dir: &Path, id: &str) -> Result<DlcWorkerLock> {
     let path = dlc_active_lock_path(data_dir, id)?;
     fs::create_dir_all(job_dir(data_dir))?;
     if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
@@ -331,7 +340,7 @@ pub fn lock_dlc_worker(data_dir: &Path, id: &str) -> Result<File> {
         }
         Err(fs::TryLockError::Error(error)) => return Err(error.into()),
     }
-    Ok(file)
+    Ok(DlcWorkerLock(file))
 }
 
 fn dlc_worker_active(data_dir: &Path, id: &str) -> Result<bool> {

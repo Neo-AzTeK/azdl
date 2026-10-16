@@ -731,6 +731,17 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
                 &job_id,
             )?;
             normalize_windows_paths(&payload)?;
+            let manifests = depots
+                .iter()
+                .map(|depot| {
+                    crate::steam_manifest::read_manifest(
+                        &depot.manifest_path,
+                        depot.depot_id,
+                        depot.manifest_id,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            crate::steam_manifest::verify_staged_exact(&manifests, &payload)?;
             crate::jobs::begin_dlc_commit(data_dir, &job_id)?;
             crate::dlc::install_staged(game, data_dir, &dlc_id.to_string(), &payload)
         })();
