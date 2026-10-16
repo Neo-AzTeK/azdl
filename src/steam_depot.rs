@@ -508,12 +508,6 @@ pub fn verify_legacy_base(
     metadata: &crate::steam_metadata::SteamAppMetadata,
 ) -> Result<crate::steam_content::BaseContentReceipt> {
     let app_id = metadata.app_id;
-    let unpacked = fetch_provider_bundle(&root.join("base-verification-provider"), app_id)?;
-    let known = metadata
-        .depots
-        .iter()
-        .map(|depot| depot.depot_id)
-        .collect::<std::collections::BTreeSet<_>>();
     let selected_ids = metadata
         .depots
         .iter()
@@ -521,17 +515,18 @@ pub fn verify_legacy_base(
         .filter(|depot| crate::steam_content::matches_target(depot, "windows", "english"))
         .map(|depot| depot.depot_id)
         .collect::<std::collections::BTreeSet<_>>();
-    let available = parse_lua_manifests_filtered(&unpacked, app_id, Some((&selected_ids, &known)))?;
-    if available.len() != selected_ids.len() {
-        return Err(format!(
-            "Cannot verify the old base game: provider manifests cover {} of {} required depots",
-            available.len(),
-            selected_ids.len()
-        )
-        .into());
+    if selected_ids.is_empty() {
+        return Err(
+            "Cannot verify the old base game: Steam metadata identifies no required base depots"
+                .into(),
+        );
     }
-    let depots =
-        crate::steam_content::select_base_depots(&available, metadata, "windows", "english")?;
+    let depots = resolve_dlc_download_groups(
+        &root.join("base-verification-provider"),
+        metadata,
+        &selected_ids,
+    )?
+    .depots;
     for depot in &depots {
         let manifest = crate::steam_manifest::read_manifest(
             &depot.manifest_path,
@@ -590,11 +585,7 @@ fn resolve_dlc_download_groups_with(
     mut fetch_bundle: impl FnMut(&Path, u32) -> Result<PathBuf>,
 ) -> Result<ResolvedDlcDownloads> {
     if selected_ids.is_empty() {
-        return Err(format!(
-            "No matching DLC depots for Steam App ID {}",
-            metadata.app_id
-        )
-        .into());
+        return Err(format!("No matching depots for Steam App ID {}", metadata.app_id).into());
     }
     let mut by_manifest_app = BTreeMap::<u32, Vec<ResolvedDepotSource>>::new();
     for depot_id in selected_ids {
@@ -635,13 +626,13 @@ fn resolve_dlc_download_groups_with(
         for source in sources {
             let artifact = artifacts.get(&source.depot_id).ok_or_else(|| {
                 format!(
-                    "The selected source has no provider manifest for DLC depot {} from App ID {manifest_app_id}",
+                    "The selected source has no provider manifest for depot {} from App ID {manifest_app_id}",
                     source.depot_id
                 )
             })?;
             if artifact.manifest_id != source.manifest_id {
                 return Err(format!(
-                    "DLC depot {} provider revision differs from public manifest {}",
+                    "Depot {} provider revision differs from public manifest {}",
                     source.depot_id, source.manifest_id
                 )
                 .into());
@@ -1377,6 +1368,31 @@ mod tests {
         assert_eq!(downloads.groups[1].0, 200);
         assert_eq!(downloads.groups[1].1[0].depot_id, 202);
         assert_eq!(downloads.depots.len(), 2);
+
+        let mut base = parent.clone();
+        for depot in &mut base.depots {
+            depot.dlc_app_id = None;
+        }
+        let base_depots = base
+            .depots
+            .iter()
+            .filter(|depot| depot.dlc_app_id.is_none())
+            .map(|depot| depot.depot_id)
+            .collect();
+        let resolved_base = resolve_dlc_download_groups_with(
+            &root,
+            &base,
+            &base_depots,
+            |_| Ok(shared.clone()),
+            |_, id| match id {
+                100 => Ok(parent_bundle.clone()),
+                200 => Ok(shared_bundle.clone()),
+                _ => panic!("unexpected provider App ID"),
+            },
+        )
+        .unwrap();
+        assert_eq!(resolved_base.depots.len(), 2);
+        assert_eq!(resolved_base.depots[1].manifest_id, 22);
 
         let mut free_parent = parent.clone();
         free_parent.free_to_download = true;
