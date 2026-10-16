@@ -126,6 +126,17 @@ fn fetch_provider_bundle(root: &Path, app_id: u32) -> Result<PathBuf> {
 
 /// Resolve each provider depot to exactly one manifest revision.
 pub fn parse_lua_manifests(manifest_dir: &Path, app_id: u32) -> Result<Vec<DepotInfo>> {
+    parse_lua_manifests_filtered(manifest_dir, app_id, None)
+}
+
+fn parse_lua_manifests_filtered(
+    manifest_dir: &Path,
+    app_id: u32,
+    filter: Option<(
+        &std::collections::BTreeSet<u32>,
+        &std::collections::BTreeSet<u32>,
+    )>,
+) -> Result<Vec<DepotInfo>> {
     if !manifest_dir.is_dir() {
         return Err("manifest directory does not exist".into());
     }
@@ -137,10 +148,22 @@ pub fn parse_lua_manifests(manifest_dir: &Path, app_id: u32) -> Result<Vec<Depot
     for entry in fs::read_dir(manifest_dir)?.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "lua")
+            && fs::symlink_metadata(&path)
+                .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
             && let Ok(content) = fs::read_to_string(&path)
         {
             parse_lua_content(&content, &mut raw_depots, &mut manifest_ids);
         }
+    }
+
+    if let Some((selected, known)) = filter {
+        if let Some((unknown, _)) = raw_depots.iter().find(|(id, _)| !known.contains(id)) {
+            return Err(format!(
+                "Provider depot {unknown} is absent from Steam metadata for App ID {app_id}; its base/DLC role is unknown"
+            )
+            .into());
+        }
+        raw_depots.retain(|(id, _)| selected.contains(id));
     }
 
     let mut depots = Vec::new();
@@ -527,7 +550,20 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             .any(|depot| depot.dlc_app_id == Some(dlc_id))
         {
             let unpacked = fetch_provider_bundle(&root.join("base-provider"), app_id)?;
-            let available = parse_lua_manifests(&unpacked, app_id)?;
+            let known = metadata
+                .depots
+                .iter()
+                .map(|depot| depot.depot_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            let selected_ids = metadata
+                .depots
+                .iter()
+                .filter(|depot| depot.dlc_app_id == Some(dlc_id))
+                .filter(|depot| crate::steam_content::matches_target(depot, "windows", "english"))
+                .map(|depot| depot.depot_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            let available =
+                parse_lua_manifests_filtered(&unpacked, app_id, Some((&selected_ids, &known)))?;
             let selected = crate::steam_content::select_dlc_depots(
                 &available, &metadata, dlc_id, "windows", "english",
             )?;
@@ -535,7 +571,20 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         } else {
             let child = crate::steam_metadata::fetch_appinfo(dlc_id)?;
             let unpacked = fetch_provider_bundle(&root.join("dlc-provider"), dlc_id)?;
-            let available = parse_lua_manifests(&unpacked, dlc_id)?;
+            let known = child
+                .depots
+                .iter()
+                .map(|depot| depot.depot_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            let selected_ids = child
+                .depots
+                .iter()
+                .filter(|depot| depot.dlc_app_id.is_none_or(|id| id == dlc_id))
+                .filter(|depot| crate::steam_content::matches_target(depot, "windows", "english"))
+                .map(|depot| depot.depot_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            let available =
+                parse_lua_manifests_filtered(&unpacked, dlc_id, Some((&selected_ids, &known)))?;
             let selected = crate::steam_content::select_separate_dlc_depots(
                 &available, &child, app_id, "windows", "english",
             )?;
@@ -791,11 +840,24 @@ pub fn install_steam_manifest_game_in(
         .map_err(|_| "The selected download plugin does not provide a usable depot downloader")?;
 
     // 5. Parse depots from Lua manifests
-    let provider_depots = parse_lua_manifests(&unpack_dir, app_id)?;
+    let appinfo = crate::steam_metadata::fetch_appinfo(app_id)?;
+    let known = appinfo
+        .depots
+        .iter()
+        .map(|depot| depot.depot_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let selected_ids = appinfo
+        .depots
+        .iter()
+        .filter(|depot| depot.dlc_app_id.is_none())
+        .filter(|depot| crate::steam_content::matches_target(depot, "windows", "english"))
+        .map(|depot| depot.depot_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let provider_depots =
+        parse_lua_manifests_filtered(&unpack_dir, app_id, Some((&selected_ids, &known)))?;
     if provider_depots.is_empty() {
         return Err(format!("No usable depot manifest was found for Steam App ID {app_id}").into());
     }
-    let appinfo = crate::steam_metadata::fetch_appinfo(app_id)?;
     let depots =
         crate::steam_content::select_base_depots(&provider_depots, &appinfo, "windows", "english")?;
     for depot in &depots {
@@ -971,6 +1033,53 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].manifest_id, 789);
         assert_eq!(selected[0].manifest_path, root.join("456_789.manifest"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unrelated_missing_dlc_manifest_does_not_block_base_selection() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-manifest-filter-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let key = "0123456789abcdef0123456789abcdef";
+        fs::write(
+            root.join("100.lua"),
+            format!(
+                "addappid(101,0,\"{key}\")\nsetManifestid(101,\"10\")\naddappid(201,0,\"{key}\")\nsetManifestid(201,\"20\")"
+            ),
+        )
+        .unwrap();
+        fs::write(root.join("101_10.manifest"), b"base").unwrap();
+        let known = [101, 201].into_iter().collect();
+        let base = [101].into_iter().collect();
+        let selected = parse_lua_manifests_filtered(&root, 100, Some((&base, &known))).unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|depot| depot.depot_id)
+                .collect::<Vec<_>>(),
+            vec![101]
+        );
+        let dlc = [201].into_iter().collect();
+        assert!(
+            parse_lua_manifests_filtered(&root, 100, Some((&dlc, &known)))
+                .unwrap_err()
+                .to_string()
+                .contains("depot 201, revision 20")
+        );
+        fs::write(root.join("100.lua"), format!("addappid(999,0,\"{key}\")")).unwrap();
+        assert!(
+            parse_lua_manifests_filtered(&root, 100, Some((&base, &known)))
+                .unwrap_err()
+                .to_string()
+                .contains("Provider depot 999 is absent")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

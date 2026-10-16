@@ -36,7 +36,7 @@ pub struct ObservedDlcReceipt {
     pub verified_unix: u64,
 }
 
-fn matches_target(depot: &SteamDepotMetadata, os: &str, language: &str) -> bool {
+pub(crate) fn matches_target(depot: &SteamDepotMetadata, os: &str, language: &str) -> bool {
     let matches = |value: Option<&str>, expected: &str| {
         value.is_none_or(|value| {
             value
@@ -189,32 +189,31 @@ pub fn select_separate_dlc_depots(
     if metadata.parent_app_id != Some(parent_app_id) {
         return Err("DLC metadata does not identify the installed parent game".into());
     }
-    let by_id = metadata
+    let desired = metadata
         .depots
+        .iter()
+        .filter(|depot| depot.dlc_app_id.is_none_or(|id| id == metadata.app_id))
+        .filter(|depot| matches_target(depot, target_os, language))
+        .collect::<Vec<_>>();
+    if desired.is_empty() {
+        return Err(format!("No matching depots for DLC App ID {}", metadata.app_id).into());
+    }
+    let bundle = available
         .iter()
         .map(|depot| (depot.depot_id, depot))
         .collect::<BTreeMap<_, _>>();
     let mut selected = Vec::new();
-    for artifact in available {
-        let Some(info) = by_id.get(&artifact.depot_id) else {
-            return Err(
-                format!("DLC depot {} is absent from DLC appinfo", artifact.depot_id).into(),
-            );
-        };
-        if info.dlc_app_id.is_none_or(|id| id == metadata.app_id)
-            && matches_target(info, target_os, language)
-        {
-            selected.push(artifact.clone());
-        }
-    }
-    if selected.is_empty() {
-        return Err(format!("No matching depots for DLC App ID {}", metadata.app_id).into());
-    }
-    for artifact in &selected {
-        let expected = by_id[&artifact.depot_id]
+    for depot in desired {
+        let artifact = bundle.get(&depot.depot_id).ok_or_else(|| {
+            format!(
+                "The selected source has no provider manifest for DLC depot {}",
+                depot.depot_id
+            )
+        })?;
+        let expected = depot
             .public_manifest_id
             .as_deref()
-            .ok_or_else(|| format!("DLC depot {} has no public manifest", artifact.depot_id))?;
+            .ok_or_else(|| format!("DLC depot {} has no public manifest", depot.depot_id))?;
         if artifact.manifest_id.to_string() != expected {
             return Err(format!(
                 "DLC depot {} provider revision differs from public manifest {expected}",
@@ -222,6 +221,7 @@ pub fn select_separate_dlc_depots(
             )
             .into());
         }
+        selected.push((*artifact).clone());
     }
     Ok(selected)
 }
