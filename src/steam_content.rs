@@ -186,33 +186,58 @@ pub fn validate_base_revision(
     receipt: &BaseContentReceipt,
     metadata: &SteamAppMetadata,
 ) -> Result<()> {
+    validate_base_revision_with(receipt, metadata, crate::steam_metadata::fetch_appinfo)
+}
+
+fn validate_base_revision_with(
+    receipt: &BaseContentReceipt,
+    metadata: &SteamAppMetadata,
+    mut load_app: impl FnMut(u32) -> Result<SteamAppMetadata>,
+) -> Result<()> {
     if receipt.app_id != metadata.app_id || receipt.depots.is_empty() {
         return Err("Base game content receipt does not match Steam appinfo".into());
     }
-    let public = metadata
+    let required = metadata
         .depots
         .iter()
-        .filter_map(|depot| {
-            depot
-                .public_manifest_id
-                .as_deref()
-                .map(|id| (depot.depot_id, id))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let shared = metadata
-        .depots
-        .iter()
-        .filter(|depot| depot.source_app_id.is_some())
+        .filter(|depot| depot.dlc_app_id.is_none())
+        .filter(|depot| matches_target(depot, "windows", "english"))
         .map(|depot| depot.depot_id)
         .collect::<BTreeSet<_>>();
+    if required.is_empty() {
+        return Err("Steam metadata identifies no required base depots for this game".into());
+    }
+    let mut recorded = BTreeMap::new();
     for depot in &receipt.depots {
-        if shared.contains(&depot.depot_id) {
-            continue;
+        if recorded
+            .insert(depot.depot_id, depot.manifest_id.as_str())
+            .is_some()
+        {
+            return Err(format!("Base receipt repeats depot {}", depot.depot_id).into());
         }
-        if public.get(&depot.depot_id).copied() != Some(depot.manifest_id.as_str()) {
+    }
+    if let Some(missing) = required.iter().find(|id| !recorded.contains_key(id)) {
+        return Err(format!(
+            "Base receipt lacks required depot {missing}; update the base game before adding DLC"
+        )
+        .into());
+    }
+    if let Some(extra) = recorded.keys().find(|id| !required.contains(id)) {
+        return Err(format!(
+            "Base receipt contains depot {extra} that is no longer required; update the base game before adding DLC"
+        )
+        .into());
+    }
+    for depot_id in required {
+        let source =
+            crate::steam_metadata::resolve_depot_source(metadata, depot_id, &mut load_app)?;
+        if recorded
+            .get(&depot_id)
+            .and_then(|id| id.parse::<u64>().ok())
+            != Some(source.manifest_id)
+        {
             return Err(format!(
-                "Base depot {} has a different revision from current Steam metadata; update the base game before this DLC",
-                depot.depot_id
+                "Base depot {depot_id} has a different revision from current Steam metadata; update the base game before this DLC"
             )
             .into());
         }
@@ -571,6 +596,81 @@ mod tests {
         )
         .unwrap();
         assert_eq!(base.len(), 2);
+    }
+
+    #[test]
+    fn base_revision_requires_all_target_depots_and_exact_shared_revision() {
+        let base = crate::steam_metadata::parse_appinfo(
+            br#"{"data":{"100":{"depots":{"101":{"manifests":{"public":{"gid":"1"}}},"102":{"depotfromapp":"200"},"103":{"manifests":{"public":{"gid":"3"}},"config":{"oslist":"linux"}},"201":{"dlcappid":"300","manifests":{"public":{"gid":"4"}}}}}}}"#,
+            100,
+        )
+        .unwrap();
+        let shared = crate::steam_metadata::parse_appinfo(
+            br#"{"data":{"200":{"depots":{"102":{"manifests":{"public":{"gid":"2"}}}}}}}"#,
+            200,
+        )
+        .unwrap();
+        let receipt = BaseContentReceipt {
+            game_id: "steam-100".into(),
+            app_id: 100,
+            depots: vec![
+                DepotRevision {
+                    depot_id: 101,
+                    manifest_id: "1".into(),
+                },
+                DepotRevision {
+                    depot_id: 102,
+                    manifest_id: "2".into(),
+                },
+            ],
+            origin: BaseReceiptOrigin::ManagedInstall,
+        };
+        let check = |receipt: &BaseContentReceipt, shared: &SteamAppMetadata| {
+            validate_base_revision_with(receipt, &base, |app_id| {
+                assert_eq!(app_id, 200);
+                Ok(shared.clone())
+            })
+        };
+        check(&receipt, &shared).unwrap();
+
+        let mut missing = receipt.clone();
+        missing.depots.pop();
+        assert!(
+            check(&missing, &shared)
+                .unwrap_err()
+                .to_string()
+                .contains("lacks required depot 102")
+        );
+
+        let mut extra = receipt.clone();
+        extra.depots.push(DepotRevision {
+            depot_id: 103,
+            manifest_id: "3".into(),
+        });
+        assert!(
+            check(&extra, &shared)
+                .unwrap_err()
+                .to_string()
+                .contains("no longer required")
+        );
+
+        let mut changed = receipt.clone();
+        changed.depots[1].manifest_id = "9".into();
+        assert!(
+            check(&changed, &shared)
+                .unwrap_err()
+                .to_string()
+                .contains("different revision")
+        );
+
+        let mut newer = shared.clone();
+        newer.depots[0].public_manifest_id = Some("9".into());
+        assert!(
+            check(&receipt, &newer)
+                .unwrap_err()
+                .to_string()
+                .contains("different revision")
+        );
     }
 
     #[test]
