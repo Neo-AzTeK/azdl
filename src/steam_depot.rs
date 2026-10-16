@@ -854,13 +854,21 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             crate::dlc::install_staged(game, data_dir, &dlc_id.to_string(), &payload)
         })()
     })();
+    let cleanup = remove_staging_dir(&root);
+    let run = match (run, cleanup) {
+        (Ok(count), Ok(())) => Ok(count),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => {
+            Err(format!("DLC installed, but staging cleanup failed: {error}").into())
+        }
+        (Err(error), Err(cleanup_error)) => {
+            Err(format!("{error}; staging cleanup failed: {cleanup_error}").into())
+        }
+    };
     let error = run.as_ref().err().map(ToString::to_string);
     let cancelled = crate::jobs::finish_dlc_job(data_dir, &job_id, error.as_deref())?;
     if cancelled {
         return Err("Download cancelled by user".into());
-    }
-    if run.is_ok() {
-        let _ = fs::remove_dir_all(&root);
     }
     run
 }
@@ -1360,6 +1368,15 @@ mod tests {
 
         assert!(!payload.exists());
         assert!(!cancel.exists());
+        assert_eq!(fs::read(receipt.join("state.json")).unwrap(), b"journal");
+        fs::create_dir_all(payload.parent().unwrap().join("group-456")).unwrap();
+        fs::write(
+            payload.parent().unwrap().join("group-456/partial.bin"),
+            b"partial",
+        )
+        .unwrap();
+        remove_staging_dir(payload.parent().unwrap()).unwrap();
+        assert!(!payload.parent().unwrap().exists());
         assert_eq!(fs::read(receipt.join("state.json")).unwrap(), b"journal");
         drop(worker);
         fs::remove_dir_all(data_dir).unwrap();
