@@ -1,6 +1,7 @@
 <script>
   import { onDestroy } from 'svelte';
   import { runAction } from '../api.js';
+  import { notify } from '../notifications.js';
   import {
     getJobThumbnail as resolveJobThumb,
     getResolvedArtwork,
@@ -133,7 +134,7 @@
       await runAction({ action: `job-${action}`, id });
       if (onRefresh) onRefresh();
     } catch (e) {
-      console.error(`Failed to ${action} job:`, e);
+      notify.error(e?.message || `Failed to ${action} transfer`);
     }
   }
 
@@ -334,16 +335,22 @@
 
               <div class="job-actions">
                 {#if isJobActive(job.status)}
-                  <button class="action-btn" onclick={() => handleJobAction('pause', job.id)}>
-                    Pause
-                  </button>
-                  <button class="action-btn danger" onclick={() => handleJobAction('cancel', job.id)}>
-                    Cancel
-                  </button>
+                  {#if job.kind !== 'dlc'}
+                    <button class="action-btn" onclick={() => handleJobAction('pause', job.id)}>
+                      Pause
+                    </button>
+                  {/if}
+                  {#if job.kind !== 'dlc' || job.install_state !== 'installing'}
+                    <button class="action-btn danger" onclick={() => handleJobAction('cancel', job.id)}>
+                      Cancel
+                    </button>
+                  {/if}
                 {:else if isJobPaused(job.status)}
-                  <button class="action-btn primary" onclick={() => handleJobAction('resume', job.id)}>
-                    Resume
-                  </button>
+                  {#if job.kind !== 'dlc'}
+                    <button class="action-btn primary" onclick={() => handleJobAction('resume', job.id)}>
+                      Resume
+                    </button>
+                  {/if}
                   <button class="action-btn danger" onclick={() => handleJobAction('cancel', job.id)}>
                     Cancel
                   </button>

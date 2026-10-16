@@ -391,6 +391,41 @@ pub fn clear_cancel(data_dir: &Path, id: &str) -> Result<()> {
     }
 }
 
+fn lock_dlc_phase(data_dir: &Path, id: &str) -> Result<File> {
+    let path = job_path(data_dir, id)?.with_extension("phase-lock");
+    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err("DLC job lock is a symbolic link".into());
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    file.lock()?;
+    Ok(file)
+}
+
+/// Close the cancellation window before committing a staged DLC payload.
+pub fn begin_dlc_commit(data_dir: &Path, id: &str) -> Result<()> {
+    let _lock = lock_dlc_phase(data_dir, id)?;
+    let mut job = load_job(data_dir, id)?;
+    if job.kind != JobKind::Dlc || job.status != JobStatus::Running {
+        return Err("DLC download job is no longer running".into());
+    }
+    if cancel_path(data_dir, id)?.exists() {
+        job.status = JobStatus::Cancelled;
+        job.pid = None;
+        job.updated_unix = now()?;
+        save_job(data_dir, &job)?;
+        clear_cancel(data_dir, id)?;
+        return Err("Download cancelled by user".into());
+    }
+    job.install_state = Some(InstallState::Installing);
+    job.updated_unix = now()?;
+    save_job(data_dir, &job)
+}
+
 enum TransferOutcome {
     Complete(PathBuf),
     Paused,
@@ -908,6 +943,11 @@ pub fn start_background(data_dir: &Path, id: &str) -> Result<u32> {
 
 pub fn pause_job(data_dir: &Path, id: &str) -> Result<()> {
     let mut job = load_job(data_dir, id)?;
+    if job.kind == JobKind::Dlc {
+        return Err(
+            "DLC depot jobs cannot be paused; cancel and restart from the game page".into(),
+        );
+    }
     if matches!(job.status, JobStatus::Complete | JobStatus::Cancelled) {
         return Err("download job is already finished".into());
     }
@@ -923,6 +963,20 @@ pub fn pause_job(data_dir: &Path, id: &str) -> Result<()> {
 
 pub fn cancel_job(data_dir: &Path, id: &str) -> Result<()> {
     let job = load_job(data_dir, id)?;
+    if job.kind == JobKind::Dlc {
+        let _lock = lock_dlc_phase(data_dir, id)?;
+        let current = load_job(data_dir, id)?;
+        if current.status != JobStatus::Running {
+            return Err("DLC download job is no longer running".into());
+        }
+        if current.install_state == Some(InstallState::Installing) {
+            return Err(
+                "DLC files are being committed; cancellation is no longer available".into(),
+            );
+        }
+        fs::write(cancel_path(data_dir, id)?, b"cancel\n")?;
+        return Ok(());
+    }
     if matches!(job.status, JobStatus::Complete | JobStatus::Cancelled) {
         return Err("download job is already finished".into());
     }
@@ -980,6 +1034,7 @@ pub fn clear_job(data_dir: &Path, id: &str) -> Result<()> {
     }
     let _ = fs::remove_file(pause_path(data_dir, id)?);
     let _ = fs::remove_file(cancel_path(data_dir, id)?);
+    let _ = fs::remove_file(job_path(data_dir, id)?.with_extension("phase-lock"));
     Ok(())
 }
 
@@ -1001,6 +1056,58 @@ pub fn clear_completed_jobs(data_dir: &Path) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dlc_cancellation_stops_before_commit_and_rejects_after_commit_begins() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-dlc-job-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cancel_id = "00000000000000a1";
+        let commit_id = "00000000000000a2";
+        for id in [cancel_id, commit_id] {
+            let job = DownloadJob {
+                id: id.into(),
+                kind: JobKind::Dlc,
+                url: "steam://100/dlc/200".into(),
+                target: root.join(id).join("payload"),
+                status: JobStatus::Running,
+                pid: Some(std::process::id()),
+                error: None,
+                updated_unix: now().unwrap(),
+                expected_sha256: None,
+                install: None,
+                install_state: Some(InstallState::Pending),
+                install_error: None,
+                progress_bytes: Some(0),
+                total_bytes: None,
+            };
+            save_job(&root, &job).unwrap();
+        }
+        assert!(pause_job(&root, cancel_id).is_err());
+
+        cancel_job(&root, cancel_id).unwrap();
+        assert!(cancel_path(&root, cancel_id).unwrap().exists());
+        assert!(begin_dlc_commit(&root, cancel_id).is_err());
+        assert_eq!(
+            load_job(&root, cancel_id).unwrap().status,
+            JobStatus::Cancelled
+        );
+        assert!(!cancel_path(&root, cancel_id).unwrap().exists());
+
+        begin_dlc_commit(&root, commit_id).unwrap();
+        assert_eq!(
+            load_job(&root, commit_id).unwrap().install_state,
+            Some(InstallState::Installing)
+        );
+        assert!(cancel_job(&root, commit_id).is_err());
+        assert!(!cancel_path(&root, commit_id).unwrap().exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn completed_job_verifies_digest_and_quarantines_modified_file() {

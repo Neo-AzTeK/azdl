@@ -564,7 +564,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
                 title: format!("{} DLC {dlc_id}", game.title),
                 kind: InstallKind::Archive,
             }),
-            install_state: Some(InstallState::Installing),
+            install_state: Some(InstallState::Pending),
             install_error: None,
             progress_bytes: Some(0),
             total_bytes: None,
@@ -580,6 +580,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
                 &job_id,
             )?;
             normalize_windows_paths(&payload)?;
+            crate::jobs::begin_dlc_commit(data_dir, &job_id)?;
             crate::dlc::install_staged(game, data_dir, &dlc_id.to_string(), &payload)
         })();
         job.updated_unix = now()?;
