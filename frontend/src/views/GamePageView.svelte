@@ -41,6 +41,7 @@
     runners = [],
     jobs = [],
     tasks = [],
+    dlcRevision = 0,
     fromTab = 'library',
     onBack,
     onLaunchGame = null,
@@ -90,6 +91,7 @@
 
   $effect(() => {
     const id = installedRecord?.id;
+    void dlcRevision;
     if (id) refreshDlc(id);
     else dlcInfo = { available: [], installed: [] };
   });

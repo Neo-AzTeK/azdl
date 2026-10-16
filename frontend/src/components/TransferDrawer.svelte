@@ -17,7 +17,7 @@
   } from '../transfers.js';
   import { getSteamStorageSize } from '../steam_storage.js';
 
-  let { jobs = [], onRefresh = null } = $props();
+  let { jobs = [], onRefresh = null, onDlcInstalled = null } = $props();
 
   let expanded = $state(false);
   let brokenThumbs = $state(new Set());
@@ -131,7 +131,11 @@
 
   async function handleJobAction(action, id) {
     try {
-      await runAction({ action: `job-${action}`, id });
+      const result = await runAction({ action: `job-${action}`, id });
+      if (action === 'resume' && result?.dlc_installed_files != null) {
+        onDlcInstalled?.();
+        notify.success('DLC installation complete');
+      }
       if (onRefresh) onRefresh();
     } catch (e) {
       notify.error(e?.message || `Failed to ${action} transfer`);

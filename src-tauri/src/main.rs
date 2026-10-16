@@ -2334,15 +2334,20 @@ mod commands {
                 Ok(json!({ "success": true }))
             }
             Action::JobResume { id } => {
+                let mut dlc_installed_files = None;
                 if azdl::jobs::load_job(data_dir, &id).is_ok() {
-                    azdl::jobs::retry_job(data_dir, &id)?;
+                    if let Some(count) = azdl::dlc::resume_catalog_dlc_job(data_dir, &id)? {
+                        dlc_installed_files = Some(count);
+                    } else {
+                        azdl::jobs::retry_job(data_dir, &id)?;
+                    }
                 } else if azdl::torrent::load_torrent_job(data_dir, &id).is_ok() {
                     let mut library = load_library(data_dir)?;
                     azdl::torrent::resume_magnet(&mut library, data_dir, &id)?;
                 } else {
                     return Err(LauncherError::general(format!("Job {id} not found")));
                 }
-                Ok(json!({ "success": true }))
+                Ok(json!({ "success": true, "dlc_installed_files": dlc_installed_files }))
             }
             Action::JobCancel { id } => {
                 if azdl::jobs::load_job(data_dir, &id).is_ok() {

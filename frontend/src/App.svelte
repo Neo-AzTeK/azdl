@@ -70,6 +70,7 @@
 
   let runners = $state([]);
   let isApiBusy = $state(false);
+  let dlcRevision = $state(0);
 
   // Derive active downloads, unpacks, or jobs
   let hasActiveJobs = $derived(
@@ -382,6 +383,7 @@
         <CatalogView
           jobs={appState.jobs}
           tasks={appState.tasks}
+          {dlcRevision}
           plugins={appState.plugins}
           settings={appState.settings}
           searchQuery={tabSearches.catalog}
@@ -433,6 +435,7 @@
   <TransferDrawer
     jobs={appState.jobs}
     onRefresh={refreshState}
+    onDlcInstalled={() => { dlcRevision += 1; }}
   />
 
   <!-- Toast Snackbars Stack -->
