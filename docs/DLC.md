@@ -12,6 +12,8 @@ The desktop serializes game launch with DLC task registration and file mutations
 
 For a shared Steam depot, the DLC resolver follows `depotfromapp` when the current app has no public manifest, rejects cycles, and selects an exact provider artifact from the app that supplies the manifest. Downloads are grouped by their resolved content App ID into separate staging directories, then verified and merged before commit. This route is covered by offline fixtures; a live shared-depot download has not yet been accepted.
 
+The optional `tests/live_dlc_manifest.rs` check verifies an external staged snapshot with `AZDL_LIVE_DLC_MANIFEST`, `AZDL_LIVE_DLC_STAGING`, `AZDL_LIVE_DLC_DEPOT_ID`, and `AZDL_LIVE_DLC_MANIFEST_ID`; run it with `cargo test --test live_dlc_manifest -- --ignored`. On 2026-10-16, the exact provider manifest for depot `3875100`, revision `5309998554743987160`, matched an isolated copy of the real 539,727,136 byte DLC file. This checks staged content and path safety, not a new CDN download or in-game access.
+
 ## Provider-owned delivery
 
 Arachnel API 4 exposes a JSON catalog boundary, but its C ABI does not expose the C++ `startOwnedDownload` method. Rust must not call C++ virtual methods or infer a depot URL from a Store DLC ID. A future provider-owned DLC adapter should use a versioned C ABI with an opaque session handle:

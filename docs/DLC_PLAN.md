@@ -46,6 +46,8 @@ The same existing game's required base depot passed a separate read-only verific
 
 The missing-DLC path was then exercised on Linux against a separate copy of the real base game with DLC `3875100` omitted. The copy passed strict legacy base verification, downloaded the DLC from Steam, committed one 539,727,136 byte file, and recorded its SHA-256 and managed ownership. A checksum comparison found no changed base files. DLC removal deleted that file while preserving the verified base receipt. The original installed game was untouched. This verifies filesystem delivery and removal with real base content; it does not establish in-game access or Windows acceptance.
 
+After staged manifest verification was added, an isolated copy of that real DLC file passed `tests/live_dlc_manifest.rs` against depot `3875100`, revision `5309998554743987160`, on 2026-10-16. The temporary copy was removed afterward. This validates the new exact-content gate with real bytes, while grouped shared-depot transport and in-game access remain unverified.
+
 ## Proposed core model
 
 Keep these concepts independent:
