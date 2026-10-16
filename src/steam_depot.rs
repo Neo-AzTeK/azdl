@@ -603,6 +603,9 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         .join("dlc-downloads")
         .join(&game.id)
         .join(dlc_id.to_string());
+    let payload = root.join("payload");
+    let job_id = job_id_for_target(&payload);
+    let _active_worker = crate::jobs::lock_dlc_worker(data_dir, &job_id)?;
     let run = (|| -> Result<usize> {
         let (content_app_id, depots) = if metadata
             .depots
@@ -694,10 +697,8 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         let lib_path = find_depotkit_library(data_dir).map_err(
             |_| "The selected download plugin does not provide a usable depot downloader",
         )?;
-        let payload = root.join("payload");
+        prepare_dlc_retry(data_dir, &payload, &job_id)?;
         fs::create_dir_all(&payload)?;
-        let job_id = job_id_for_target(&payload);
-        let _active_worker = crate::jobs::lock_dlc_worker(data_dir, &job_id)?;
         let mut job = DownloadJob {
             id: job_id.clone(),
             kind: JobKind::Dlc,
@@ -762,6 +763,19 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         let _ = fs::remove_dir_all(&root);
     }
     run
+}
+
+fn prepare_dlc_retry(data_dir: &Path, payload: &Path, job_id: &str) -> Result<()> {
+    crate::jobs::clear_cancel(data_dir, job_id)?;
+    match fs::symlink_metadata(payload) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            fs::remove_dir_all(payload)?;
+        }
+        Ok(_) => return Err("DLC staging payload is not a regular directory".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 
 /// Perform end-to-end installation of a Steam manifest-based catalog game:
@@ -1036,6 +1050,40 @@ pub fn install_steam_manifest_game_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dlc_retry_discards_old_payload_and_cancel_marker_but_keeps_receipts() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "azdl-dlc-retry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let payload = data_dir
+            .join("dlc-downloads")
+            .join("test-game")
+            .join("123")
+            .join("payload");
+        fs::create_dir_all(&payload).unwrap();
+        fs::write(payload.join("old-depot.bin"), b"stale").unwrap();
+        let receipt = data_dir.join("dlc").join("test-game").join("123");
+        fs::create_dir_all(&receipt).unwrap();
+        fs::write(receipt.join("state.json"), b"journal").unwrap();
+        let id = job_id_for_target(&payload);
+        let worker = crate::jobs::lock_dlc_worker(&data_dir, &id).unwrap();
+        let cancel = data_dir.join("jobs").join(format!("{id}.cancel"));
+        fs::write(&cancel, b"").unwrap();
+
+        prepare_dlc_retry(&data_dir, &payload, &id).unwrap();
+
+        assert!(!payload.exists());
+        assert!(!cancel.exists());
+        assert_eq!(fs::read(receipt.join("state.json")).unwrap(), b"journal");
+        drop(worker);
+        fs::remove_dir_all(data_dir).unwrap();
+    }
 
     #[test]
     fn provider_error_page_is_reported_as_missing_manifest() {
