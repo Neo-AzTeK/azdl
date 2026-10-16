@@ -25,6 +25,17 @@ pub struct BaseContentReceipt {
     pub depots: Vec<DepotRevision>,
 }
 
+/// Read-only evidence that legacy DLC files matched an exact provider revision.
+/// This record does not grant ownership or permission to remove those files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedDlcReceipt {
+    pub game_id: String,
+    pub app_id: u32,
+    pub dlc_id: u32,
+    pub depots: Vec<DepotRevision>,
+    pub verified_unix: u64,
+}
+
 fn matches_target(depot: &SteamDepotMetadata, os: &str, language: &str) -> bool {
     let matches = |value: Option<&str>, expected: &str| {
         value.is_none_or(|value| {
@@ -260,6 +271,75 @@ pub fn load_base_receipt(data_dir: &Path, game_id: &str) -> Result<Option<BaseCo
     Ok(Some(receipt))
 }
 
+fn observation_path(data_dir: &Path, game_id: &str, dlc_id: u32) -> Result<std::path::PathBuf> {
+    validate_id(game_id)?;
+    if dlc_id == 0 {
+        return Err("DLC App ID is missing".into());
+    }
+    let root = data_dir.join("dlc-observations");
+    let parent = root.join(game_id);
+    if [root.as_path(), parent.as_path()]
+        .iter()
+        .any(|path| fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()))
+    {
+        return Err("DLC observation state is a symbolic link".into());
+    }
+    Ok(parent.join(format!("{dlc_id}.json")))
+}
+
+/// Record a successful content check without claiming ownership of legacy files.
+pub fn save_observation(data_dir: &Path, receipt: &ObservedDlcReceipt) -> Result<()> {
+    let path = observation_path(data_dir, &receipt.game_id, receipt.dlc_id)?;
+    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err("DLC observation file is a symbolic link".into());
+    }
+    let parent = path.parent().ok_or("invalid DLC observation path")?;
+    fs::create_dir_all(parent)?;
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let temp = parent.join(format!(".{}-{nonce}.tmp", receipt.dlc_id));
+    let mut file = File::create(&temp)?;
+    serde_json::to_writer_pretty(&mut file, receipt)?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    fs::rename(temp, path)?;
+    Ok(())
+}
+
+/// Read a prior exact content observation for an older game installation.
+pub fn load_observation(
+    data_dir: &Path,
+    game_id: &str,
+    dlc_id: u32,
+) -> Result<Option<ObservedDlcReceipt>> {
+    let path = observation_path(data_dir, game_id, dlc_id)?;
+    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err("DLC observation file is a symbolic link".into());
+    }
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let receipt: ObservedDlcReceipt = serde_json::from_slice(&bytes)?;
+    if receipt.game_id != game_id || receipt.dlc_id != dlc_id {
+        return Err("DLC observation belongs to another game".into());
+    }
+    Ok(Some(receipt))
+}
+
+/// Forget a stale observation without changing any game files.
+pub fn clear_observation(data_dir: &Path, game_id: &str, dlc_id: u32) -> Result<()> {
+    match fs::remove_file(observation_path(data_dir, game_id, dlc_id)?) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,5 +374,41 @@ mod tests {
         );
         let wrong = vec![artifact(200, 4)];
         assert!(select_dlc_depots(&wrong, &metadata, 300, "windows", "english").is_err());
+    }
+
+    #[test]
+    fn observed_legacy_dlc_is_distinct_from_managed_install_state() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-observed-dlc-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let receipt = ObservedDlcReceipt {
+            game_id: "legacy-game".into(),
+            app_id: 100,
+            dlc_id: 200,
+            depots: vec![DepotRevision {
+                depot_id: 201,
+                manifest_id: "12345678901234567890".into(),
+            }],
+            verified_unix: 42,
+        };
+        save_observation(&root, &receipt).unwrap();
+        assert_eq!(
+            load_observation(&root, "legacy-game", 200).unwrap(),
+            Some(receipt)
+        );
+        assert!(load_base_receipt(&root, "legacy-game").unwrap().is_none());
+        assert!(!root.join("dlc/legacy-game/200/complete").exists());
+        clear_observation(&root, "legacy-game", 200).unwrap();
+        assert!(
+            load_observation(&root, "legacy-game", 200)
+                .unwrap()
+                .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

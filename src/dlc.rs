@@ -519,7 +519,11 @@ fn recover_unlocked(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
     for path in partial {
         fs::remove_file(path)?;
     }
-    remove_unlocked(game, data_dir, dlc_id)
+    remove_unlocked(game, data_dir, dlc_id)?;
+    if let Ok(steam_dlc_id) = dlc_id.parse::<u32>() {
+        crate::steam_content::clear_observation(data_dir, &game.id, steam_dlc_id)?;
+    }
+    Ok(())
 }
 
 /// Roll back an interrupted DLC install after verifying any completed files.
@@ -540,7 +544,11 @@ pub fn remove(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
     {
         return Err("DLC installation was interrupted; recover it before removal".into());
     }
-    remove_unlocked(game, data_dir, dlc_id)
+    remove_unlocked(game, data_dir, dlc_id)?;
+    if let Ok(steam_dlc_id) = dlc_id.parse::<u32>() {
+        crate::steam_content::clear_observation(data_dir, &game.id, steam_dlc_id)?;
+    }
+    Ok(())
 }
 
 fn remove_unlocked(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {

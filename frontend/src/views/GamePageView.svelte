@@ -1102,7 +1102,7 @@
                     <button class="md3-btn danger" disabled={!!dlcPending || activeDlcIds.has(addon.id)} onclick={() => dlcToRemove = addon}>Remove</button>
                   {:else}
                     <button class="md3-btn" disabled={!addon.content_available || !!dlcPending || activeDlcIds.has(addon.id)} onclick={() => installDlc(addon)}>
-                      {activeDlcIds.has(addon.id) || dlcPending === addon.id ? 'Installing...' : addon.needs_provider_check ? 'Check & Install' : addon.content_available ? 'Install' : 'Unavailable'}
+                      {activeDlcIds.has(addon.id) || dlcPending === addon.id ? 'Checking...' : addon.present_unmanaged ? 'Recheck' : addon.needs_existing_check ? 'Check Files' : addon.needs_provider_check ? 'Check & Install' : addon.content_available ? 'Install' : 'Unavailable'}
                     </button>
                   {/if}
                 </div>

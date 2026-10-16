@@ -40,6 +40,8 @@ On 2026-10-16, an isolated Linux check used the installed `steamidra` provider a
 
 A preexisting local installation of that game contains the DLC file, and its SHA-1 matches the current provider binary manifest's `sha_content` field. The earlier mismatch was caused by reading field 4 (`sha_filename`) instead of field 5 (`sha_content`); the [manifest schema](https://github.com/ValvePython/steam/blob/master/protobufs/content_manifest.proto) distinguishes them. Exact content verification can establish that the bytes are present, but it does not grant azdl ownership to remove a file created by an older install.
 
+The new read-only legacy check was run against that existing game on 2026-10-16. It added zero game files and saved an observation after verifying the exact DLC depot manifest. The game page can show this as previously verified unmanaged content and offer a recheck. A missing DLC still needs a managed base receipt before download; full base migration remains open.
+
 ## Proposed core model
 
 Keep these concepts independent:

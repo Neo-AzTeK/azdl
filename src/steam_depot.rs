@@ -498,7 +498,7 @@ pub fn download_steam_depots(
     Ok(())
 }
 
-/// Download selected Steam DLC depots and commit additive files to the managed game.
+/// Verify existing DLC files, or download selected depots into a managed base game.
 pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<usize> {
     validate_id(&game.id)?;
     if dlc_id == 0 {
@@ -513,10 +513,8 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
     if source != Some("steamidra") {
         return Err("This game's source does not provide Steam depot DLC".into());
     }
-    let receipt = crate::steam_content::load_base_receipt(data_dir, &game.id)?
-        .ok_or("Base game content revision is unknown; a managed base install is required")?;
+    let receipt = crate::steam_content::load_base_receipt(data_dir, &game.id)?;
     let metadata = crate::steam_metadata::fetch_appinfo(app_id)?;
-    crate::steam_content::validate_base_revision(&receipt, &metadata)?;
 
     let root = data_dir
         .join("dlc-downloads")
@@ -543,13 +541,43 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             )?;
             (dlc_id, selected)
         };
+        let check_lock = crate::dlc::lock_game(data_dir, &game.id)?;
+        let mut all_present = true;
         for depot in &depots {
-            crate::steam_manifest::read_manifest(
+            let manifest = crate::steam_manifest::read_manifest(
                 &depot.manifest_path,
                 depot.depot_id,
                 depot.manifest_id,
             )?;
+            if !crate::steam_manifest::verify_installed(&manifest, &game.install_dir)?.complete() {
+                all_present = false;
+            }
         }
+        if all_present {
+            crate::steam_content::save_observation(
+                data_dir,
+                &crate::steam_content::ObservedDlcReceipt {
+                    game_id: game.id.clone(),
+                    app_id,
+                    dlc_id,
+                    depots: depots
+                        .iter()
+                        .map(|depot| crate::steam_content::DepotRevision {
+                            depot_id: depot.depot_id,
+                            manifest_id: depot.manifest_id.to_string(),
+                        })
+                        .collect(),
+                    verified_unix: now()?,
+                },
+            )?;
+            return Ok(0);
+        }
+        crate::steam_content::clear_observation(data_dir, &game.id, dlc_id)?;
+        let receipt = receipt.as_ref().ok_or(
+            "DLC files are missing and the base game revision is unknown; reinstall the base game with azdl before adding this DLC",
+        )?;
+        crate::steam_content::validate_base_revision(receipt, &metadata)?;
+        drop(check_lock);
         let lib_path = find_depotkit_library(data_dir).map_err(
             |_| "The selected download plugin does not provide a usable depot downloader",
         )?;

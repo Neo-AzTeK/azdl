@@ -3256,6 +3256,14 @@ mod commands {
                     if available.iter().any(|addon| addon["id"] == id) {
                         continue;
                     }
+                    let observed = azdl::steam_content::load_observation(
+                        &data_dir,
+                        &game.id,
+                        dlc_id,
+                    )
+                    .ok()
+                    .flatten()
+                    .filter(|receipt| receipt.app_id == app_id);
                     let related = depots.get(&dlc_id);
                     let manifest_count = related
                         .into_iter()
@@ -3265,13 +3273,19 @@ mod commands {
                     available.push(json!({
                         "id": id,
                         "title": names.get(&dlc_id).cloned().unwrap_or_else(|| format!("Steam DLC {dlc_id}")),
-                        "content_available": steam_eligibility.is_ok(),
-                        "needs_provider_check": steam_eligibility.is_ok(),
+                        "content_available": steam_source,
+                        "needs_provider_check": steam_source,
+                        "needs_existing_check": steam_source && steam_eligibility.is_err(),
+                        "present_unmanaged": observed.is_some(),
                         "installed": installed.contains(&id),
                         "interrupted": interrupted.contains(&id),
                         "depot_count": related.map_or(0, Vec::len),
                         "public_manifest_count": manifest_count,
-                        "reason": steam_eligibility.as_ref().err(),
+                        "reason": if observed.is_some() {
+                            Some("Existing files matched a provider manifest when last checked. They are not managed by azdl and cannot be removed here.")
+                        } else {
+                            steam_eligibility.as_ref().err().map(String::as_str)
+                        },
                     }));
                 }
             }
