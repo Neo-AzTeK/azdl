@@ -1,8 +1,8 @@
 # DLC discovery, planning, and installation
 
-Implementation plan, researched on 2026-10-15. Discovery, exact provider revision matching, managed base receipts, additive staged depot DLC, and background desktop tasks have initial implementations. Live DLC installation and game access remain unverified.
+Implementation plan, researched on 2026-10-15. Discovery, exact provider revision matching, managed base receipts, additive staged depot DLC, and background desktop tasks have initial implementations. An isolated live DLC download, commit, and removal succeeded on Linux on 2026-10-16. Installation into a real base game and in-game access remain unverified.
 
-The next milestone is a Steam content resolver that joins DLC identities, depot metadata, available artifacts, and installation receipts. Reuse the existing depotkit transport and DLC recovery machinery. A general plugin download-session ABI is a later extension, not a prerequisite for Steam depot DLC.
+The next milestone is a complete Steam content resolver that joins DLC identities, depot metadata, available artifacts, and installation receipts, including old-install migration and shared file ownership. A general plugin download-session ABI is a later extension, not a prerequisite for Steam depot DLC.
 
 ## Evidence and current gaps
 
@@ -24,7 +24,7 @@ A live read on the research date returned these observations:
 - [Shadow of the Erdtree Store metadata](https://store.steampowered.com/api/appdetails?appids=2778580&l=english) identified itself as `type: dlc` with parent `1245620`.
 - [The appinfo relay response](https://api.steamcmd.net/v1/info/1245620) listed nine DLC IDs in `extended.listofdlc`. Depot `2778580` had `dlcappid: 2778580` and a public manifest. Several other DLC depot entries lacked a public manifest. This is an observed third-party relay snapshot, not a direct authenticated PICS query or proof of downloadable content.
 
-The relay is the open-source [steamcmd/api service](https://github.com/steamcmd/api), also used by the Arachnel reference implementation for size metadata. Treat it as a replaceable metadata adapter with bounded timeouts and cached responses. No game content or provider manifest archive was downloaded during this research.
+The relay is the open-source [steamcmd/api service](https://github.com/steamcmd/api), also used by the Arachnel reference implementation for size metadata. Treat it as a replaceable metadata adapter with bounded timeouts and cached responses. The original research did not download game content. A later isolated transport check downloaded one DLC depot from the sample provider.
 
 Repository findings:
 
@@ -32,9 +32,11 @@ Repository findings:
 - `src-tauri/src/main.rs` drops Store DLC fields from its presentation payload. Keep that payload small and introduce a dedicated core DLC metadata result.
 - `src/catalog.rs::parse_addons` now requires a usable HTTPS artifact before enabling archive DLC.
 - `src/steam_depot.rs::parse_lua_manifests` now preserves exact manifest IDs and rejects missing or ambiguous revisions. Binary manifest headers and depot membership still need validation.
-- `install_steam_manifest_game_in` downloads all parsed depots into the game directory, with no DLC, OS, language, or branch selection and no persistent depot receipt.
+- `install_steam_manifest_game_in` now selects known non-DLC Windows/English depots and writes a base revision receipt. Architecture, branch, shared-reference, and old-install handling remain incomplete.
 - `download_steam_depots` already accepts an explicit depot subset and destination. It can target staging. Its request has one App ID, so cross-app/shared depots need requests grouped by the resolved content-owner App ID.
 - The existing archive DLC transaction rejects all existing paths. Steam's ordered depot overlays can legitimately contain overlapping files, which requires a broader file ownership model before general support.
+
+On 2026-10-16, an isolated Linux check used the installed `steamidra` provider and the matching public revision for Anomalous Coffee Machine 2 DLC `3875100`. The depotkit transport downloaded one 539,727,136 byte file into `/tmp`, the staged DLC transaction committed it, the recorded SHA-256 matched the file, and DLC removal deleted both the owned file and state. The base directory was intentionally empty with a synthetic receipt, so this proves the transport and additive transaction only. It does not prove compatibility with an actual base installation or game access.
 
 ## Proposed core model
 
@@ -114,4 +116,4 @@ Implement steps 1 and 2 first: a populated DLC list plus a deterministic, inspec
 
 Required automated coverage includes 64-bit ID serialization, stale metadata, missing manifests, multiple depots per DLC, target filtering, both depot-management layouts, shared depots, no-separate-file/unknown delivery, interrupted transactions, base/DLC version changes, and migration. Run Rust tests and clippy, frontend tests/build for UI changes, and Linux/Windows CI.
 
-Research verified public metadata and inspected repository code. It did not verify provider artifact availability for the sample game, download DLC, validate in-game access, or establish Windows runtime acceptance. Those remain explicit implementation acceptance gates.
+Research verified public metadata and inspected repository code. A later isolated Linux check verified provider artifact availability, DLC download, additive commit, and removal for the sample DLC. Actual base-game compatibility, in-game access, and Windows runtime acceptance remain implementation gates.

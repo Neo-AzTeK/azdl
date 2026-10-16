@@ -6,7 +6,7 @@ The launcher installs source supplied HTTPS DLC archives and has an experimental
 
 Steam Store DLC metadata is descriptive and is not a download source. Catalog DLC is enabled only when its source supplies a valid HTTPS archive artifact and does not explicitly mark the entry unavailable. For Steam depot DLC, the game page checks that the base install has a content receipt, then the installer resolves exact matching provider manifests for the selected DLC. Old or imported base installs have unknown content provenance and cannot use this path yet. Filesystem conflicts are reported rather than overwritten.
 
-The researched evolution plan is in [DLC_PLAN.md](DLC_PLAN.md). The Steam depot path reuses depotkit and the archive DLC transaction. Live DLC installation, game access, Windows behavior, overlap handling, and old-install migration still need acceptance tests. The generic provider session ABI below is a separate extension.
+The researched evolution plan is in [DLC_PLAN.md](DLC_PLAN.md). The Steam depot path reuses depotkit and the archive DLC transaction. An isolated Linux download, additive commit, and removal succeeded for one provider DLC. Installation into a real base game, game access, Windows behavior, overlap handling, and old-install migration still need acceptance tests. The generic provider session ABI below is a separate extension.
 
 ## Provider-owned delivery
 
