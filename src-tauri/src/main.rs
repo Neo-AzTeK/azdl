@@ -586,6 +586,7 @@ pub enum Action {
     JobClear {
         id: String,
     },
+    JobClearSuccessful,
     JobClearCompleted,
 }
 
@@ -2967,17 +2968,14 @@ mod commands {
                     )))
                 }
             }
-            Action::JobClearCompleted => {
+            mode @ (Action::JobClearSuccessful | Action::JobClearCompleted) => {
+                let include_failed = matches!(mode, Action::JobClearCompleted);
                 let mut count =
                     azdl::jobs::clear_completed_jobs(data_dir).map_err(|e| e.to_string())?;
-                if let Ok(jobs) = azdl::jobs::list_jobs(data_dir) {
+                if include_failed && let Ok(jobs) = azdl::jobs::list_jobs(data_dir) {
                     for j in jobs {
-                        if matches!(
-                            j.effective_status(),
-                            azdl::jobs::JobStatus::Complete
-                                | azdl::jobs::JobStatus::Cancelled
-                                | azdl::jobs::JobStatus::Failed
-                        ) && azdl::jobs::clear_job(data_dir, &j.id).is_ok()
+                        if j.effective_status() == azdl::jobs::JobStatus::Failed
+                            && azdl::jobs::clear_job(data_dir, &j.id).is_ok()
                         {
                             count += 1;
                         }
@@ -2987,10 +2985,9 @@ mod commands {
                     for t in torrents {
                         if matches!(
                             t.status,
-                            azdl::jobs::JobStatus::Complete
-                                | azdl::jobs::JobStatus::Cancelled
-                                | azdl::jobs::JobStatus::Failed
-                        ) {
+                            azdl::jobs::JobStatus::Complete | azdl::jobs::JobStatus::Cancelled
+                        ) || (include_failed && t.status == azdl::jobs::JobStatus::Failed)
+                        {
                             let torrent_file =
                                 data_dir.join("torrents").join(format!("{}.json", t.id));
                             if fs::remove_file(torrent_file).is_ok() {
@@ -5066,6 +5063,17 @@ mod tests {
             serde_json::to_string(&failed_job).unwrap(),
         )
         .unwrap();
+        let complete_job = azdl::jobs::DownloadJob {
+            id: "abcdef0123456789".to_string(),
+            status: azdl::jobs::JobStatus::Complete,
+            error: None,
+            ..failed_job.clone()
+        };
+        fs::write(
+            jobs_dir.join("abcdef0123456789.json"),
+            serde_json::to_string(&complete_job).unwrap(),
+        )
+        .unwrap();
 
         // Query state
         let res = handle_get_state(&state).unwrap();
@@ -5098,7 +5106,13 @@ mod tests {
                 .contains("steam/apps/480/header.jpg")
         );
 
-        // Clear completed/failed transfers
+        // Automatic cleanup keeps failed transfers visible.
+        let auto_clear = handle_run_action(&state, Action::JobClearSuccessful).unwrap();
+        assert_eq!(auto_clear["success"], true);
+        assert!(!jobs_dir.join("abcdef0123456789.json").exists());
+        assert!(jobs_dir.join("fedcba9876543210.json").exists());
+
+        // Manual cleanup clears failed transfers.
         let clear_res = handle_run_action(&state, Action::JobClearCompleted).unwrap();
         assert_eq!(clear_res["success"], true);
 

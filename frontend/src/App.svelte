@@ -435,7 +435,7 @@
   <TransferDrawer
     jobs={appState.jobs}
     onRefresh={refreshState}
-    onDlcInstalled={() => { dlcRevision += 1; }}
+    onDlcChanged={() => { dlcRevision += 1; }}
   />
 
   <!-- Toast Snackbars Stack -->

@@ -17,7 +17,7 @@
   } from '../transfers.js';
   import { getSteamStorageSize } from '../steam_storage.js';
 
-  let { jobs = [], onRefresh = null, onDlcInstalled = null } = $props();
+  let { jobs = [], onRefresh = null, onDlcChanged = null } = $props();
 
   let expanded = $state(false);
   let brokenThumbs = $state(new Set());
@@ -87,6 +87,10 @@
     jobs.filter((j) => isJobFinished(j.status))
   );
 
+  let successfulJobs = $derived(
+    jobs.filter((j) => ['complete', 'cancelled'].includes((j.status || '').toLowerCase()))
+  );
+
   let totalActiveBytes = $derived(
     activeJobs.reduce((acc, j) => acc + (j.bytes || 0), 0)
   );
@@ -133,24 +137,30 @@
     try {
       const result = await runAction({ action: `job-${action}`, id });
       if (action === 'resume' && result?.dlc_installed_files != null) {
-        onDlcInstalled?.();
         notify.success('DLC installation complete');
       }
-      if (onRefresh) onRefresh();
     } catch (e) {
       notify.error(e?.message || `Failed to ${action} transfer`);
+    } finally {
+      if (action === 'resume') onDlcChanged?.();
+      onRefresh?.();
     }
   }
 
-  // Auto-clear finished transfers reliably (1.5s timer after completion)
+  // Clear successful transfers while retaining failures for inspection.
   let autoClearTimer = null;
 
   $effect(() => {
-    if (finishedJobs.length > 0) {
+    if (successfulJobs.length > 0) {
       if (!autoClearTimer) {
         autoClearTimer = setTimeout(async () => {
           autoClearTimer = null;
-          await handleClearCompleted();
+          try {
+            await runAction({ action: 'job-clear-successful' });
+            onRefresh?.();
+          } catch (error) {
+            console.error('Failed to clear successful jobs:', error);
+          }
         }, 1500);
       }
     } else if (autoClearTimer) {
