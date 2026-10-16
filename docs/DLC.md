@@ -8,6 +8,8 @@ Steam Store DLC metadata is descriptive and is not a download source. Catalog DL
 
 The researched evolution plan is in [DLC_PLAN.md](DLC_PLAN.md). The Steam depot path reuses depotkit and the archive DLC transaction. A Linux check copied a real base game without its DLC, then verified the old base, downloaded and committed the DLC, checked the installed hash, and removed the DLC without changing base files. In-game access, Windows behavior, and different-content overlays still need acceptance and implementation work. The generic provider session ABI below is a separate extension.
 
+The desktop serializes game launch with DLC task registration and file mutations. It refuses to launch while a DLC task is active and refuses install, removal, or recovery while that game is running. This covers games launched and tracked by the desktop; processes started outside azdl are not yet identified.
+
 ## Provider-owned delivery
 
 Arachnel API 4 exposes a JSON catalog boundary, but its C ABI does not expose the C++ `startOwnedDownload` method. Rust must not call C++ virtual methods or infer a depot URL from a Store DLC ID. A future provider-owned DLC adapter should use a versioned C ABI with an opaque session handle:

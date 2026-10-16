@@ -70,7 +70,8 @@ fn state_dir(data_dir: &Path, game_id: &str, dlc_id: &str) -> PathBuf {
     data_dir.join("dlc").join(game_id).join(dlc_id)
 }
 
-pub(crate) fn lock_game(data_dir: &Path, game_id: &str) -> Result<File> {
+/// Serialize game launch and content mutations across processes.
+pub fn lock_game(data_dir: &Path, game_id: &str) -> Result<File> {
     validate_id(game_id)?;
     let root = data_dir.join("content-locks");
     if fs::symlink_metadata(&root).is_ok_and(|meta| meta.file_type().is_symlink()) {
@@ -573,17 +574,39 @@ fn recover_unlocked(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
 
 /// Roll back an interrupted DLC install after verifying any completed files.
 pub fn recover_interrupted(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
+    recover_interrupted_with_guard(game, data_dir, dlc_id, || Ok(()))
+}
+
+/// Recover an interrupted DLC after checking launch state under the game lock.
+pub fn recover_interrupted_with_guard(
+    game: &Game,
+    data_dir: &Path,
+    dlc_id: &str,
+    guard: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     validate_id(&game.id)?;
     validate_id(dlc_id)?;
     let _lock = lock_game(data_dir, &game.id)?;
+    guard()?;
     recover_unlocked(game, data_dir, dlc_id)
 }
 
 /// Remove a DLC and all files recorded in its install manifest.
 pub fn remove(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
+    remove_with_guard(game, data_dir, dlc_id, || Ok(()))
+}
+
+/// Remove a DLC after checking launch state under the game lock.
+pub fn remove_with_guard(
+    game: &Game,
+    data_dir: &Path,
+    dlc_id: &str,
+    guard: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     validate_id(&game.id)?;
     validate_id(dlc_id)?;
     let _lock = lock_game(data_dir, &game.id)?;
+    guard()?;
     if !fs::symlink_metadata(state_dir(data_dir, &game.id, dlc_id).join("complete"))
         .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
     {

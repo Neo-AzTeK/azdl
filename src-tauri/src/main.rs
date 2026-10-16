@@ -1684,6 +1684,8 @@ mod commands {
         extra_args: Option<Vec<String>>,
     ) -> Result<Value, LauncherError> {
         validate_id(&id).map_err(|e| LauncherError::invalid_id(e.to_string()))?;
+        let _content_lock = azdl::dlc::lock_game(&state.data_dir, &id)
+            .map_err(|e| LauncherError::general(e.to_string()))?;
 
         let mut library =
             load_library(&state.data_dir).map_err(|e| LauncherError::general(e.to_string()))?;
@@ -1700,6 +1702,21 @@ mod commands {
             if running.contains_key(&id) {
                 return Err(LauncherError::game_already_running(&id));
             }
+        }
+        if state
+            .tasks
+            .lock()
+            .map_err(|_| LauncherError::lock_poisoned("tasks state lock poisoned"))?
+            .iter()
+            .any(|task| {
+                task.status == "running"
+                    && task.game_id.as_deref() == Some(id.as_str())
+                    && task.id.starts_with("dlc-")
+            })
+        {
+            return Err(LauncherError::general(
+                "Wait for the DLC operation to finish before launching this game",
+            ));
         }
 
         let extra = extra_args.unwrap_or_default();
@@ -1869,6 +1886,31 @@ mod commands {
             .map_err(|e| LauncherError::general(e.to_string()))?
     }
 
+    fn ensure_dlc_mutation_allowed(state: &AppState, game_id: &str) -> azdl::Result<()> {
+        if state
+            .running_games
+            .lock()
+            .map_err(|_| "Running game state lock poisoned")?
+            .contains_key(game_id)
+        {
+            return Err("Stop the game before changing DLC".into());
+        }
+        if state
+            .tasks
+            .lock()
+            .map_err(|_| "Tasks state lock poisoned")?
+            .iter()
+            .any(|task| {
+                task.status == "running"
+                    && task.game_id.as_deref() == Some(game_id)
+                    && task.id.starts_with("dlc-")
+            })
+        {
+            return Err("Wait for the DLC operation to finish before changing DLC".into());
+        }
+        Ok(())
+    }
+
     pub fn handle_run_action(
         state: &AppState,
         action: ActionRequest,
@@ -1932,6 +1974,8 @@ mod commands {
                 Ok(json!({ "success": true, "removed": id }))
             }
             Action::DlcInstall { id, dlc_id } => {
+                let content_lock =
+                    azdl::dlc::lock_game(data_dir, &id).map_err(|error| error.to_string())?;
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
                 let game = library
                     .games
@@ -1973,6 +2017,7 @@ mod commands {
                         log_tail: String::new(),
                     });
                 }
+                drop(content_lock);
                 let game = game.clone();
                 let state_clone = state.clone();
                 let task_id_clone = task_id.clone();
@@ -2007,7 +2052,9 @@ mod commands {
                     .games
                     .get(&id)
                     .ok_or_else(|| format!("Game {id} not found"))?;
-                azdl::dlc::remove(game, data_dir, &dlc_id)?;
+                azdl::dlc::remove_with_guard(game, data_dir, &dlc_id, || {
+                    ensure_dlc_mutation_allowed(state, &id)
+                })?;
                 Ok(json!({ "success": true }))
             }
             Action::DlcRecover { id, dlc_id } => {
@@ -2016,7 +2063,9 @@ mod commands {
                     .games
                     .get(&id)
                     .ok_or_else(|| format!("Game {id} not found"))?;
-                azdl::dlc::recover_interrupted(game, data_dir, &dlc_id)?;
+                azdl::dlc::recover_interrupted_with_guard(game, data_dir, &dlc_id, || {
+                    ensure_dlc_mutation_allowed(state, &id)
+                })?;
                 Ok(json!({ "success": true }))
             }
             Action::OpenFolder { id, location } => {
@@ -4670,6 +4719,20 @@ mod tests {
         )
         .unwrap();
 
+        state.tasks.lock().unwrap().push(TaskInfo {
+            id: "dlc-proc-game-123".into(),
+            label: "Installing DLC".into(),
+            status: "running".into(),
+            pid: None,
+            game_id: Some("proc-game".into()),
+            log_tail: String::new(),
+        });
+        let blocked = handle_launch_game(&state, "proc-game".into(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(blocked.contains("DLC operation"), "{blocked}");
+        state.tasks.lock().unwrap().clear();
+
         // Launch game
         let launch_res = handle_launch_game(&state, "proc-game".into(), None).unwrap();
         assert_eq!(launch_res["status"], "launched");
@@ -4680,6 +4743,19 @@ mod tests {
             let running = state.running_games.lock().unwrap();
             assert!(running.contains_key("proc-game"));
             assert_eq!(running.get("proc-game").unwrap().pid, pid);
+        }
+        for action in [
+            Action::DlcRemove {
+                id: "proc-game".into(),
+                dlc_id: "123".into(),
+            },
+            Action::DlcRecover {
+                id: "proc-game".into(),
+                dlc_id: "123".into(),
+            },
+        ] {
+            let blocked = handle_run_action(&state, action).unwrap_err().to_string();
+            assert!(blocked.contains("Stop the game"), "{blocked}");
         }
 
         // Stop game
