@@ -38,6 +38,8 @@ Repository findings:
 
 On 2026-10-16, an isolated Linux check used the installed `steamidra` provider and the matching public revision for Anomalous Coffee Machine 2 DLC `3875100`. The depotkit transport downloaded one 539,727,136 byte file into `/tmp`, the staged DLC transaction committed it, the recorded SHA-256 matched the file, and DLC removal deleted both the owned file and state. The base directory was intentionally empty with a synthetic receipt, so this proves the transport and additive transaction only. It does not prove compatibility with an actual base installation or game access.
 
+A preexisting local installation of that game contains a file with the same DLC filename and size, but its SHA-1 does not match the current provider binary manifest's content hash. The installer must treat this legacy content as unknown or a different revision. Filename and size alone cannot justify an installed DLC state, a base receipt, or ownership for removal.
+
 ## Proposed core model
 
 Keep these concepts independent:
