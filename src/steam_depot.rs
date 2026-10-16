@@ -362,6 +362,8 @@ struct ProgressContext<'a> {
     ctrl: *mut c_void,
     last_update: Instant,
     cancel_fn: Option<unsafe extern "C" fn(*mut c_void)>,
+    completed_bytes: u64,
+    overall_bytes: Option<u64>,
 }
 
 extern "C" fn depotkit_progress_cb(prog: *const DepotkitProgress, user_data: *mut c_void) {
@@ -390,8 +392,9 @@ extern "C" fn depotkit_progress_cb(prog: *const DepotkitProgress, user_data: *mu
 
             if let Ok(mut job) = load_job(ctx.data_dir, ctx.job_id) {
                 job.updated_unix = now().unwrap_or_default();
-                job.progress_bytes = Some(p.bytes_downloaded);
-                job.total_bytes = Some(p.total_bytes);
+                let bytes = ctx.completed_bytes.saturating_add(p.bytes_downloaded);
+                job.progress_bytes = Some(job.progress_bytes.unwrap_or(0).max(bytes));
+                job.total_bytes = ctx.overall_bytes.or(Some(p.total_bytes));
                 let _ = save_job(ctx.data_dir, &job);
             }
         }
@@ -406,6 +409,34 @@ pub fn download_steam_depots(
     depots: &[DepotInfo],
     data_dir: &Path,
     job_id: &str,
+) -> Result<()> {
+    download_steam_depots_with_progress(
+        lib_path,
+        target_dir,
+        app_id,
+        depots,
+        data_dir,
+        job_id,
+        DownloadProgressSpan {
+            completed_bytes: 0,
+            overall_bytes: None,
+        },
+    )
+}
+
+struct DownloadProgressSpan {
+    completed_bytes: u64,
+    overall_bytes: Option<u64>,
+}
+
+fn download_steam_depots_with_progress(
+    lib_path: &Path,
+    target_dir: &Path,
+    app_id: u32,
+    depots: &[DepotInfo],
+    data_dir: &Path,
+    job_id: &str,
+    span: DownloadProgressSpan,
 ) -> Result<()> {
     let mut c_depots = Vec::new();
     let mut c_manifest_paths = Vec::new();
@@ -471,6 +502,8 @@ pub fn download_steam_depots(
         ctrl,
         last_update: Instant::now(),
         cancel_fn: cancel_fn_ptr,
+        completed_bytes: span.completed_bytes,
+        overall_bytes: span.overall_bytes,
     };
 
     let res = unsafe {
@@ -761,15 +794,27 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         };
         let downloads = resolve_dlc_download_groups(&root, &source_metadata, &selected_ids)?;
         crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
+        let manifests = downloads
+            .depots
+            .iter()
+            .map(|depot| {
+                crate::steam_manifest::read_manifest(
+                    &depot.manifest_path,
+                    depot.depot_id,
+                    depot.manifest_id,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let total_bytes = manifests
+            .iter()
+            .flat_map(|manifest| &manifest.files)
+            .try_fold(0_u64, |total, file| {
+                total.checked_add(file.size).ok_or("DLC size exceeds u64")
+            })?;
         let check_lock = crate::dlc::lock_game(data_dir, &game.id)?;
         let mut all_present = true;
-        for depot in &downloads.depots {
-            let manifest = crate::steam_manifest::read_manifest(
-                &depot.manifest_path,
-                depot.depot_id,
-                depot.manifest_id,
-            )?;
-            if !crate::steam_manifest::verify_installed(&manifest, &game.install_dir)?.complete() {
+        for manifest in &manifests {
+            if !crate::steam_manifest::verify_installed(manifest, &game.install_dir)?.complete() {
                 all_present = false;
             }
             crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
@@ -808,21 +853,29 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         let lib_path = find_depotkit_library(data_dir).map_err(
             |_| "The selected download plugin does not provide a usable depot downloader",
         )?;
+        let mut job = load_job(data_dir, &job_id)?;
+        job.total_bytes = (total_bytes > 0).then_some(total_bytes);
+        save_job(data_dir, &job)?;
         fs::create_dir_all(&payload)?;
         drop(check_lock);
         (|| -> Result<usize> {
+            let mut completed_bytes = 0_u64;
             for (content_app_id, group) in &downloads.groups {
                 crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
                 let group_dir = root.join(format!("group-{content_app_id}"));
                 remove_staging_dir(&group_dir)?;
                 fs::create_dir_all(&group_dir)?;
-                download_steam_depots(
+                download_steam_depots_with_progress(
                     &lib_path,
                     &group_dir,
                     *content_app_id,
                     group,
                     data_dir,
                     &job_id,
+                    DownloadProgressSpan {
+                        completed_bytes,
+                        overall_bytes: (total_bytes > 0).then_some(total_bytes),
+                    },
                 )?;
                 normalize_windows_paths(&group_dir)?;
                 let group_manifests = group
@@ -836,19 +889,22 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
                     })
                     .collect::<Result<Vec<_>>>()?;
                 crate::steam_manifest::verify_staged_exact(&group_manifests, &group_dir)?;
+                let group_bytes = group_manifests
+                    .iter()
+                    .flat_map(|manifest| &manifest.files)
+                    .try_fold(0_u64, |total, file| {
+                        total
+                            .checked_add(file.size)
+                            .ok_or("DLC group size exceeds u64")
+                    })?;
+                completed_bytes = completed_bytes
+                    .checked_add(group_bytes)
+                    .ok_or("DLC size exceeds u64")?;
+                let mut job = load_job(data_dir, &job_id)?;
+                job.progress_bytes = Some(job.progress_bytes.unwrap_or(0).max(completed_bytes));
+                save_job(data_dir, &job)?;
                 merge_verified_payload(&group_dir, &payload)?;
             }
-            let manifests = downloads
-                .depots
-                .iter()
-                .map(|depot| {
-                    crate::steam_manifest::read_manifest(
-                        &depot.manifest_path,
-                        depot.depot_id,
-                        depot.manifest_id,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?;
             crate::steam_manifest::verify_staged_exact(&manifests, &payload)?;
             crate::jobs::begin_dlc_commit(data_dir, &job_id)?;
             crate::dlc::install_staged(game, data_dir, &dlc_id.to_string(), &payload)
@@ -1200,6 +1256,73 @@ pub fn install_steam_manifest_game_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dlc_progress_accumulates_across_content_app_groups() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-dlc-progress-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target = root.join("dlc-downloads/game/200/payload");
+        let id = job_id_for_target(&target);
+        save_job(
+            &root,
+            &DownloadJob {
+                id: id.clone(),
+                kind: JobKind::Dlc,
+                url: "steam://100/dlc/200".into(),
+                target,
+                status: JobStatus::Running,
+                pid: Some(std::process::id()),
+                error: None,
+                updated_unix: now().unwrap(),
+                expected_sha256: None,
+                install: None,
+                install_state: Some(InstallState::Pending),
+                install_error: None,
+                progress_bytes: Some(0),
+                total_bytes: Some(300),
+            },
+        )
+        .unwrap();
+        let report = DepotkitProgress {
+            bytes_downloaded: 50,
+            total_bytes: 100,
+            rate_bytes_sec: 0.0,
+            total_written: 50,
+            unused: 0,
+            phase: 0,
+            _pad: 0,
+            detail: std::ptr::null(),
+        };
+        let mut context = ProgressContext {
+            data_dir: &root,
+            job_id: &id,
+            ctrl: std::ptr::null_mut(),
+            last_update: Instant::now() - Duration::from_secs(1),
+            cancel_fn: None,
+            completed_bytes: 0,
+            overall_bytes: Some(300),
+        };
+        depotkit_progress_cb(&report, (&mut context as *mut ProgressContext).cast());
+        assert_eq!(load_job(&root, &id).unwrap().progress_bytes, Some(50));
+        context.completed_bytes = 100;
+        context.last_update = Instant::now() - Duration::from_secs(1);
+        let second = DepotkitProgress {
+            bytes_downloaded: 10,
+            total_bytes: 200,
+            ..report
+        };
+        depotkit_progress_cb(&second, (&mut context as *mut ProgressContext).cast());
+        let job = load_job(&root, &id).unwrap();
+        assert_eq!(job.progress_bytes, Some(110));
+        assert_eq!(job.total_bytes, Some(300));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn separately_downloaded_groups_merge_for_one_verified_commit() {
