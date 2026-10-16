@@ -71,6 +71,7 @@ pub fn select_base_depots(
         .map(|depot| (depot.depot_id, depot))
         .collect::<BTreeMap<_, _>>();
     let mut selected = Vec::new();
+    let mut selected_ids = BTreeSet::new();
     for depot in available {
         let Some(info) = by_id.get(&depot.depot_id) else {
             return Err(format!(
@@ -90,6 +91,21 @@ pub fn select_base_depots(
                 .into());
             }
             selected.push(depot.clone());
+            selected_ids.insert(depot.depot_id);
+        }
+    }
+    for depot in metadata
+        .depots
+        .iter()
+        .filter(|depot| depot.dlc_app_id.is_none())
+        .filter(|depot| matches_target(depot, target_os, language))
+    {
+        if !selected_ids.contains(&depot.depot_id) {
+            return Err(format!(
+                "The selected source has no provider manifest for required base depot {}",
+                depot.depot_id
+            )
+            .into());
         }
     }
     if selected.is_empty() {
@@ -385,6 +401,28 @@ mod tests {
         );
         let wrong = vec![artifact(200, 4)];
         assert!(select_dlc_depots(&wrong, &metadata, 300, "windows", "english").is_err());
+    }
+
+    #[test]
+    fn base_selection_rejects_missing_required_provider_depot() {
+        let metadata = crate::steam_metadata::parse_appinfo(
+            br#"{"data":{"100":{"depots":{"101":{"manifests":{"public":{"gid":"1"}}},"102":{"manifests":{"public":{"gid":"2"}},"config":{"oslist":"windows"}},"103":{"manifests":{"public":{"gid":"3"}},"config":{"oslist":"linux"}},"200":{"dlcappid":"300","manifests":{"public":{"gid":"4"}}}}}}}"#,
+            100,
+        )
+        .unwrap();
+        let bundle = vec![artifact(101, 1), artifact(200, 4)];
+        let error = select_base_depots(&bundle, &metadata, "windows", "english")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("required base depot 102"), "{error}");
+        let base = select_base_depots(
+            &[artifact(101, 1), artifact(102, 2)],
+            &metadata,
+            "windows",
+            "english",
+        )
+        .unwrap();
+        assert_eq!(base.len(), 2);
     }
 
     #[test]
