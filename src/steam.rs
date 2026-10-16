@@ -150,12 +150,13 @@ pub fn steam_root() -> Result<PathBuf> {
         for base in [
             env::var_os("PROGRAMFILES(X86)"),
             env::var_os("PROGRAMFILES"),
-        ] {
-            if let Some(base) = base {
-                let path = PathBuf::from(base).join("Steam");
-                if path.join("steamapps").is_dir() {
-                    return Ok(path);
-                }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = PathBuf::from(base).join("Steam");
+            if path.join("steamapps").is_dir() {
+                return Ok(path);
             }
         }
     }

@@ -176,6 +176,7 @@ fn sanitize_unix_command(cmd: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::ffi::OsString;
 
     #[test]

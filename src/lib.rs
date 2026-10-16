@@ -116,7 +116,7 @@ pub fn data_dir() -> Result<PathBuf> {
     }
     #[cfg(windows)]
     {
-        return Ok(PathBuf::from(env::var_os("APPDATA").ok_or("APPDATA is not set")?).join("azdl"));
+        Ok(PathBuf::from(env::var_os("APPDATA").ok_or("APPDATA is not set")?).join("azdl"))
     }
     #[cfg(not(windows))]
     {

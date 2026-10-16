@@ -451,40 +451,6 @@ pub fn game_for_steam_app(
     Ok(game)
 }
 
-#[cfg(test)]
-mod steam_selection_tests {
-    use super::*;
-
-    #[test]
-    fn selected_plugin_is_resolved_only_for_the_requested_app() {
-        let root = std::env::temp_dir().join(format!(
-            "azdl-steam-plugin-select-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let provider = root.join("plugins/steamidra");
-        fs::create_dir_all(&provider).unwrap();
-        fs::write(
-            provider.join("plugin.json"),
-            br#"{"id":"steamidra","name":"SteaMidra","version":"1","apiVersion":4,"library":"plugin"}"#,
-        )
-        .unwrap();
-
-        let game = game_for_steam_app(&root, "steamidra", 620, "Portal 2").unwrap();
-        assert_eq!(game.source_id, "steamidra");
-        assert_eq!(game.steam_app_id, Some(620));
-        assert_eq!(game.title, "Portal 2");
-        assert_eq!(game.package_type, PackageType::Plugin);
-        assert!(game_for_steam_app(&root, "missing", 620, "Portal 2").is_err());
-        assert!(game_for_steam_app(&root, "steamidra", 0, "Portal 2").is_err());
-
-        fs::remove_dir_all(root).unwrap();
-    }
-}
-
 pub fn install_bundle(data_dir: &Path, archive: &Path) -> Result<PluginManifest> {
     install_bundle_impl(data_dir, archive, None)
 }
@@ -691,6 +657,40 @@ void arachnel_plugin_catalog_json_free(char *ptr) { free(ptr); }
         assert_eq!(games[0].addons.len(), 1);
         assert_eq!(games[0].addons[0].kind, crate::catalog::AddonKind::Addon);
         assert!(install_game(&mut Library::default(), &data, &games[0]).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod steam_selection_tests {
+    use super::*;
+
+    #[test]
+    fn selected_plugin_is_resolved_only_for_the_requested_app() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-steam-plugin-select-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let provider = root.join("plugins/steamidra");
+        fs::create_dir_all(&provider).unwrap();
+        fs::write(
+            provider.join("plugin.json"),
+            br#"{"id":"steamidra","name":"SteaMidra","version":"1","apiVersion":4,"library":"plugin"}"#,
+        )
+        .unwrap();
+
+        let game = game_for_steam_app(&root, "steamidra", 620, "Portal 2").unwrap();
+        assert_eq!(game.source_id, "steamidra");
+        assert_eq!(game.steam_app_id, Some(620));
+        assert_eq!(game.title, "Portal 2");
+        assert_eq!(game.package_type, PackageType::Plugin);
+        assert!(game_for_steam_app(&root, "missing", 620, "Portal 2").is_err());
+        assert!(game_for_steam_app(&root, "steamidra", 0, "Portal 2").is_err());
+
         fs::remove_dir_all(root).unwrap();
     }
 }
