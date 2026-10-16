@@ -358,6 +358,35 @@ pub fn load_observation(
     Ok(Some(receipt))
 }
 
+/// List prior exact-content observations for one game, including when Steam is offline.
+pub fn list_observations(data_dir: &Path, game_id: &str) -> Result<Vec<ObservedDlcReceipt>> {
+    let path = observation_path(data_dir, game_id, 1)?;
+    let parent = path.parent().ok_or("invalid DLC observation path")?;
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut observations = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(dlc_id) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".json"))
+            .and_then(|id| id.parse::<u32>().ok())
+            .filter(|id| *id > 0)
+        else {
+            continue;
+        };
+        if let Some(receipt) = load_observation(data_dir, game_id, dlc_id)? {
+            observations.push(receipt);
+        }
+    }
+    observations.sort_by_key(|receipt| receipt.dlc_id);
+    Ok(observations)
+}
+
 /// Forget a stale observation without changing any game files.
 pub fn clear_observation(data_dir: &Path, game_id: &str, dlc_id: u32) -> Result<()> {
     match fs::remove_file(observation_path(data_dir, game_id, dlc_id)?) {
@@ -446,9 +475,18 @@ mod tests {
             verified_unix: 42,
         };
         save_observation(&root, &receipt).unwrap();
+        let later = ObservedDlcReceipt {
+            dlc_id: 300,
+            ..receipt.clone()
+        };
+        save_observation(&root, &later).unwrap();
         assert_eq!(
             load_observation(&root, "legacy-game", 200).unwrap(),
-            Some(receipt)
+            Some(receipt.clone())
+        );
+        assert_eq!(
+            list_observations(&root, "legacy-game").unwrap(),
+            vec![receipt, later]
         );
         assert!(load_base_receipt(&root, "legacy-game").unwrap().is_none());
         assert!(!root.join("dlc/legacy-game/200/complete").exists());
@@ -458,6 +496,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        assert_eq!(list_observations(&root, "legacy-game").unwrap().len(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 

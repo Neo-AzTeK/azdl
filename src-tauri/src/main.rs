@@ -3236,19 +3236,25 @@ mod commands {
                 .collect::<Vec<_>>();
             let mut metadata_error = None;
             if let Some(app_id) = game.steam_app_id {
+                let observations = azdl::steam_content::list_observations(&data_dir, &game.id)
+                    .map_err(|e| e.to_string())?;
                 let appinfo = azdl::steam_metadata::fetch_appinfo(app_id);
                 let store_ids = azdl::steam_metadata::fetch_store_dlc_ids(app_id);
-                let mut ids = std::collections::BTreeSet::new();
+                let mut ids = observations
+                    .iter()
+                    .filter(|receipt| receipt.app_id == app_id)
+                    .map(|receipt| receipt.dlc_id)
+                    .collect::<std::collections::BTreeSet<_>>();
                 let mut depots = std::collections::BTreeMap::new();
-                match appinfo {
+                match &appinfo {
                     Ok(metadata) => {
-                        depots = azdl::steam_metadata::dlc_depots(&metadata);
-                        ids.extend(metadata.dlc_ids);
+                        depots = azdl::steam_metadata::dlc_depots(metadata);
+                        ids.extend(metadata.dlc_ids.iter().copied());
                     }
                     Err(error) => metadata_error = Some(error.to_string()),
                 }
-                if let Ok(store_ids) = store_ids {
-                    ids.extend(store_ids);
+                if let Ok(store_ids) = &store_ids {
+                    ids.extend(store_ids.iter().copied());
                 }
                 let ids = ids.into_iter().collect::<Vec<_>>();
                 let steam_source = game
@@ -3258,9 +3264,9 @@ mod commands {
                     .is_some_and(|(source, _)| source == "steamidra");
                 let steam_eligibility = if steam_source {
                     match azdl::steam_content::load_base_receipt(&data_dir, &game.id) {
-                        Ok(Some(receipt)) => match azdl::steam_metadata::fetch_appinfo(app_id) {
+                        Ok(Some(receipt)) => match &appinfo {
                             Ok(metadata) => azdl::steam_content::validate_base_revision(
-                                &receipt, &metadata,
+                                &receipt, metadata,
                             )
                             .map_err(|error| error.to_string()),
                             Err(error) => Err(error.to_string()),
@@ -3276,7 +3282,7 @@ mod commands {
                 };
                 let names = ids
                     .chunks(4)
-                    .take(3)
+                    .take(if appinfo.is_ok() || store_ids.is_ok() { 3 } else { 0 })
                     .flat_map(|batch| {
                         std::thread::scope(|scope| {
                             let handles = batch
@@ -3305,14 +3311,9 @@ mod commands {
                     if available.iter().any(|addon| addon["id"] == id) {
                         continue;
                     }
-                    let observed = azdl::steam_content::load_observation(
-                        &data_dir,
-                        &game.id,
-                        dlc_id,
-                    )
-                    .ok()
-                    .flatten()
-                    .filter(|receipt| receipt.app_id == app_id);
+                    let observed = observations
+                        .iter()
+                        .find(|receipt| receipt.app_id == app_id && receipt.dlc_id == dlc_id);
                     let related = depots.get(&dlc_id);
                     let manifest_count = related
                         .into_iter()

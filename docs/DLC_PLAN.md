@@ -30,7 +30,7 @@ Repository findings:
 
 - `src/dlc.rs::available_for_game` explicitly returns no catalog DLC for `steamidra`; the desktop now lists Steam metadata separately through `get_game_dlc`.
 - `src-tauri/src/main.rs` drops Store DLC fields from its presentation payload. Keep that payload small and introduce a dedicated core DLC metadata result.
-- `src/catalog.rs::parse_addons` now requires a usable HTTPS artifact before enabling archive DLC.
+- `src/catalog.rs::parse_addons` now requires a usable HTTPS artifact before enabling archive DLC. Catalog DLC matches route to their parent game's DLC section.
 - `src/steam_depot.rs::parse_lua_manifests` preserves exact manifest IDs and rejects missing or ambiguous revisions. Base and DLC installs resolve only their selected depot manifests; absent unrelated DLC revisions no longer block a base install, while unknown depot IDs, missing required base depots, and missing selected revisions fail. Selected binary manifests require matching depot/revision metadata, safe paths, and regular file hashes before download; cryptographic signature validation remains open.
 - `install_steam_manifest_game_in` now selects known non-DLC Windows/English depots and writes a base revision receipt. Architecture, branch, shared-reference, and old-install handling remain incomplete.
 - `download_steam_depots` accepts an explicit depot subset and destination. DLC metadata resolution now follows bounded `depotfromapp` manifest references with cycle detection, selects exact provider artifacts for each manifest owner, and groups native downloads by content App ID. Each group uses isolated staging and is verified before a final combined payload check. The shared-depot path has offline fixture coverage; provider and CDN acceptance remain open.
@@ -70,7 +70,7 @@ Add `src/steam_metadata.rs` for typed Store/appinfo adapters, parsing, caching, 
 
 Start with the existing HTTPS transport and a replaceable appinfo relay adapter; keep room for direct PICS metadata supplied by a native provider. Cache display metadata longer than install metadata, deduplicate concurrent requests, limit response size and concurrency, and refresh plan inputs before installation. Query DLC appinfo where metadata indicates separately managed depots or base metadata leaves the mapping unresolved; bound recursive/shared-app lookups and reject cycles.
 
-Return one typed core result through Tauri's `get_game_dlc`. Display known DLC even when it cannot currently be downloaded, with a short actionable reason. Derive archive availability from a validated URL, filename, and transport rather than the existing boolean alone. Replace the hardcoded `steamidra` exclusion once its resolver can report explicit states. Index DLC titles and IDs for the existing catalog search and preserve their parent-game link. The current catalog parser skips top-level entries with `kind: "dlc"`, so search cannot yet find them as independent results.
+Return one typed core result through Tauri's `get_game_dlc`. Display known DLC even when it cannot currently be downloaded, with a short actionable reason. Preserve managed installs and verified legacy observations when Steam metadata fails; both now remain in the game-page result. Derive archive availability from a validated URL, filename, and transport rather than the existing boolean alone. Replace the hardcoded `steamidra` exclusion once its resolver can report explicit states. Index DLC titles and IDs for the existing catalog search and preserve their parent-game link.
 
 Completion evidence: captured minimal metadata fixtures cover missing Store pages, Store/appinfo disagreement, separately managed depots, failed requests, and an archive entry without an artifact. Discovery works without downloading content.
 
@@ -102,7 +102,7 @@ Keep the existing DLC section on the installed game's page as the management sur
 
 Keep DLC work in the existing background task and transfer drawer flow. Register its job before lengthy metadata or base-file checks so the user can see that work started, and persist enough state to recover after restart. Tauri remains a command/event adapter; Svelte displays core state and available actions. Add phase labels only if the existing status proves confusing in use.
 
-Keep Install, Remove, and Recover actions in the existing `GamePageView.svelte` section. Fix concrete defects there, such as losing installed DLC records after a metadata lookup error, without a broader state or component rewrite. Reuse the current notifications service and activity indicator.
+Keep Install, Remove, and Recover actions in the existing `GamePageView.svelte` section. Managed and verified legacy DLC records now remain visible after metadata lookup errors. Fix further concrete defects without a broader state or component rewrite. Reuse the current notifications service and activity indicator.
 
 File installation does not establish that a game grants access to content; included content must not create a fake download or claim activation. Steam's game-facing APIs distinguish ownership and installation; their callbacks do not replace azdl's own job events. See [ISteamApps](https://partner.steamgames.com/doc/api/ISteamApps?l=english).
 
