@@ -47,6 +47,69 @@ pub struct ObservedDlcReceipt {
     pub verified_unix: u64,
 }
 
+/// What public appinfo establishes about separately downloadable DLC depots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DlcDepotAvailability {
+    /// A target depot has a public manifest or a shared-app reference to resolve.
+    Candidate,
+    /// DLC metadata is incomplete; an install attempt must resolve it first.
+    Unknown,
+    /// Public metadata rules out a download through the current depot path.
+    Unavailable(&'static str),
+}
+
+/// Classify DLC delivery without treating Store membership as downloadable content.
+pub fn dlc_depot_availability(
+    parent: Option<&SteamAppMetadata>,
+    child: Option<&SteamAppMetadata>,
+    parent_id: u32,
+    dlc_id: u32,
+) -> DlcDepotAvailability {
+    let parent_depots = parent
+        .into_iter()
+        .flat_map(|metadata| &metadata.depots)
+        .filter(|depot| depot.dlc_app_id == Some(dlc_id))
+        .collect::<Vec<_>>();
+    let depots = if parent_depots.is_empty() {
+        let Some(child) = child else {
+            return DlcDepotAvailability::Unknown;
+        };
+        if child.parent_app_id != Some(parent_id) {
+            return DlcDepotAvailability::Unavailable(
+                "Steam DLC metadata does not identify this game as its parent",
+            );
+        }
+        child
+            .depots
+            .iter()
+            .filter(|depot| depot.dlc_app_id.is_none_or(|id| id == dlc_id))
+            .collect::<Vec<_>>()
+    } else {
+        parent_depots
+    };
+    if depots.is_empty() {
+        return DlcDepotAvailability::Unavailable(
+            "Steam identifies no separate downloadable files for this DLC",
+        );
+    }
+    let selected = depots
+        .into_iter()
+        .filter(|depot| matches_target(depot, "windows", "english"))
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return DlcDepotAvailability::Unavailable(
+            "No DLC depot matches this game's Windows/English target",
+        );
+    }
+    if selected
+        .iter()
+        .any(|depot| depot.public_manifest_id.is_none() && depot.source_app_id.is_none())
+    {
+        return DlcDepotAvailability::Unavailable("A required DLC depot has no public manifest");
+    }
+    DlcDepotAvailability::Candidate
+}
+
 pub(crate) fn matches_target(depot: &SteamDepotMetadata, os: &str, language: &str) -> bool {
     let matches = |value: Option<&str>, expected: &str| {
         value.is_none_or(|value| {
@@ -400,6 +463,62 @@ pub fn clear_observation(data_dir: &Path, game_id: &str, dlc_id: u32) -> Result<
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn dlc_availability_distinguishes_separate_files_from_store_membership() {
+        let parent = crate::steam_metadata::parse_appinfo(
+            br#"{"data":{"100":{"extended":{"listofdlc":"200,201,202"},"depots":{"301":{"dlcappid":"200","manifests":{"public":{"gid":"99"}}},"302":{"dlcappid":"201"},"303":{"dlcappid":"202","depotfromapp":"300"}}}}}"#,
+            100,
+        )
+        .unwrap();
+        assert_eq!(
+            dlc_depot_availability(Some(&parent), None, 100, 200),
+            DlcDepotAvailability::Candidate
+        );
+        assert!(matches!(
+            dlc_depot_availability(Some(&parent), None, 100, 201),
+            DlcDepotAvailability::Unavailable(reason) if reason.contains("no public manifest")
+        ));
+        assert_eq!(
+            dlc_depot_availability(Some(&parent), None, 100, 202),
+            DlcDepotAvailability::Candidate
+        );
+        assert_eq!(
+            dlc_depot_availability(Some(&parent), None, 100, 203),
+            DlcDepotAvailability::Unknown
+        );
+        let child = crate::steam_metadata::parse_appinfo(
+            br#"{"data":{"203":{"common":{"parent":"100","type":"DLC"}}}}"#,
+            203,
+        )
+        .unwrap();
+        assert!(matches!(
+            dlc_depot_availability(Some(&parent), Some(&child), 100, 203),
+            DlcDepotAvailability::Unavailable(reason) if reason.contains("no separate downloadable files")
+        ));
+        assert!(matches!(
+            dlc_depot_availability(Some(&parent), Some(&child), 101, 203),
+            DlcDepotAvailability::Unavailable(reason) if reason.contains("parent")
+        ));
+        let separate = crate::steam_metadata::parse_appinfo(
+            br#"{"data":{"204":{"common":{"parent":"100","type":"DLC"},"depots":{"401":{"manifests":{"public":{"gid":"123"}},"config":{"oslist":"windows"}}}}}}"#,
+            204,
+        )
+        .unwrap();
+        assert_eq!(
+            dlc_depot_availability(Some(&parent), Some(&separate), 100, 204),
+            DlcDepotAvailability::Candidate
+        );
+        let linux_only = crate::steam_metadata::parse_appinfo(
+            br#"{"data":{"205":{"common":{"parent":"100","type":"DLC"},"depots":{"402":{"manifests":{"public":{"gid":"124"}},"config":{"oslist":"linux"}}}}}}"#,
+            205,
+        )
+        .unwrap();
+        assert!(matches!(
+            dlc_depot_availability(Some(&parent), Some(&linux_only), 100, 205),
+            DlcDepotAvailability::Unavailable(reason) if reason.contains("Windows/English")
+        ));
+    }
 
     fn artifact(id: u32, revision: u64) -> DepotInfo {
         DepotInfo {

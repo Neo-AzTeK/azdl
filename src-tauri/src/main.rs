@@ -3262,8 +3262,11 @@ mod commands {
                     .as_ref()
                     .and_then(|origin| origin.qualified_id.split_once(':'))
                     .is_some_and(|(source, _)| source == "steamidra");
+                let base_receipt =
+                    azdl::steam_content::load_base_receipt(&data_dir, &game.id);
+                let needs_existing_check = steam_source && matches!(&base_receipt, Ok(None));
                 let steam_eligibility = if steam_source {
-                    match azdl::steam_content::load_base_receipt(&data_dir, &game.id) {
+                    match base_receipt {
                         Ok(Some(receipt)) => match &appinfo {
                             Ok(metadata) => azdl::steam_content::validate_base_revision(
                                 &receipt, metadata,
@@ -3280,7 +3283,7 @@ mod commands {
                 } else {
                     Err("This game's source does not provide Steam depot DLC".to_string())
                 };
-                let names = ids
+                let details = ids
                     .chunks(4)
                     .take(if appinfo.is_ok() || store_ids.is_ok() { 3 } else { 0 })
                     .flat_map(|batch| {
@@ -3291,17 +3294,13 @@ mod commands {
                                     scope.spawn(move || {
                                         azdl::steam_metadata::fetch_appinfo(*dlc_id)
                                             .ok()
-                                            .and_then(|details| {
-                                                (details.parent_app_id == Some(app_id))
-                                                    .then_some((*dlc_id, details.name))
-                                            })
+                                            .map(|details| (*dlc_id, details))
                                     })
                                 })
                                 .collect::<Vec<_>>();
                             handles
                                 .into_iter()
                                 .filter_map(|handle| handle.join().ok().flatten())
-                                .filter_map(|(id, name)| name.map(|name| (id, name)))
                                 .collect::<Vec<_>>()
                         })
                     })
@@ -3315,6 +3314,19 @@ mod commands {
                         .iter()
                         .find(|receipt| receipt.app_id == app_id && receipt.dlc_id == dlc_id);
                     let related = depots.get(&dlc_id);
+                    let delivery = azdl::steam_content::dlc_depot_availability(
+                        appinfo.as_ref().ok(),
+                        details.get(&dlc_id),
+                        app_id,
+                        dlc_id,
+                    );
+                    let unavailable_reason = match delivery {
+                        azdl::steam_content::DlcDepotAvailability::Unavailable(reason) => {
+                            Some(reason)
+                        }
+                        _ => None,
+                    };
+                    let can_check_content = steam_source && unavailable_reason.is_none();
                     let manifest_count = related
                         .into_iter()
                         .flatten()
@@ -3322,10 +3334,10 @@ mod commands {
                         .count();
                     available.push(json!({
                         "id": id,
-                        "title": names.get(&dlc_id).cloned().unwrap_or_else(|| format!("Steam DLC {dlc_id}")),
-                        "content_available": steam_source,
-                        "needs_provider_check": steam_source,
-                        "needs_existing_check": steam_source && steam_eligibility.is_err(),
+                        "title": details.get(&dlc_id).filter(|details| details.parent_app_id == Some(app_id)).and_then(|details| details.name.clone()).unwrap_or_else(|| format!("Steam DLC {dlc_id}")),
+                        "content_available": can_check_content,
+                        "needs_provider_check": can_check_content,
+                        "needs_existing_check": can_check_content && needs_existing_check,
                         "present_unmanaged": observed.is_some(),
                         "installed": installed.contains(&id),
                         "interrupted": interrupted.contains(&id),
@@ -3333,8 +3345,10 @@ mod commands {
                         "public_manifest_count": manifest_count,
                         "reason": if observed.is_some() {
                             Some("Existing files matched a provider manifest when last checked. They are not managed by azdl and cannot be removed here.")
-                        } else {
+                        } else if !steam_source {
                             steam_eligibility.as_ref().err().map(String::as_str)
+                        } else {
+                            unavailable_reason.or_else(|| steam_eligibility.as_ref().err().map(String::as_str))
                         },
                     }));
                 }
