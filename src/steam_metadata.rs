@@ -28,10 +28,31 @@ pub struct SteamAppMetadata {
     pub app_id: u32,
     pub app_type: Option<String>,
     pub name: Option<String>,
+    #[serde(default)]
+    pub free_to_download: bool,
     pub parent_app_id: Option<u32>,
     pub dlc_ids: Vec<u32>,
     pub depots: Vec<SteamDepotMetadata>,
     pub public_build_id: Option<String>,
+}
+
+/// Exact manifest revision and App IDs needed for one shared depot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedDepotSource {
+    pub depot_id: u32,
+    pub manifest_id: u64,
+    pub manifest_app_id: u32,
+    pub download_app_id: u32,
+}
+
+fn steam_bool(value: Option<&Value>) -> bool {
+    value.is_some_and(|value| {
+        value.as_bool() == Some(true)
+            || value.as_u64().is_some_and(|number| number != 0)
+            || value
+                .as_str()
+                .is_some_and(|text| text == "1" || text.eq_ignore_ascii_case("true"))
+    })
 }
 
 fn numeric_id(value: &Value) -> Option<u32> {
@@ -100,6 +121,7 @@ pub fn parse_appinfo(payload: &[u8], app_id: u32) -> Result<SteamAppMetadata> {
         app_id,
         app_type: app.pointer("/common/type").and_then(text),
         name: app.pointer("/common/name").and_then(text),
+        free_to_download: steam_bool(app.pointer("/common/FreeToDownload")),
         parent_app_id: app.pointer("/common/parent").and_then(numeric_id),
         dlc_ids: dlc_ids.into_iter().collect(),
         depots,
@@ -112,6 +134,67 @@ pub fn parse_appinfo(payload: &[u8], app_id: u32) -> Result<SteamAppMetadata> {
                     .or_else(|| value.as_u64().map(|id| id.to_string()))
             }),
     })
+}
+
+/// Follow `depotfromapp` only when an app lacks its own public manifest.
+/// The first proxy App ID is used for download access unless the app is free to download.
+pub fn resolve_depot_source(
+    app: &SteamAppMetadata,
+    depot_id: u32,
+    mut load_app: impl FnMut(u32) -> Result<SteamAppMetadata>,
+) -> Result<ResolvedDepotSource> {
+    let first = app
+        .depots
+        .iter()
+        .find(|depot| depot.depot_id == depot_id)
+        .ok_or_else(|| format!("Depot {depot_id} is absent from App ID {}", app.app_id))?;
+    let download_app_id = if app.free_to_download {
+        app.app_id
+    } else {
+        first.source_app_id.unwrap_or(app.app_id)
+    };
+    let mut current = app.clone();
+    let mut visited = BTreeSet::new();
+    loop {
+        if !visited.insert(current.app_id) {
+            return Err(format!(
+                "Shared depot {depot_id} has a depotfromapp cycle at App ID {}",
+                current.app_id
+            )
+            .into());
+        }
+        let depot = current
+            .depots
+            .iter()
+            .find(|depot| depot.depot_id == depot_id)
+            .ok_or_else(|| {
+                format!(
+                    "Shared depot {depot_id} is absent from referenced App ID {}",
+                    current.app_id
+                )
+            })?;
+        if let Some(manifest_id) = depot.public_manifest_id.as_deref() {
+            return Ok(ResolvedDepotSource {
+                depot_id,
+                manifest_id: manifest_id.parse()?,
+                manifest_app_id: current.app_id,
+                download_app_id,
+            });
+        }
+        let next = depot.source_app_id.ok_or_else(|| {
+            format!(
+                "Shared depot {depot_id} has no public manifest or depotfromapp in App ID {}",
+                current.app_id
+            )
+        })?;
+        if visited.len() >= 8 {
+            return Err(format!("Shared depot {depot_id} reference chain is too long").into());
+        }
+        current = load_app(next)?;
+        if current.app_id != next {
+            return Err(format!("Shared depot {depot_id} lookup returned the wrong App ID").into());
+        }
+    }
 }
 
 /// Fetch public appinfo through a bounded relay request, with a short in-process cache.
@@ -241,6 +324,76 @@ mod tests {
             Some("windows")
         );
         assert!(dlc_depots(&metadata)[&201][0].public_manifest_id.is_none());
+    }
+
+    #[test]
+    fn shared_depot_resolves_manifest_chain_and_download_proxy() {
+        let root = parse_appinfo(
+            br#"{"data":{"100":{"common":{"FreeToDownload":"0"},"depots":{"400":{"depotfromapp":"200"}}}}}"#,
+            100,
+        )
+        .unwrap();
+        let middle = parse_appinfo(
+            br#"{"data":{"200":{"depots":{"400":{"depotfromapp":"300"}}}}}"#,
+            200,
+        )
+        .unwrap();
+        let owner = parse_appinfo(
+            br#"{"data":{"300":{"depots":{"400":{"manifests":{"public":{"gid":"1674424364022381183"}}}}}}}"#,
+            300,
+        )
+        .unwrap();
+        let resolved = resolve_depot_source(&root, 400, |id| match id {
+            200 => Ok(middle.clone()),
+            300 => Ok(owner.clone()),
+            _ => panic!("unexpected App ID"),
+        })
+        .unwrap();
+        assert_eq!(resolved.manifest_app_id, 300);
+        assert_eq!(resolved.download_app_id, 200);
+        assert_eq!(resolved.manifest_id, 1_674_424_364_022_381_183);
+
+        let mut free = root.clone();
+        free.free_to_download = true;
+        let free_resolved = resolve_depot_source(&free, 400, |id| match id {
+            200 => Ok(middle.clone()),
+            300 => Ok(owner.clone()),
+            _ => panic!("unexpected App ID"),
+        })
+        .unwrap();
+        assert_eq!(free_resolved.download_app_id, 100);
+
+        let own_manifest = parse_appinfo(
+            br#"{"data":{"100":{"depots":{"400":{"depotfromapp":"200","manifests":{"public":{"gid":"7"}}}}}}}"#,
+            100,
+        )
+        .unwrap();
+        let own = resolve_depot_source(&own_manifest, 400, |_| panic!("no lookup needed")).unwrap();
+        assert_eq!(own.manifest_app_id, 100);
+        assert_eq!(own.download_app_id, 200);
+    }
+
+    #[test]
+    fn shared_depot_cycle_and_missing_reference_fail() {
+        let root = parse_appinfo(
+            br#"{"data":{"100":{"depots":{"400":{"depotfromapp":"200"}}}}}"#,
+            100,
+        )
+        .unwrap();
+        let cycle = parse_appinfo(
+            br#"{"data":{"200":{"depots":{"400":{"depotfromapp":"100"}}}}}"#,
+            200,
+        )
+        .unwrap();
+        let error = resolve_depot_source(&root, 400, |id| match id {
+            100 => Ok(root.clone()),
+            200 => Ok(cycle.clone()),
+            _ => panic!("unexpected App ID"),
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("cycle"), "{error}");
+        assert!(resolve_depot_source(&root, 999, |_| panic!("no lookup needed")).is_err());
     }
 
     #[test]

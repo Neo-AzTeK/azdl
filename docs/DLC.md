@@ -10,6 +10,8 @@ The researched evolution plan is in [DLC_PLAN.md](DLC_PLAN.md). The Steam depot 
 
 The desktop serializes game launch with DLC task registration and file mutations. It refuses to launch while a DLC task is active and refuses install, removal, or recovery while that game is running. This covers games launched and tracked by the desktop; processes started outside azdl are not yet identified.
 
+For a shared Steam depot, the DLC resolver follows `depotfromapp` when the current app has no public manifest, rejects cycles, and selects an exact provider artifact from the app that supplies the manifest. Downloads are grouped by their resolved content App ID into separate staging directories, then verified and merged before commit. This route is covered by offline fixtures; a live shared-depot download has not yet been accepted.
+
 ## Provider-owned delivery
 
 Arachnel API 4 exposes a JSON catalog boundary, but its C ABI does not expose the C++ `startOwnedDownload` method. Rust must not call C++ virtual methods or infer a depot URL from a Store DLC ID. A future provider-owned DLC adapter should use a versioned C ABI with an opaque session handle:

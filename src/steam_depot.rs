@@ -5,7 +5,9 @@ use crate::jobs::{
     job_id_for_target, load_job, now, save_job,
 };
 use crate::steam::{import_steam, scan_steam, steam_root};
+use crate::steam_metadata::{ResolvedDepotSource, SteamAppMetadata};
 use crate::{Game, Library, Result, clean_command, discovery, validate_id};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString, c_char, c_double, c_int, c_void};
 use std::fs;
 use std::io::Read;
@@ -582,6 +584,107 @@ pub fn verify_legacy_base(
 }
 
 /// Verify existing DLC files, or download selected depots into a managed base game.
+#[derive(Debug)]
+struct ResolvedDlcDownloads {
+    groups: Vec<(u32, Vec<DepotInfo>)>,
+    depots: Vec<DepotInfo>,
+}
+
+fn resolve_dlc_download_groups(
+    root: &Path,
+    metadata: &SteamAppMetadata,
+    selected_ids: &BTreeSet<u32>,
+) -> Result<ResolvedDlcDownloads> {
+    resolve_dlc_download_groups_with(
+        root,
+        metadata,
+        selected_ids,
+        crate::steam_metadata::fetch_appinfo,
+        fetch_provider_bundle,
+    )
+}
+
+fn resolve_dlc_download_groups_with(
+    root: &Path,
+    metadata: &SteamAppMetadata,
+    selected_ids: &BTreeSet<u32>,
+    mut load_app: impl FnMut(u32) -> Result<SteamAppMetadata>,
+    mut fetch_bundle: impl FnMut(&Path, u32) -> Result<PathBuf>,
+) -> Result<ResolvedDlcDownloads> {
+    if selected_ids.is_empty() {
+        return Err(format!(
+            "No matching DLC depots for Steam App ID {}",
+            metadata.app_id
+        )
+        .into());
+    }
+    let mut by_manifest_app = BTreeMap::<u32, Vec<ResolvedDepotSource>>::new();
+    for depot_id in selected_ids {
+        let resolved =
+            crate::steam_metadata::resolve_depot_source(metadata, *depot_id, &mut load_app)?;
+        by_manifest_app
+            .entry(resolved.manifest_app_id)
+            .or_default()
+            .push(resolved);
+    }
+    let mut download_groups = BTreeMap::<u32, Vec<DepotInfo>>::new();
+    let mut selected = Vec::new();
+    for (manifest_app_id, sources) in by_manifest_app {
+        let manifest_metadata = if manifest_app_id == metadata.app_id {
+            metadata.clone()
+        } else {
+            load_app(manifest_app_id)?
+        };
+        let known = manifest_metadata
+            .depots
+            .iter()
+            .map(|depot| depot.depot_id)
+            .collect::<BTreeSet<_>>();
+        let wanted = sources
+            .iter()
+            .map(|source| source.depot_id)
+            .collect::<BTreeSet<_>>();
+        let unpacked = fetch_bundle(
+            &root.join(format!("provider-{manifest_app_id}")),
+            manifest_app_id,
+        )?;
+        let available =
+            parse_lua_manifests_filtered(&unpacked, manifest_app_id, Some((&wanted, &known)))?;
+        let artifacts = available
+            .iter()
+            .map(|artifact| (artifact.depot_id, artifact))
+            .collect::<BTreeMap<_, _>>();
+        for source in sources {
+            let artifact = artifacts.get(&source.depot_id).ok_or_else(|| {
+                format!(
+                    "The selected source has no provider manifest for DLC depot {} from App ID {manifest_app_id}",
+                    source.depot_id
+                )
+            })?;
+            if artifact.manifest_id != source.manifest_id {
+                return Err(format!(
+                    "DLC depot {} provider revision differs from public manifest {}",
+                    source.depot_id, source.manifest_id
+                )
+                .into());
+            }
+            download_groups
+                .entry(source.download_app_id)
+                .or_default()
+                .push((*artifact).clone());
+            selected.push((*artifact).clone());
+        }
+    }
+    selected.sort_by_key(|depot| depot.depot_id);
+    for depots in download_groups.values_mut() {
+        depots.sort_by_key(|depot| depot.depot_id);
+    }
+    Ok(ResolvedDlcDownloads {
+        groups: download_groups.into_iter().collect(),
+        depots: selected,
+    })
+}
+
 pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<usize> {
     validate_id(&game.id)?;
     if dlc_id == 0 {
@@ -607,55 +710,37 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
     let job_id = job_id_for_target(&payload);
     let _active_worker = crate::jobs::lock_dlc_worker(data_dir, &job_id)?;
     let run = (|| -> Result<usize> {
-        let (content_app_id, depots) = if metadata
+        let (source_metadata, selected_ids) = if metadata
             .depots
             .iter()
             .any(|depot| depot.dlc_app_id == Some(dlc_id))
         {
-            let unpacked = fetch_provider_bundle(&root.join("base-provider"), app_id)?;
-            let known = metadata
-                .depots
-                .iter()
-                .map(|depot| depot.depot_id)
-                .collect::<std::collections::BTreeSet<_>>();
             let selected_ids = metadata
                 .depots
                 .iter()
                 .filter(|depot| depot.dlc_app_id == Some(dlc_id))
                 .filter(|depot| crate::steam_content::matches_target(depot, "windows", "english"))
                 .map(|depot| depot.depot_id)
-                .collect::<std::collections::BTreeSet<_>>();
-            let available =
-                parse_lua_manifests_filtered(&unpacked, app_id, Some((&selected_ids, &known)))?;
-            let selected = crate::steam_content::select_dlc_depots(
-                &available, &metadata, dlc_id, "windows", "english",
-            )?;
-            (app_id, selected)
+                .collect::<BTreeSet<_>>();
+            (metadata.clone(), selected_ids)
         } else {
             let child = crate::steam_metadata::fetch_appinfo(dlc_id)?;
-            let unpacked = fetch_provider_bundle(&root.join("dlc-provider"), dlc_id)?;
-            let known = child
-                .depots
-                .iter()
-                .map(|depot| depot.depot_id)
-                .collect::<std::collections::BTreeSet<_>>();
+            if child.parent_app_id != Some(app_id) {
+                return Err("DLC metadata does not identify the installed parent game".into());
+            }
             let selected_ids = child
                 .depots
                 .iter()
                 .filter(|depot| depot.dlc_app_id.is_none_or(|id| id == dlc_id))
                 .filter(|depot| crate::steam_content::matches_target(depot, "windows", "english"))
                 .map(|depot| depot.depot_id)
-                .collect::<std::collections::BTreeSet<_>>();
-            let available =
-                parse_lua_manifests_filtered(&unpacked, dlc_id, Some((&selected_ids, &known)))?;
-            let selected = crate::steam_content::select_separate_dlc_depots(
-                &available, &child, app_id, "windows", "english",
-            )?;
-            (dlc_id, selected)
+                .collect::<BTreeSet<_>>();
+            (child, selected_ids)
         };
+        let downloads = resolve_dlc_download_groups(&root, &source_metadata, &selected_ids)?;
         let check_lock = crate::dlc::lock_game(data_dir, &game.id)?;
         let mut all_present = true;
-        for depot in &depots {
+        for depot in &downloads.depots {
             let manifest = crate::steam_manifest::read_manifest(
                 &depot.manifest_path,
                 depot.depot_id,
@@ -672,7 +757,8 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
                     game_id: game.id.clone(),
                     app_id,
                     dlc_id,
-                    depots: depots
+                    depots: downloads
+                        .depots
                         .iter()
                         .map(|depot| crate::steam_content::DepotRevision {
                             depot_id: depot.depot_id,
@@ -702,7 +788,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         let mut job = DownloadJob {
             id: job_id.clone(),
             kind: JobKind::Dlc,
-            url: format!("steam://{content_app_id}/dlc/{dlc_id}"),
+            url: format!("steam://{app_id}/dlc/{dlc_id}"),
             target: payload.clone(),
             status: JobStatus::Running,
             pid: Some(std::process::id()),
@@ -722,16 +808,34 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         save_job(data_dir, &job)?;
         drop(check_lock);
         let result = (|| -> Result<usize> {
-            download_steam_depots(
-                &lib_path,
-                &payload,
-                content_app_id,
-                &depots,
-                data_dir,
-                &job_id,
-            )?;
-            normalize_windows_paths(&payload)?;
-            let manifests = depots
+            for (content_app_id, group) in &downloads.groups {
+                let group_dir = root.join(format!("group-{content_app_id}"));
+                remove_staging_dir(&group_dir)?;
+                fs::create_dir_all(&group_dir)?;
+                download_steam_depots(
+                    &lib_path,
+                    &group_dir,
+                    *content_app_id,
+                    group,
+                    data_dir,
+                    &job_id,
+                )?;
+                normalize_windows_paths(&group_dir)?;
+                let group_manifests = group
+                    .iter()
+                    .map(|depot| {
+                        crate::steam_manifest::read_manifest(
+                            &depot.manifest_path,
+                            depot.depot_id,
+                            depot.manifest_id,
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                crate::steam_manifest::verify_staged_exact(&group_manifests, &group_dir)?;
+                merge_verified_payload(&group_dir, &payload)?;
+            }
+            let manifests = downloads
+                .depots
                 .iter()
                 .map(|depot| {
                     crate::steam_manifest::read_manifest(
@@ -778,13 +882,55 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
 
 fn prepare_dlc_retry(data_dir: &Path, payload: &Path, job_id: &str) -> Result<()> {
     crate::jobs::clear_cancel(data_dir, job_id)?;
-    match fs::symlink_metadata(payload) {
+    remove_staging_dir(payload)
+}
+
+fn remove_staging_dir(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
-            fs::remove_dir_all(payload)?;
+            fs::remove_dir_all(path)?;
         }
         Ok(_) => return Err("DLC staging payload is not a regular directory".into()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn merge_verified_payload(source: &Path, target: &Path) -> Result<()> {
+    let source_meta = fs::symlink_metadata(source)?;
+    if !source_meta.is_dir() || source_meta.file_type().is_symlink() {
+        return Err("DLC staging group is not a regular directory".into());
+    }
+    match fs::symlink_metadata(target) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+        Ok(_) => return Err("Combined DLC staging path is not a regular directory".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(target)?,
+        Err(error) => return Err(error.into()),
+    }
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = target.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&from)?;
+        if metadata.file_type().is_symlink() {
+            return Err("DLC staging group contains a symbolic link".into());
+        }
+        if metadata.is_dir() {
+            merge_verified_payload(&from, &to)?;
+        } else if metadata.is_file() {
+            match fs::symlink_metadata(&to) {
+                Ok(existing) if !existing.is_file() || existing.file_type().is_symlink() => {
+                    return Err("Combined DLC staging path is not a regular file".into());
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            fs::copy(&from, &to)?;
+        } else {
+            return Err("DLC staging group contains a non-regular file".into());
+        }
     }
     Ok(())
 }
@@ -1061,6 +1207,144 @@ pub fn install_steam_manifest_game_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn separately_downloaded_groups_merge_for_one_verified_commit() {
+        use crate::steam_manifest::{DepotManifest, ManifestFile, verify_staged_exact};
+        use sha1::{Digest, Sha1};
+
+        let root = std::env::temp_dir().join(format!(
+            "azdl-dlc-groups-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first = root.join("first");
+        let second = root.join("second");
+        let combined = root.join("combined");
+        fs::create_dir_all(first.join("data")).unwrap();
+        fs::create_dir_all(second.join("data")).unwrap();
+        fs::write(first.join("data/base.bin"), b"first").unwrap();
+        fs::write(second.join("data/addon.bin"), b"second").unwrap();
+        let manifest = |depot_id, path: &str, bytes: &[u8]| DepotManifest {
+            depot_id,
+            manifest_id: u64::from(depot_id),
+            files: vec![ManifestFile {
+                path: PathBuf::from(path),
+                size: bytes.len() as u64,
+                sha1: Sha1::digest(bytes).into(),
+            }],
+        };
+        let base = manifest(201, "data/base.bin", b"first");
+        let addon = manifest(202, "data/addon.bin", b"second");
+        verify_staged_exact(std::slice::from_ref(&base), &first).unwrap();
+        verify_staged_exact(std::slice::from_ref(&addon), &second).unwrap();
+        merge_verified_payload(&first, &combined).unwrap();
+        merge_verified_payload(&second, &combined).unwrap();
+        verify_staged_exact(&[base.clone(), addon], &combined).unwrap();
+
+        let conflict_dir = root.join("conflict");
+        fs::create_dir_all(conflict_dir.join("data")).unwrap();
+        fs::write(conflict_dir.join("data/base.bin"), b"other").unwrap();
+        let conflict = manifest(203, "data/base.bin", b"other");
+        verify_staged_exact(std::slice::from_ref(&conflict), &conflict_dir).unwrap();
+        merge_verified_payload(&conflict_dir, &combined).unwrap();
+        assert!(verify_staged_exact(&[base, conflict], &combined).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn shared_dlc_depots_use_manifest_owner_and_download_app_groups() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-shared-dlc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let parent_bundle = root.join("parent");
+        let shared_bundle = root.join("shared");
+        fs::create_dir_all(&parent_bundle).unwrap();
+        fs::create_dir_all(&shared_bundle).unwrap();
+        let key = "0123456789abcdef0123456789abcdef";
+        fs::write(
+            parent_bundle.join("100.lua"),
+            format!("addappid(201,0,\"{key}\")\nsetManifestid(201,\"11\")"),
+        )
+        .unwrap();
+        fs::write(parent_bundle.join("201_11.manifest"), b"parent").unwrap();
+        fs::write(
+            shared_bundle.join("200.lua"),
+            format!("addappid(202,0,\"{key}\")\nsetManifestid(202,\"22\")"),
+        )
+        .unwrap();
+        fs::write(shared_bundle.join("202_22.manifest"), b"shared").unwrap();
+        let parent = crate::steam_metadata::parse_appinfo(
+            br#"{"data":{"100":{"depots":{"201":{"dlcappid":"900","manifests":{"public":{"gid":"11"}}},"202":{"dlcappid":"900","depotfromapp":"200"}}}}}"#,
+            100,
+        )
+        .unwrap();
+        let shared = crate::steam_metadata::parse_appinfo(
+            br#"{"data":{"200":{"depots":{"202":{"manifests":{"public":{"gid":"22"}}}}}}}"#,
+            200,
+        )
+        .unwrap();
+        let ids = [201, 202].into_iter().collect();
+        let resolve = || {
+            resolve_dlc_download_groups_with(
+                &root,
+                &parent,
+                &ids,
+                |id| {
+                    assert_eq!(id, 200);
+                    Ok(shared.clone())
+                },
+                |_, id| match id {
+                    100 => Ok(parent_bundle.clone()),
+                    200 => Ok(shared_bundle.clone()),
+                    _ => panic!("unexpected provider App ID"),
+                },
+            )
+        };
+        let downloads = resolve().unwrap();
+        assert_eq!(downloads.groups.len(), 2);
+        assert_eq!(downloads.groups[0].0, 100);
+        assert_eq!(downloads.groups[0].1[0].depot_id, 201);
+        assert_eq!(downloads.groups[1].0, 200);
+        assert_eq!(downloads.groups[1].1[0].depot_id, 202);
+        assert_eq!(downloads.depots.len(), 2);
+
+        let mut free_parent = parent.clone();
+        free_parent.free_to_download = true;
+        let free_downloads = resolve_dlc_download_groups_with(
+            &root,
+            &free_parent,
+            &ids,
+            |_| Ok(shared.clone()),
+            |_, id| match id {
+                100 => Ok(parent_bundle.clone()),
+                200 => Ok(shared_bundle.clone()),
+                _ => panic!("unexpected provider App ID"),
+            },
+        )
+        .unwrap();
+        assert_eq!(free_downloads.groups.len(), 1);
+        assert_eq!(free_downloads.groups[0].0, 100);
+        assert_eq!(free_downloads.groups[0].1.len(), 2);
+
+        fs::write(
+            shared_bundle.join("200.lua"),
+            format!("addappid(202,0,\"{key}\")\nsetManifestid(202,\"23\")"),
+        )
+        .unwrap();
+        fs::write(shared_bundle.join("202_23.manifest"), b"wrong").unwrap();
+        let error = resolve().unwrap_err().to_string();
+        assert!(error.contains("provider revision differs"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn dlc_retry_discards_old_payload_and_cancel_marker_but_keeps_receipts() {
