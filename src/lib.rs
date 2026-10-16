@@ -216,6 +216,13 @@ pub fn validate_id(id: &str) -> Result<()> {
 pub fn remove_game(library: &mut Library, data_dir: &Path, id: &str) -> Result<()> {
     validate_id(id)?;
     let _lock = dlc::lock_game(data_dir, id)?;
+    if jobs::list_jobs(data_dir)?.iter().any(|job| {
+        job.kind == jobs::JobKind::Dlc
+            && job.status == jobs::JobStatus::Running
+            && job.install.as_ref().is_some_and(|plan| plan.game_id == id)
+    }) {
+        return Err("Wait for the DLC download to finish before removing this game".into());
+    }
     let game = library
         .games
         .remove(id)
@@ -1194,6 +1201,56 @@ mod tests {
         drop(lock);
         assert!(done_rx.recv_timeout(Duration::from_secs(2)).unwrap());
         worker.join().unwrap();
+        assert!(!game_dir.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remove_game_rejects_active_dlc_download() {
+        let root = scratch();
+        let game_dir = root.join("games").join("active-dlc-game");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("game.bin"), b"binary").unwrap();
+        let mut library = Library::default();
+        add_game(
+            &mut library,
+            "active-dlc-game",
+            "Active DLC Game",
+            &game_dir,
+            Path::new("game.bin"),
+        )
+        .unwrap();
+        let job_id = "00000000000000b1";
+        let worker = jobs::lock_dlc_worker(&root, job_id).unwrap();
+        jobs::save_job(
+            &root,
+            &jobs::DownloadJob {
+                id: job_id.into(),
+                kind: jobs::JobKind::Dlc,
+                url: "steam://100/dlc/200".into(),
+                target: root.join("payload"),
+                status: jobs::JobStatus::Running,
+                pid: Some(std::process::id()),
+                error: None,
+                updated_unix: 0,
+                expected_sha256: None,
+                install: Some(jobs::InstallPlan {
+                    game_id: "active-dlc-game".into(),
+                    title: "Active DLC Game".into(),
+                    kind: jobs::InstallKind::Archive,
+                }),
+                install_state: Some(jobs::InstallState::Pending),
+                install_error: None,
+                progress_bytes: Some(0),
+                total_bytes: None,
+            },
+        )
+        .unwrap();
+        assert!(remove_game(&mut library, &root, "active-dlc-game").is_err());
+        assert!(game_dir.exists());
+        assert!(library.games.contains_key("active-dlc-game"));
+        drop(worker);
+        remove_game(&mut library, &root, "active-dlc-game").unwrap();
         assert!(!game_dir.exists());
         fs::remove_dir_all(root).unwrap();
     }

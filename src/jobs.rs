@@ -288,7 +288,15 @@ pub fn list_jobs(data_dir: &Path) -> Result<Vec<DownloadJob>> {
             .is_some_and(|extension| extension == "json")
         {
             let id = path.file_stem().unwrap_or_default().to_string_lossy();
-            jobs.push(load_job(data_dir, &id)?);
+            let mut job = load_job(data_dir, &id)?;
+            if job.kind == JobKind::Dlc
+                && job.status == JobStatus::Running
+                && !dlc_worker_active(data_dir, &id)?
+            {
+                job.status = JobStatus::Interrupted;
+                job.install_state = Some(InstallState::Failed);
+            }
+            jobs.push(job);
         }
     }
     jobs.sort_by(|a, b| {
@@ -297,6 +305,54 @@ pub fn list_jobs(data_dir: &Path) -> Result<Vec<DownloadJob>> {
             .then_with(|| a.id.cmp(&b.id))
     });
     Ok(jobs)
+}
+
+fn dlc_active_lock_path(data_dir: &Path, id: &str) -> Result<PathBuf> {
+    Ok(job_path(data_dir, id)?.with_extension("active-lock"))
+}
+
+/// Hold this lock for the entire in-process DLC depot download and commit.
+pub fn lock_dlc_worker(data_dir: &Path, id: &str) -> Result<File> {
+    let path = dlc_active_lock_path(data_dir, id)?;
+    fs::create_dir_all(job_dir(data_dir))?;
+    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err("DLC worker lock is a symbolic link".into());
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => {
+            return Err("DLC download job is already running".into());
+        }
+        Err(fs::TryLockError::Error(error)) => return Err(error.into()),
+    }
+    Ok(file)
+}
+
+fn dlc_worker_active(data_dir: &Path, id: &str) -> Result<bool> {
+    let path = dlc_active_lock_path(data_dir, id)?;
+    let meta = match fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err("DLC worker lock is not a regular file".into());
+    }
+    let file = OpenOptions::new().read(true).write(true).open(path)?;
+    match file.try_lock() {
+        Ok(()) => {
+            file.unlock()?;
+            Ok(false)
+        }
+        Err(fs::TryLockError::WouldBlock) => Ok(true),
+        Err(fs::TryLockError::Error(error)) => Err(error.into()),
+    }
 }
 
 struct JobLock(PathBuf);
@@ -964,6 +1020,9 @@ pub fn pause_job(data_dir: &Path, id: &str) -> Result<()> {
 pub fn cancel_job(data_dir: &Path, id: &str) -> Result<()> {
     let job = load_job(data_dir, id)?;
     if job.kind == JobKind::Dlc {
+        if !dlc_worker_active(data_dir, id)? {
+            return Err("DLC download was interrupted; restart it from the game page".into());
+        }
         let _lock = lock_dlc_phase(data_dir, id)?;
         let current = load_job(data_dir, id)?;
         if current.status != JobStatus::Running {
@@ -1025,7 +1084,10 @@ pub fn cancel_job(data_dir: &Path, id: &str) -> Result<()> {
 
 pub fn clear_job(data_dir: &Path, id: &str) -> Result<()> {
     let job = load_job(data_dir, id)?;
-    if job.effective_status() == JobStatus::Running {
+    if job.kind == JobKind::Dlc && dlc_worker_active(data_dir, id)? {
+        return Err("cannot delete an actively running job".into());
+    }
+    if job.kind != JobKind::Dlc && job.effective_status() == JobStatus::Running {
         return Err("cannot delete an actively running job".into());
     }
     let job_file = job_path(data_dir, id)?;
@@ -1035,6 +1097,7 @@ pub fn clear_job(data_dir: &Path, id: &str) -> Result<()> {
     let _ = fs::remove_file(pause_path(data_dir, id)?);
     let _ = fs::remove_file(cancel_path(data_dir, id)?);
     let _ = fs::remove_file(job_path(data_dir, id)?.with_extension("phase-lock"));
+    let _ = fs::remove_file(dlc_active_lock_path(data_dir, id)?);
     Ok(())
 }
 
@@ -1088,6 +1151,18 @@ mod tests {
             };
             save_job(&root, &job).unwrap();
         }
+        let cancel_worker = lock_dlc_worker(&root, cancel_id).unwrap();
+        let commit_worker = lock_dlc_worker(&root, commit_id).unwrap();
+        assert!(lock_dlc_worker(&root, commit_id).is_err());
+        assert_eq!(
+            list_jobs(&root)
+                .unwrap()
+                .into_iter()
+                .find(|job| job.id == commit_id)
+                .unwrap()
+                .status,
+            JobStatus::Running
+        );
         assert!(pause_job(&root, cancel_id).is_err());
 
         cancel_job(&root, cancel_id).unwrap();
@@ -1106,6 +1181,20 @@ mod tests {
         );
         assert!(cancel_job(&root, commit_id).is_err());
         assert!(!cancel_path(&root, commit_id).unwrap().exists());
+        assert!(clear_job(&root, commit_id).is_err());
+        drop(cancel_worker);
+        drop(commit_worker);
+        assert_eq!(
+            list_jobs(&root)
+                .unwrap()
+                .into_iter()
+                .find(|job| job.id == commit_id)
+                .unwrap()
+                .status,
+            JobStatus::Interrupted
+        );
+        assert!(cancel_job(&root, commit_id).is_err());
+        clear_job(&root, commit_id).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -691,13 +691,13 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             }
         };
         crate::steam_content::validate_base_revision(&receipt, &metadata)?;
-        drop(check_lock);
         let lib_path = find_depotkit_library(data_dir).map_err(
             |_| "The selected download plugin does not provide a usable depot downloader",
         )?;
         let payload = root.join("payload");
         fs::create_dir_all(&payload)?;
         let job_id = job_id_for_target(&payload);
+        let _active_worker = crate::jobs::lock_dlc_worker(data_dir, &job_id)?;
         let mut job = DownloadJob {
             id: job_id.clone(),
             kind: JobKind::Dlc,
@@ -719,6 +719,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             total_bytes: None,
         };
         save_job(data_dir, &job)?;
+        drop(check_lock);
         let result = (|| -> Result<usize> {
             download_steam_depots(
                 &lib_path,
