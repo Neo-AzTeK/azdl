@@ -2,7 +2,10 @@
 
 use crate::archive::{extract_checked, multipart_names};
 use crate::catalog::{AddonKind, CatalogAddon};
-use crate::jobs::{JobKind, clear_job, job_id_for_target, recorded_download_with_sha256};
+use crate::jobs::{
+    JobKind, JobStatus, clear_job_if_present, job_id_for_target, maybe_load_job,
+    recorded_download_with_sha256,
+};
 use crate::sha256::file_sha256;
 use crate::{Game, Result, validate_id};
 use serde::{Deserialize, Serialize};
@@ -270,6 +273,15 @@ pub fn install_archive(
     validate_id(&game.id)?;
     validate_id(dlc_id)?;
     let _lock = lock_game(data_dir, &game.id)?;
+    install_archive_unlocked(game, data_dir, dlc_id, archive)
+}
+
+fn install_archive_unlocked(
+    game: &Game,
+    data_dir: &Path,
+    dlc_id: &str,
+    archive: &Path,
+) -> Result<usize> {
     let archive = fs::canonicalize(archive)?;
     if !archive.is_file() {
         return Err("DLC archive is missing".into());
@@ -451,6 +463,57 @@ fn install_payload_unlocked(
 
 /// Download an explicit provider DLC archive and install it into its base game.
 pub fn install_catalog_dlc(game: &Game, data_dir: &Path, addon: &CatalogAddon) -> Result<usize> {
+    install_catalog_dlc_with(game, data_dir, addon, |placeholder, url, name, hash| {
+        recorded_download_with_sha256(data_dir, placeholder, url, name, JobKind::Archive, hash)
+    })
+}
+
+fn create_download_dir(path: &Path) -> Result<()> {
+    match fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return Err("DLC download path is not a regular directory".into());
+    }
+    Ok(())
+}
+
+fn cleanup_catalog_download(
+    data_dir: &Path,
+    download_dir: &Path,
+    job_target_dir: &Path,
+    names: &[String],
+) -> Result<()> {
+    for name in names {
+        let id = job_id_for_target(&job_target_dir.join(name));
+        if maybe_load_job(data_dir, &id)?.is_some_and(|job| job.status == JobStatus::Paused) {
+            return Ok(());
+        }
+    }
+    for name in names {
+        let id = job_id_for_target(&job_target_dir.join(name));
+        clear_job_if_present(data_dir, &id)?;
+    }
+    match fs::symlink_metadata(download_dir) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+            fs::remove_dir_all(download_dir)?;
+        }
+        Ok(_) => return Err("DLC download path is not a regular directory".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+fn install_catalog_dlc_with(
+    game: &Game,
+    data_dir: &Path,
+    addon: &CatalogAddon,
+    mut download: impl FnMut(&Game, &str, &Path, Option<&str>) -> Result<PathBuf>,
+) -> Result<usize> {
     validate_id(&game.id)?;
     validate_id(&addon.id)?;
     if addon.kind != AddonKind::Dlc || !addon.content_available {
@@ -469,57 +532,60 @@ pub fn install_catalog_dlc(game: &Game, data_dir: &Path, addon: &CatalogAddon) -
     ) {
         return Err("DLC archive filename must be a single file name".into());
     }
-    let download_dir = data_dir
-        .join("dlc-downloads")
-        .join(&game.id)
-        .join(&addon.id);
-    fs::create_dir_all(&download_dir)?;
-    let mut placeholder = game.clone();
-    placeholder.install_dir = fs::canonicalize(&download_dir)?;
-    placeholder.title = format!("{} DLC: {}", game.title, addon.title);
-    let archive = if addon.archive_parts.is_empty() {
-        let url = addon.uri.as_deref().ok_or("DLC download URL is missing")?;
-        recorded_download_with_sha256(
-            data_dir,
-            &placeholder,
-            url,
-            Path::new(filename),
-            JobKind::Archive,
-            addon.sha256.as_deref(),
-        )?
+    let names = if addon.archive_parts.is_empty() {
+        vec![filename.to_string()]
     } else {
         let names = multipart_names(filename, addon.archive_parts.len())?;
         if names.len() != addon.archive_part_hashes.len() {
             return Err("DLC archive part hash count does not match URLs".into());
         }
-        let mut first = None;
-        for ((name, url), hash) in names
-            .iter()
-            .zip(&addon.archive_parts)
-            .zip(&addon.archive_part_hashes)
-        {
-            let path = recorded_download_with_sha256(
-                data_dir,
+        names
+    };
+    let _lock = lock_game(data_dir, &game.id)?;
+    let download_root = data_dir.join("dlc-downloads");
+    create_download_dir(&download_root)?;
+    let game_downloads = download_root.join(&game.id);
+    create_download_dir(&game_downloads)?;
+    let download_dir = game_downloads.join(&addon.id);
+    create_download_dir(&download_dir)?;
+    let mut placeholder = game.clone();
+    placeholder.install_dir = fs::canonicalize(&download_dir)?;
+    placeholder.title = format!("{} DLC: {}", game.title, addon.title);
+    let result = (|| -> Result<usize> {
+        let archive = if addon.archive_parts.is_empty() {
+            let url = addon.uri.as_deref().ok_or("DLC download URL is missing")?;
+            download(
                 &placeholder,
                 url,
-                Path::new(name),
-                JobKind::Archive,
-                hash.as_deref(),
-            )?;
-            first.get_or_insert(path);
+                Path::new(filename),
+                addon.sha256.as_deref(),
+            )?
+        } else {
+            let mut first = None;
+            for ((name, url), hash) in names
+                .iter()
+                .zip(&addon.archive_parts)
+                .zip(&addon.archive_part_hashes)
+            {
+                let path = download(&placeholder, url, Path::new(name), hash.as_deref())?;
+                first.get_or_insert(path);
+            }
+            first.ok_or("DLC has no archive volumes")?
+        };
+        install_archive_unlocked(game, data_dir, &addon.id, &archive)
+    })();
+    let cleanup =
+        cleanup_catalog_download(data_dir, &download_dir, &placeholder.install_dir, &names);
+    match (result, cleanup) {
+        (Ok(count), Ok(())) => Ok(count),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => {
+            Err(format!("DLC installed, but archive cleanup failed: {error}").into())
         }
-        first.ok_or("DLC has no archive volumes")?
-    };
-    let count = install_archive(game, data_dir, &addon.id, &archive)?;
-    if addon.archive_parts.is_empty() {
-        let _ = clear_job(data_dir, &job_id_for_target(&archive));
-    } else {
-        for name in multipart_names(filename, addon.archive_parts.len())? {
-            let _ = clear_job(data_dir, &job_id_for_target(&download_dir.join(name)));
+        (Err(error), Err(cleanup_error)) => {
+            Err(format!("{error}; archive cleanup failed: {cleanup_error}").into())
         }
     }
-    let _ = fs::remove_dir_all(&download_dir);
-    Ok(count)
 }
 
 fn recover_unlocked(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
@@ -722,6 +788,130 @@ mod tests {
         };
         assert!(install_catalog_dlc(&game, &root, &addon).is_err());
         assert!(!root.join("dlc-downloads").exists());
+    }
+
+    #[test]
+    fn catalog_dlc_cleans_failed_archive_without_changing_base() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-dlc-cleanup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let game_dir = root.join("games/base");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("base.exe"), b"base").unwrap();
+        let game = Game {
+            id: "base".into(),
+            title: "Base".into(),
+            install_dir: game_dir.clone(),
+            executable: game_dir.join("base.exe"),
+            runner: Runner::Auto,
+            arguments: Vec::new(),
+            environment: BTreeMap::new(),
+            last_played_unix: None,
+            origin: None,
+            steam_app_id: None,
+            launch_options: Vec::new(),
+            selected_launch_option_id: None,
+            cover_url: None,
+            banner_url: None,
+        };
+        let addon = CatalogAddon {
+            id: "bonus".into(),
+            title: "Bonus".into(),
+            kind: AddonKind::Dlc,
+            uri: Some("https://example.invalid/bonus.zip".into()),
+            filename: Some("bonus.zip".into()),
+            archive_parts: Vec::new(),
+            sha256: None,
+            archive_part_hashes: Vec::new(),
+            content_available: true,
+            referer: None,
+        };
+        let staging = root.join("dlc-downloads/base/bonus");
+        assert!(
+            install_catalog_dlc_with(&game, &root, &addon, |placeholder, _, name, _| {
+                let path = placeholder.install_dir.join(name);
+                fs::write(&path, b"not an archive")?;
+                crate::jobs::save_job(
+                    &root,
+                    &crate::jobs::DownloadJob {
+                        id: job_id_for_target(&path),
+                        kind: JobKind::Archive,
+                        url: "https://example.invalid/bonus.zip".into(),
+                        target: path.clone(),
+                        status: crate::jobs::JobStatus::Complete,
+                        pid: None,
+                        error: None,
+                        updated_unix: crate::jobs::now()?,
+                        expected_sha256: None,
+                        install: None,
+                        install_state: None,
+                        install_error: None,
+                        progress_bytes: None,
+                        total_bytes: None,
+                    },
+                )?;
+                Ok(path)
+            })
+            .is_err()
+        );
+        assert!(!staging.exists());
+        assert!(
+            crate::jobs::load_job(&root, &job_id_for_target(&staging.join("bonus.zip"))).is_err()
+        );
+        assert!(list_interrupted(&game, &root).unwrap().is_empty());
+        assert!(
+            install_catalog_dlc_with(&game, &root, &addon, |placeholder, _, name, _| {
+                fs::write(
+                    placeholder.install_dir.join(name).with_extension("part"),
+                    b"partial",
+                )?;
+                Err("network unavailable".into())
+            })
+            .is_err()
+        );
+        assert!(!staging.exists());
+        assert!(
+            install_catalog_dlc_with(&game, &root, &addon, |placeholder, _, name, _| {
+                let path = placeholder.install_dir.join(name);
+                fs::write(path.with_file_name("bonus.zip.part"), b"partial")?;
+                crate::jobs::save_job(
+                    &root,
+                    &crate::jobs::DownloadJob {
+                        id: job_id_for_target(&path),
+                        kind: JobKind::Archive,
+                        url: "https://example.invalid/bonus.zip".into(),
+                        target: path,
+                        status: JobStatus::Paused,
+                        pid: None,
+                        error: None,
+                        updated_unix: crate::jobs::now()?,
+                        expected_sha256: None,
+                        install: None,
+                        install_state: None,
+                        install_error: None,
+                        progress_bytes: None,
+                        total_bytes: None,
+                    },
+                )?;
+                Err("paused".into())
+            })
+            .is_err()
+        );
+        assert!(staging.join("bonus.zip.part").exists());
+        assert_eq!(
+            crate::jobs::load_job(&root, &job_id_for_target(&staging.join("bonus.zip")))
+                .unwrap()
+                .status,
+            JobStatus::Paused
+        );
+        clear_job_if_present(&root, &job_id_for_target(&staging.join("bonus.zip"))).unwrap();
+        assert_eq!(fs::read(game_dir.join("base.exe")).unwrap(), b"base");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

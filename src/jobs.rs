@@ -261,7 +261,7 @@ pub fn load_job(data_dir: &Path, id: &str) -> Result<DownloadJob> {
     maybe_load_job(data_dir, id)?.ok_or_else(|| "download job not found".into())
 }
 
-fn maybe_load_job(data_dir: &Path, id: &str) -> Result<Option<DownloadJob>> {
+pub(crate) fn maybe_load_job(data_dir: &Path, id: &str) -> Result<Option<DownloadJob>> {
     let bytes = match fs::read(job_path(data_dir, id)?) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -1143,6 +1143,13 @@ pub fn clear_job(data_dir: &Path, id: &str) -> Result<()> {
     let _ = fs::remove_file(cancel_path(data_dir, id)?);
     let _ = fs::remove_file(job_path(data_dir, id)?.with_extension("phase-lock"));
     let _ = fs::remove_file(dlc_active_lock_path(data_dir, id)?);
+    Ok(())
+}
+
+pub(crate) fn clear_job_if_present(data_dir: &Path, id: &str) -> Result<()> {
+    if maybe_load_job(data_dir, id)?.is_some() {
+        clear_job(data_dir, id)?;
+    }
     Ok(())
 }
 
