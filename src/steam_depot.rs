@@ -543,6 +543,13 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             )?;
             (dlc_id, selected)
         };
+        for depot in &depots {
+            crate::steam_manifest::read_manifest(
+                &depot.manifest_path,
+                depot.depot_id,
+                depot.manifest_id,
+            )?;
+        }
         let lib_path = find_depotkit_library(data_dir).map_err(
             |_| "The selected download plugin does not provide a usable depot downloader",
         )?;
@@ -763,6 +770,13 @@ pub fn install_steam_manifest_game_in(
     let appinfo = crate::steam_metadata::fetch_appinfo(app_id)?;
     let depots =
         crate::steam_content::select_base_depots(&provider_depots, &appinfo, "windows", "english")?;
+    for depot in &depots {
+        crate::steam_manifest::read_manifest(
+            &depot.manifest_path,
+            depot.depot_id,
+            depot.manifest_id,
+        )?;
+    }
 
     // 6. Target installation directory
     fs::create_dir_all(games_dir)?;

@@ -31,14 +31,14 @@ Repository findings:
 - `src/dlc.rs::available_for_game` explicitly returns no catalog DLC for `steamidra`; the desktop now lists Steam metadata separately through `get_game_dlc`.
 - `src-tauri/src/main.rs` drops Store DLC fields from its presentation payload. Keep that payload small and introduce a dedicated core DLC metadata result.
 - `src/catalog.rs::parse_addons` now requires a usable HTTPS artifact before enabling archive DLC.
-- `src/steam_depot.rs::parse_lua_manifests` now preserves exact manifest IDs and rejects missing or ambiguous revisions. Binary manifest headers and depot membership still need validation.
+- `src/steam_depot.rs::parse_lua_manifests` preserves exact manifest IDs and rejects missing or ambiguous revisions. Selected binary manifests now require matching depot/revision metadata, safe paths, and regular file hashes before download; cryptographic signature validation remains open.
 - `install_steam_manifest_game_in` now selects known non-DLC Windows/English depots and writes a base revision receipt. Architecture, branch, shared-reference, and old-install handling remain incomplete.
 - `download_steam_depots` already accepts an explicit depot subset and destination. It can target staging. Its request has one App ID, so cross-app/shared depots need requests grouped by the resolved content-owner App ID.
 - The existing archive DLC transaction rejects all existing paths. Steam's ordered depot overlays can legitimately contain overlapping files, which requires a broader file ownership model before general support.
 
 On 2026-10-16, an isolated Linux check used the installed `steamidra` provider and the matching public revision for Anomalous Coffee Machine 2 DLC `3875100`. The depotkit transport downloaded one 539,727,136 byte file into `/tmp`, the staged DLC transaction committed it, the recorded SHA-256 matched the file, and DLC removal deleted both the owned file and state. The base directory was intentionally empty with a synthetic receipt, so this proves the transport and additive transaction only. It does not prove compatibility with an actual base installation or game access.
 
-A preexisting local installation of that game contains a file with the same DLC filename and size, but its SHA-1 does not match the current provider binary manifest's content hash. The installer must treat this legacy content as unknown or a different revision. Filename and size alone cannot justify an installed DLC state, a base receipt, or ownership for removal.
+A preexisting local installation of that game contains the DLC file, and its SHA-1 matches the current provider binary manifest's `sha_content` field. The earlier mismatch was caused by reading field 4 (`sha_filename`) instead of field 5 (`sha_content`); the [manifest schema](https://github.com/ValvePython/steam/blob/master/protobufs/content_manifest.proto) distinguishes them. Exact content verification can establish that the bytes are present, but it does not grant azdl ownership to remove a file created by an older install.
 
 ## Proposed core model
 
