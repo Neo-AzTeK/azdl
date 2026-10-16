@@ -1,5 +1,7 @@
 use crate::archive::{extract_checked, extract_checked_with_passphrase};
-use crate::catalog::{CatalogGame, InstallOutcome, save_pending_setup_origin, stamp_origin};
+use crate::catalog::{
+    AddonKind, CatalogAddon, CatalogGame, InstallOutcome, save_pending_setup_origin, stamp_origin,
+};
 use crate::jobs::{
     DownloadJob, InstallKind, InstallPlan, InstallState, JobKind, JobStatus, clear_cancel,
     job_id_for_target, load_job, now, save_job,
@@ -279,6 +281,10 @@ fn parse_lua_content(
 }
 
 pub use crate::archive::normalize_windows_paths;
+
+fn base_install_addons(addons: &[CatalogAddon]) -> impl Iterator<Item = &CatalogAddon> {
+    addons.iter().filter(|addon| addon.kind != AddonKind::Dlc)
+}
 
 fn has_depotkit_symbol(path: &Path) -> bool {
     unsafe {
@@ -920,6 +926,19 @@ fn merge_verified_payload(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+fn publish_verified_base(
+    stage: &Path,
+    target: &Path,
+    manifests: &[crate::steam_manifest::DepotManifest],
+) -> Result<()> {
+    crate::steam_manifest::verify_staged_exact(manifests, stage)?;
+    if fs::symlink_metadata(target).is_ok() {
+        fs::remove_dir(target)?;
+    }
+    fs::rename(stage, target)?;
+    Ok(())
+}
+
 /// Perform end-to-end installation of a Steam manifest-based catalog game:
 /// downloads manifest and addons, invokes native depotkit engine, normalizes paths,
 /// overlays addons, registers into library, and tracks full progress in the transfers drawer.
@@ -952,6 +971,7 @@ pub fn install_steam_manifest_game_in(
         stamp_origin(library, &id, game);
         return Ok(InstallOutcome::Installed(id));
     }
+    let _game_lock = crate::dlc::lock_game(data_dir, &game.id)?;
 
     // 2. Prepare downloads directory
     let download_dir = data_dir.join("downloads").join(format!("steam-{app_id}"));
@@ -1020,7 +1040,7 @@ pub fn install_steam_manifest_game_in(
 
     // 3. Download addons (e.g. Online-Fix RAR)
     let mut addon_files = Vec::new();
-    for addon in &game.addons {
+    for addon in base_install_addons(&game.addons) {
         if let Some(uri) = &addon.uri {
             let filename = addon
                 .filename
@@ -1063,11 +1083,6 @@ pub fn install_steam_manifest_game_in(
 
     // 5. Parse depots from Lua manifests
     let appinfo = crate::steam_metadata::fetch_appinfo(app_id)?;
-    let known = appinfo
-        .depots
-        .iter()
-        .map(|depot| depot.depot_id)
-        .collect::<std::collections::BTreeSet<_>>();
     let selected_ids = appinfo
         .depots
         .iter()
@@ -1075,25 +1090,61 @@ pub fn install_steam_manifest_game_in(
         .filter(|depot| crate::steam_content::matches_target(depot, "windows", "english"))
         .map(|depot| depot.depot_id)
         .collect::<std::collections::BTreeSet<_>>();
-    let provider_depots =
-        parse_lua_manifests_filtered(&unpack_dir, app_id, Some((&selected_ids, &known)))?;
-    if provider_depots.is_empty() {
-        return Err(format!("No usable depot manifest was found for Steam App ID {app_id}").into());
-    }
-    let depots =
-        crate::steam_content::select_base_depots(&provider_depots, &appinfo, "windows", "english")?;
-    for depot in &depots {
-        crate::steam_manifest::read_manifest(
-            &depot.manifest_path,
-            depot.depot_id,
-            depot.manifest_id,
-        )?;
-    }
+    let downloads = resolve_dlc_download_groups_with(
+        &download_dir,
+        &appinfo,
+        &selected_ids,
+        crate::steam_metadata::fetch_appinfo,
+        |root, manifest_app_id| {
+            if manifest_app_id == app_id {
+                Ok(unpack_dir.clone())
+            } else {
+                fetch_provider_bundle(root, manifest_app_id)
+            }
+        },
+    )?;
+    let manifests = downloads
+        .depots
+        .iter()
+        .map(|depot| {
+            crate::steam_manifest::read_manifest(
+                &depot.manifest_path,
+                depot.depot_id,
+                depot.manifest_id,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    crate::steam_manifest::validate_manifest_set(&manifests)?;
+    let total_bytes = manifests
+        .iter()
+        .flat_map(|manifest| &manifest.files)
+        .try_fold(0_u64, |total, file| {
+            total
+                .checked_add(file.size)
+                .ok_or("Base game size exceeds u64")
+        })?;
 
     // 6. Target installation directory
     fs::create_dir_all(games_dir)?;
     let target_dir = games_dir.join(&game.id);
-    fs::create_dir_all(&target_dir)?;
+    match fs::symlink_metadata(&target_dir) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+            if fs::read_dir(&target_dir)?.next().is_some() {
+                return Err("Base game target already contains files; choose an empty installation directory".into());
+            }
+        }
+        Ok(_) => return Err("Base game target is not a regular directory".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let base_stage = games_dir.join(format!(
+        ".{}-{}-{nonce}.staging",
+        game.id,
+        std::process::id()
+    ));
 
     // 7. Register and track DownloadJob in transfers drawer
     let job_id = job_id_for_target(&target_dir);
@@ -1115,13 +1166,69 @@ pub fn install_steam_manifest_game_in(
         install_state: Some(InstallState::Installing),
         install_error: None,
         progress_bytes: Some(0),
-        total_bytes: None,
+        total_bytes: (total_bytes > 0).then_some(total_bytes),
     };
     save_job(data_dir, &job)?;
 
-    // 8. Execute Steam depot chunk download from Steam CDN
-    let dl_result =
-        download_steam_depots(&lib_path, &target_dir, app_id, &depots, data_dir, &job_id);
+    // 8. Fetch each content App ID separately and merge only verified files.
+    let dl_result = (|| -> Result<()> {
+        fs::create_dir(&base_stage)?;
+        let mut completed_bytes = 0_u64;
+        for (content_app_id, group) in &downloads.groups {
+            let group_dir = download_dir.join(format!("group-{content_app_id}"));
+            remove_staging_dir(&group_dir)?;
+            fs::create_dir(&group_dir)?;
+            download_steam_depots_with_progress(
+                &lib_path,
+                &group_dir,
+                *content_app_id,
+                group,
+                data_dir,
+                &job_id,
+                DownloadProgressSpan {
+                    completed_bytes,
+                    overall_bytes: (total_bytes > 0).then_some(total_bytes),
+                },
+            )?;
+            normalize_windows_paths(&group_dir)?;
+            let group_manifests = group
+                .iter()
+                .map(|depot| {
+                    crate::steam_manifest::read_manifest(
+                        &depot.manifest_path,
+                        depot.depot_id,
+                        depot.manifest_id,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            crate::steam_manifest::verify_staged_exact(&group_manifests, &group_dir)?;
+            merge_verified_payload(&group_dir, &base_stage)?;
+            remove_staging_dir(&group_dir)?;
+            let group_bytes = group_manifests
+                .iter()
+                .flat_map(|manifest| &manifest.files)
+                .try_fold(0_u64, |total, file| {
+                    total
+                        .checked_add(file.size)
+                        .ok_or("Base game size exceeds u64")
+                })?;
+            completed_bytes = completed_bytes
+                .checked_add(group_bytes)
+                .ok_or("Base game size exceeds u64")?;
+            let mut progress = load_job(data_dir, &job_id)?;
+            progress.progress_bytes =
+                Some(progress.progress_bytes.unwrap_or(0).max(completed_bytes));
+            save_job(data_dir, &progress)?;
+        }
+        publish_verified_base(&base_stage, &target_dir, &manifests)?;
+        Ok(())
+    })();
+    if dl_result.is_err() {
+        let _ = remove_staging_dir(&base_stage);
+        for (content_app_id, _) in &downloads.groups {
+            let _ = remove_staging_dir(&download_dir.join(format!("group-{content_app_id}")));
+        }
+    }
     if let Err(e) = dl_result {
         if let Ok(mut j) = load_job(data_dir, &job_id)
             && j.status == JobStatus::Running
@@ -1137,7 +1244,8 @@ pub fn install_steam_manifest_game_in(
         &crate::steam_content::BaseContentReceipt {
             game_id: game.id.clone(),
             app_id,
-            depots: depots
+            depots: downloads
+                .depots
                 .iter()
                 .map(|depot| crate::steam_content::DepotRevision {
                     depot_id: depot.depot_id,
@@ -1192,6 +1300,72 @@ pub fn install_steam_manifest_game_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_install_does_not_fetch_catalog_dlc_archives() {
+        let addon = |id: &str, kind| CatalogAddon {
+            id: id.into(),
+            title: id.into(),
+            kind,
+            uri: Some(format!("https://example.invalid/{id}.zip")),
+            filename: Some(format!("{id}.zip")),
+            archive_parts: Vec::new(),
+            sha256: None,
+            archive_part_hashes: Vec::new(),
+            content_available: true,
+            referer: None,
+        };
+        let available = [
+            addon("fix", AddonKind::Addon),
+            addon("bonus", AddonKind::Dlc),
+        ];
+        let selected = base_install_addons(&available)
+            .map(|addon| addon.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(selected, vec!["fix"]);
+    }
+
+    #[test]
+    fn base_publish_requires_verified_content_and_preserves_existing_target() {
+        use crate::steam_manifest::{DepotManifest, ManifestFile};
+        use sha1::{Digest, Sha1};
+
+        let root = std::env::temp_dir().join(format!(
+            "azdl-base-publish-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let stage = root.join("stage");
+        let target = root.join("game");
+        fs::create_dir_all(&stage).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(stage.join("base.bin"), b"wrong").unwrap();
+        let manifest = DepotManifest {
+            depot_id: 101,
+            manifest_id: 1,
+            files: vec![ManifestFile {
+                path: PathBuf::from("base.bin"),
+                size: 4,
+                sha1: Sha1::digest(b"base").into(),
+            }],
+        };
+        assert!(publish_verified_base(&stage, &target, std::slice::from_ref(&manifest)).is_err());
+        assert!(target.is_dir());
+        assert!(!target.join("base.bin").exists());
+
+        fs::write(stage.join("base.bin"), b"base").unwrap();
+        fs::write(target.join("user-file"), b"preserve").unwrap();
+        assert!(publish_verified_base(&stage, &target, std::slice::from_ref(&manifest)).is_err());
+        assert_eq!(fs::read(target.join("user-file")).unwrap(), b"preserve");
+        fs::remove_file(target.join("user-file")).unwrap();
+        publish_verified_base(&stage, &target, &[manifest]).unwrap();
+        assert_eq!(fs::read(target.join("base.bin")).unwrap(), b"base");
+        assert!(!stage.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn dlc_progress_accumulates_across_content_app_groups() {

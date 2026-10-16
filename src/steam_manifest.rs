@@ -319,17 +319,10 @@ fn collect_staged_files(root: &Path, relative: &Path, files: &mut BTreeSet<PathB
     Ok(())
 }
 
-/// Verify the complete staged payload against every selected depot manifest.
-/// Reject unlisted files and conflicting path ownership before any game file is changed.
-pub fn verify_staged_exact(manifests: &[DepotManifest], staged_dir: &Path) -> Result<()> {
+fn expected_files(manifests: &[DepotManifest]) -> Result<BTreeSet<PathBuf>> {
     if manifests.is_empty() {
         return Err("No depot manifests were selected for staging verification".into());
     }
-    let metadata = fs::symlink_metadata(staged_dir)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err("DLC staging payload is not a regular directory".into());
-    }
-    let root = fs::canonicalize(staged_dir)?;
     let mut expected = BTreeMap::<String, &ManifestFile>::new();
     for manifest in manifests {
         for file in &manifest.files {
@@ -355,12 +348,28 @@ pub fn verify_staged_exact(manifests: &[DepotManifest], staged_dir: &Path) -> Re
             }
         }
     }
-    let mut staged = BTreeSet::new();
-    collect_staged_files(&root, Path::new(""), &mut staged)?;
-    let allowed = expected
+    Ok(expected
         .values()
         .map(|file| file.path.clone())
-        .collect::<BTreeSet<_>>();
+        .collect::<BTreeSet<_>>())
+}
+
+/// Check selected manifest paths and reject different-content or Windows case conflicts.
+pub fn validate_manifest_set(manifests: &[DepotManifest]) -> Result<()> {
+    expected_files(manifests).map(|_| ())
+}
+
+/// Verify the complete staged payload against every selected depot manifest.
+/// Reject unlisted files and conflicting path ownership before any game file is changed.
+pub fn verify_staged_exact(manifests: &[DepotManifest], staged_dir: &Path) -> Result<()> {
+    let allowed = expected_files(manifests)?;
+    let metadata = fs::symlink_metadata(staged_dir)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("DLC staging payload is not a regular directory".into());
+    }
+    let root = fs::canonicalize(staged_dir)?;
+    let mut staged = BTreeSet::new();
+    collect_staged_files(&root, Path::new(""), &mut staged)?;
     if let Some(extra) = staged.difference(&allowed).next() {
         return Err(format!(
             "Staged depot contains an unlisted file: {}",
@@ -481,6 +490,7 @@ mod tests {
         fs::write(&source, fixture("data/addon.bin", b"content")).unwrap();
         let manifest = read_manifest(&source, 200, 300).unwrap();
         let payload = root.join("payload");
+        validate_manifest_set(std::slice::from_ref(&manifest)).unwrap();
 
         let missing = verify_staged_exact(std::slice::from_ref(&manifest), &payload)
             .unwrap_err()
@@ -497,6 +507,7 @@ mod tests {
         let mut conflict = manifest.clone();
         conflict.depot_id = 201;
         conflict.files[0].sha1 = Sha1::digest(b"other").into();
+        assert!(validate_manifest_set(&[manifest.clone(), conflict.clone()]).is_err());
         let error = verify_staged_exact(&[manifest.clone(), conflict], &payload)
             .unwrap_err()
             .to_string();
