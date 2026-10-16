@@ -451,6 +451,8 @@ fn install_payload_unlocked(
 
 /// Download an explicit provider DLC archive and install it into its base game.
 pub fn install_catalog_dlc(game: &Game, data_dir: &Path, addon: &CatalogAddon) -> Result<usize> {
+    validate_id(&game.id)?;
+    validate_id(&addon.id)?;
     if addon.kind != AddonKind::Dlc || !addon.content_available {
         return Err("The selected provider has no downloadable content for this DLC".into());
     }
@@ -679,6 +681,48 @@ mod tests {
     use crate::{Library, Runner};
     use std::collections::BTreeMap;
     use std::process::Command;
+
+    #[test]
+    fn catalog_dlc_rejects_path_like_id_before_creating_staging() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-dlc-id-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let game = Game {
+            id: "base".into(),
+            title: "Base".into(),
+            install_dir: root.join("games/base"),
+            executable: PathBuf::from("base.exe"),
+            runner: Runner::Auto,
+            arguments: Vec::new(),
+            environment: BTreeMap::new(),
+            last_played_unix: None,
+            origin: None,
+            steam_app_id: None,
+            launch_options: Vec::new(),
+            selected_launch_option_id: None,
+            cover_url: None,
+            banner_url: None,
+        };
+        let addon = CatalogAddon {
+            id: "../escape".into(),
+            title: "Invalid DLC".into(),
+            kind: AddonKind::Dlc,
+            uri: Some("https://example.invalid/dlc.zip".into()),
+            filename: Some("dlc.zip".into()),
+            archive_parts: Vec::new(),
+            sha256: None,
+            archive_part_hashes: Vec::new(),
+            content_available: true,
+            referer: None,
+        };
+        assert!(install_catalog_dlc(&game, &root, &addon).is_err());
+        assert!(!root.join("dlc-downloads").exists());
+    }
 
     #[test]
     fn identical_shared_files_keep_their_original_owner() {
