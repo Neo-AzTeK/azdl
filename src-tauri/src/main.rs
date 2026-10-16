@@ -3262,9 +3262,11 @@ mod commands {
                     .as_ref()
                     .and_then(|origin| origin.qualified_id.split_once(':'))
                     .is_some_and(|(source, _)| source == "steamidra");
-                let base_receipt =
-                    azdl::steam_content::load_base_receipt(&data_dir, &game.id);
+                let base_receipt = azdl::steam_content::load_base_receipt(&data_dir, &game.id);
                 let needs_existing_check = steam_source && matches!(&base_receipt, Ok(None));
+                let receipt_error = base_receipt.is_err();
+                let revision_mismatch = matches!((&base_receipt, &appinfo), (Ok(Some(receipt)), Ok(metadata))
+                        if azdl::steam_content::validate_base_revision(receipt, metadata).is_err());
                 let steam_eligibility = if steam_source {
                     match base_receipt {
                         Ok(Some(receipt)) => match &appinfo {
@@ -3326,7 +3328,10 @@ mod commands {
                         }
                         _ => None,
                     };
-                    let can_check_content = steam_source && unavailable_reason.is_none();
+                    let can_check_content = steam_source
+                        && unavailable_reason.is_none()
+                        && !receipt_error
+                        && (!revision_mismatch || observed.is_some());
                     let manifest_count = related
                         .into_iter()
                         .flatten()
