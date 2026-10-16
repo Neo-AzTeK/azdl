@@ -23,6 +23,17 @@ pub struct BaseContentReceipt {
     pub game_id: String,
     pub app_id: u32,
     pub depots: Vec<DepotRevision>,
+    #[serde(default)]
+    pub origin: BaseReceiptOrigin,
+}
+
+/// How the base revision recorded in a receipt was established.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BaseReceiptOrigin {
+    #[default]
+    ManagedInstall,
+    VerifiedLegacy,
 }
 
 /// Read-only evidence that legacy DLC files matched an exact provider revision.
@@ -410,5 +421,25 @@ mod tests {
                 .is_none()
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_base_receipts_default_to_managed_origin() {
+        let old: BaseContentReceipt = serde_json::from_str(
+            r#"{"game_id":"steam-100","app_id":100,"depots":[{"depot_id":101,"manifest_id":"123"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.origin, BaseReceiptOrigin::ManagedInstall);
+        let migrated = BaseContentReceipt {
+            origin: BaseReceiptOrigin::VerifiedLegacy,
+            ..old
+        };
+        let encoded = serde_json::to_string(&migrated).unwrap();
+        assert_eq!(
+            serde_json::from_str::<BaseContentReceipt>(&encoded)
+                .unwrap()
+                .origin,
+            BaseReceiptOrigin::VerifiedLegacy
+        );
     }
 }

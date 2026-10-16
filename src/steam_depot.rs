@@ -521,6 +521,66 @@ pub fn download_steam_depots(
     Ok(())
 }
 
+/// Verify every target base depot in an older installation without changing game files.
+pub fn verify_legacy_base(
+    game: &Game,
+    root: &Path,
+    metadata: &crate::steam_metadata::SteamAppMetadata,
+) -> Result<crate::steam_content::BaseContentReceipt> {
+    let app_id = metadata.app_id;
+    let unpacked = fetch_provider_bundle(&root.join("base-verification-provider"), app_id)?;
+    let known = metadata
+        .depots
+        .iter()
+        .map(|depot| depot.depot_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let selected_ids = metadata
+        .depots
+        .iter()
+        .filter(|depot| depot.dlc_app_id.is_none())
+        .filter(|depot| crate::steam_content::matches_target(depot, "windows", "english"))
+        .map(|depot| depot.depot_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    let available = parse_lua_manifests_filtered(&unpacked, app_id, Some((&selected_ids, &known)))?;
+    if available.len() != selected_ids.len() {
+        return Err(format!(
+            "Cannot verify the old base game: provider manifests cover {} of {} required depots",
+            available.len(),
+            selected_ids.len()
+        )
+        .into());
+    }
+    let depots =
+        crate::steam_content::select_base_depots(&available, metadata, "windows", "english")?;
+    for depot in &depots {
+        let manifest = crate::steam_manifest::read_manifest(
+            &depot.manifest_path,
+            depot.depot_id,
+            depot.manifest_id,
+        )?;
+        let result = crate::steam_manifest::verify_installed(&manifest, &game.install_dir)?;
+        if !result.complete() {
+            return Err(format!(
+                "Base depot {} differs from the current provider manifest ({} missing, {} changed files); reinstall the base game before adding DLC",
+                depot.depot_id, result.missing, result.changed
+            )
+            .into());
+        }
+    }
+    Ok(crate::steam_content::BaseContentReceipt {
+        game_id: game.id.clone(),
+        app_id,
+        depots: depots
+            .iter()
+            .map(|depot| crate::steam_content::DepotRevision {
+                depot_id: depot.depot_id,
+                manifest_id: depot.manifest_id.to_string(),
+            })
+            .collect(),
+        origin: crate::steam_content::BaseReceiptOrigin::VerifiedLegacy,
+    })
+}
+
 /// Verify existing DLC files, or download selected depots into a managed base game.
 pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<usize> {
     validate_id(&game.id)?;
@@ -622,10 +682,15 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             return Ok(0);
         }
         crate::steam_content::clear_observation(data_dir, &game.id, dlc_id)?;
-        let receipt = receipt.as_ref().ok_or(
-            "DLC files are missing and the base game revision is unknown; reinstall the base game with azdl before adding this DLC",
-        )?;
-        crate::steam_content::validate_base_revision(receipt, &metadata)?;
+        let receipt = match receipt.as_ref() {
+            Some(receipt) => receipt.clone(),
+            None => {
+                let verified = verify_legacy_base(game, &root, &metadata)?;
+                crate::steam_content::save_base_receipt(data_dir, &verified)?;
+                verified
+            }
+        };
+        crate::steam_content::validate_base_revision(&receipt, &metadata)?;
         drop(check_lock);
         let lib_path = find_depotkit_library(data_dir).map_err(
             |_| "The selected download plugin does not provide a usable depot downloader",
@@ -922,6 +987,7 @@ pub fn install_steam_manifest_game_in(
                     manifest_id: depot.manifest_id.to_string(),
                 })
                 .collect(),
+            origin: crate::steam_content::BaseReceiptOrigin::ManagedInstall,
         },
     )?;
 

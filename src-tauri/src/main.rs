@@ -3217,7 +3217,7 @@ mod commands {
                             Err(error) => Err(error.to_string()),
                         },
                         Ok(None) => Err(
-                            "Base game content revision is unknown; a managed base install is required"
+                            "An older install needs a file check before missing DLC can be downloaded"
                                 .to_string(),
                         ),
                         Err(error) => Err(error.to_string()),
