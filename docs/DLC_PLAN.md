@@ -50,6 +50,8 @@ After staged manifest verification was added, an isolated copy of that real DLC 
 
 The current grouped staging path then passed `tests/live_dlc_install.rs` on a fresh isolated copy of the real base game on 2026-10-16. It verified the legacy base, downloaded DLC `3875100` (539,727,136 bytes), verified both the per-group and combined staging payloads, committed one managed file, removed it, and returned the copied base directory to its original file names and sizes. The 2.1 GB temporary copy was deleted. This covers a single content App ID through the new grouping path; multi-App shared depot transport, Windows runtime, and in-game access remain unverified.
 
+An offline two-App fixture now drives the same grouped staging loop as production with a controlled downloader. It verifies distinct content App IDs, exact per-group and combined bytes, cumulative progress, one DLC commit, and clean removal. A native multi-App download is still required for transport acceptance.
+
 ## Proposed core model
 
 Keep these concepts independent:

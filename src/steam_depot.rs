@@ -832,53 +832,25 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         fs::create_dir_all(&payload)?;
         drop(check_lock);
         (|| -> Result<usize> {
-            let mut completed_bytes = 0_u64;
-            for (content_app_id, group) in &downloads.groups {
-                crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
-                let group_dir = root.join(format!("group-{content_app_id}"));
-                remove_staging_dir(&group_dir)?;
-                fs::create_dir_all(&group_dir)?;
-                download_steam_depots_with_progress(
-                    &lib_path,
-                    &group_dir,
-                    *content_app_id,
-                    group,
-                    data_dir,
-                    &job_id,
-                    DownloadProgressSpan {
-                        completed_bytes,
-                        overall_bytes: (total_bytes > 0).then_some(total_bytes),
-                    },
-                )?;
-                normalize_windows_paths(&group_dir)?;
-                let group_manifests = group
-                    .iter()
-                    .map(|depot| {
-                        crate::steam_manifest::read_manifest(
-                            &depot.manifest_path,
-                            depot.depot_id,
-                            depot.manifest_id,
-                        )
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                crate::steam_manifest::verify_staged_exact(&group_manifests, &group_dir)?;
-                let group_bytes = group_manifests
-                    .iter()
-                    .flat_map(|manifest| &manifest.files)
-                    .try_fold(0_u64, |total, file| {
-                        total
-                            .checked_add(file.size)
-                            .ok_or("DLC group size exceeds u64")
-                    })?;
-                completed_bytes = completed_bytes
-                    .checked_add(group_bytes)
-                    .ok_or("DLC size exceeds u64")?;
-                let mut job = load_job(data_dir, &job_id)?;
-                job.progress_bytes = Some(job.progress_bytes.unwrap_or(0).max(completed_bytes));
-                save_job(data_dir, &job)?;
-                merge_verified_payload(&group_dir, &payload)?;
-            }
-            crate::steam_manifest::verify_staged_exact(&manifests, &payload)?;
+            stage_verified_dlc_groups_with(
+                data_dir,
+                &job_id,
+                &payload,
+                &downloads,
+                &manifests,
+                total_bytes,
+                |group_dir, content_app_id, group, span| {
+                    download_steam_depots_with_progress(
+                        &lib_path,
+                        group_dir,
+                        content_app_id,
+                        group,
+                        data_dir,
+                        &job_id,
+                        span,
+                    )
+                },
+            )?;
             crate::jobs::begin_dlc_commit(data_dir, &job_id)?;
             crate::dlc::install_staged(game, data_dir, &dlc_id.to_string(), &payload)
         })()
@@ -920,6 +892,64 @@ fn remove_staging_dir(path: &Path) -> Result<()> {
         Err(error) => return Err(error.into()),
     }
     Ok(())
+}
+
+fn stage_verified_dlc_groups_with(
+    data_dir: &Path,
+    job_id: &str,
+    payload: &Path,
+    downloads: &ResolvedDlcDownloads,
+    manifests: &[crate::steam_manifest::DepotManifest],
+    total_bytes: u64,
+    mut download: impl FnMut(&Path, u32, &[DepotInfo], DownloadProgressSpan) -> Result<()>,
+) -> Result<()> {
+    let root = payload
+        .parent()
+        .ok_or("DLC staging payload has no parent")?;
+    let mut completed_bytes = 0_u64;
+    for (content_app_id, group) in &downloads.groups {
+        crate::jobs::check_dlc_cancelled(data_dir, job_id)?;
+        let group_dir = root.join(format!("group-{content_app_id}"));
+        remove_staging_dir(&group_dir)?;
+        fs::create_dir_all(&group_dir)?;
+        download(
+            &group_dir,
+            *content_app_id,
+            group,
+            DownloadProgressSpan {
+                completed_bytes,
+                overall_bytes: (total_bytes > 0).then_some(total_bytes),
+            },
+        )?;
+        normalize_windows_paths(&group_dir)?;
+        let group_manifests = group
+            .iter()
+            .map(|depot| {
+                crate::steam_manifest::read_manifest(
+                    &depot.manifest_path,
+                    depot.depot_id,
+                    depot.manifest_id,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        crate::steam_manifest::verify_staged_exact(&group_manifests, &group_dir)?;
+        let group_bytes = group_manifests
+            .iter()
+            .flat_map(|manifest| &manifest.files)
+            .try_fold(0_u64, |total, file| {
+                total
+                    .checked_add(file.size)
+                    .ok_or("DLC group size exceeds u64")
+            })?;
+        completed_bytes = completed_bytes
+            .checked_add(group_bytes)
+            .ok_or("DLC size exceeds u64")?;
+        let mut job = load_job(data_dir, job_id)?;
+        job.progress_bytes = Some(job.progress_bytes.unwrap_or(0).max(completed_bytes));
+        save_job(data_dir, &job)?;
+        merge_verified_payload(&group_dir, payload)?;
+    }
+    crate::steam_manifest::verify_staged_exact(manifests, payload)
 }
 
 fn merge_verified_payload(source: &Path, target: &Path) -> Result<()> {
@@ -1732,6 +1762,140 @@ mod tests {
         merge_verified_payload(&conflict_dir, &combined).unwrap();
         assert!(verify_staged_exact(&[base, conflict], &combined).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn grouped_dlc_worker_uses_each_content_app_and_verifies_before_commit() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "azdl-grouped-dlc-worker-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = data_dir.join("dlc-downloads/game/900");
+        let payload = root.join("payload");
+        let provider = data_dir.join("provider");
+        fs::create_dir_all(&payload).unwrap();
+        fs::create_dir_all(&provider).unwrap();
+        let depot = |id: u32, app_id: u32, name: &str, body: &[u8]| {
+            let manifest_path = provider.join(format!("{id}_{app_id}.manifest"));
+            fs::write(
+                &manifest_path,
+                binary_manifest_fixture(id, u64::from(app_id), name, body),
+            )
+            .unwrap();
+            DepotInfo {
+                depot_id: id,
+                manifest_id: u64::from(app_id),
+                manifest_path,
+                depot_key: "0123456789abcdef0123456789abcdef".into(),
+            }
+        };
+        let first = depot(201, 100, "data/first.bin", b"first");
+        let second = depot(202, 200, "data/second.bin", b"second");
+        let downloads = ResolvedDlcDownloads {
+            groups: vec![(100, vec![first.clone()]), (200, vec![second.clone()])],
+            depots: vec![first, second],
+        };
+        let manifests = downloads
+            .depots
+            .iter()
+            .map(|depot| {
+                crate::steam_manifest::read_manifest(
+                    &depot.manifest_path,
+                    depot.depot_id,
+                    depot.manifest_id,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        crate::steam_manifest::validate_manifest_set(&manifests).unwrap();
+        let job_id = job_id_for_target(&payload);
+        save_job(
+            &data_dir,
+            &DownloadJob {
+                id: job_id.clone(),
+                kind: JobKind::Dlc,
+                url: "steam://100/dlc/900".into(),
+                target: payload.clone(),
+                status: JobStatus::Running,
+                pid: Some(std::process::id()),
+                error: None,
+                updated_unix: now().unwrap(),
+                expected_sha256: None,
+                install: None,
+                install_state: Some(InstallState::Pending),
+                install_error: None,
+                progress_bytes: Some(0),
+                total_bytes: Some(11),
+            },
+        )
+        .unwrap();
+        let mut calls = Vec::new();
+        stage_verified_dlc_groups_with(
+            &data_dir,
+            &job_id,
+            &payload,
+            &downloads,
+            &manifests,
+            11,
+            |group_dir, app_id, depots, span| {
+                calls.push((
+                    app_id,
+                    depots[0].depot_id,
+                    span.completed_bytes,
+                    span.overall_bytes,
+                ));
+                fs::create_dir_all(group_dir.join("data"))?;
+                let (name, body): (&str, &[u8]) = match app_id {
+                    100 => ("first.bin", b"first"),
+                    200 => ("second.bin", b"second"),
+                    _ => panic!("unexpected content App ID"),
+                };
+                fs::write(group_dir.join("data").join(name), body)?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            calls,
+            vec![(100, 201, 0, Some(11)), (200, 202, 5, Some(11))]
+        );
+        assert_eq!(
+            load_job(&data_dir, &job_id).unwrap().progress_bytes,
+            Some(11)
+        );
+        crate::jobs::begin_dlc_commit(&data_dir, &job_id).unwrap();
+        let game_dir = data_dir.join("game");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("game.exe"), b"base").unwrap();
+        let game = Game {
+            id: "game".into(),
+            title: "Game".into(),
+            install_dir: game_dir.clone(),
+            executable: PathBuf::from("game.exe"),
+            runner: crate::Runner::Auto,
+            arguments: Vec::new(),
+            environment: Default::default(),
+            last_played_unix: None,
+            origin: None,
+            steam_app_id: Some(100),
+            launch_options: Vec::new(),
+            selected_launch_option_id: None,
+            cover_url: None,
+            banner_url: None,
+        };
+        assert_eq!(
+            crate::dlc::install_staged(&game, &data_dir, "900", &payload).unwrap(),
+            2
+        );
+        crate::dlc::remove(&game, &data_dir, "900").unwrap();
+        assert_eq!(fs::read(game_dir.join("game.exe")).unwrap(), b"base");
+        assert!(!game_dir.join("data/first.bin").exists());
+        assert!(!game_dir.join("data/second.bin").exists());
+        fs::remove_dir_all(data_dir).unwrap();
     }
 
     #[test]
