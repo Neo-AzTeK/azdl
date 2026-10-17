@@ -298,6 +298,17 @@ pub fn install_staged(
     dlc_id: &str,
     source_dir: &Path,
 ) -> Result<usize> {
+    install_staged_with_guard(game, data_dir, dlc_id, source_dir, || Ok(()))
+}
+
+/// Commit staged files after a final precondition check under the game content lock.
+pub(crate) fn install_staged_with_guard(
+    game: &Game,
+    data_dir: &Path,
+    dlc_id: &str,
+    source_dir: &Path,
+    guard: impl FnOnce() -> Result<()>,
+) -> Result<usize> {
     validate_id(&game.id)?;
     validate_id(dlc_id)?;
     let _lock = lock_game(data_dir, &game.id)?;
@@ -305,6 +316,7 @@ pub fn install_staged(
     if !source_dir.is_dir() {
         return Err("DLC staging directory is missing".into());
     }
+    guard()?;
     install_payload_unlocked(game, data_dir, dlc_id, |payload| {
         let mut files = Vec::new();
         collect_files(&source_dir, &source_dir, &mut files)?;

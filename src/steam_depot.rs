@@ -856,8 +856,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
                     )
                 },
             )?;
-            crate::jobs::begin_dlc_commit(data_dir, &job_id)?;
-            crate::dlc::install_staged(game, data_dir, &dlc_id.to_string(), &payload)
+            commit_steam_dlc(game, data_dir, dlc_id, &payload, &receipt, &job_id)
         })()
     })();
     let cleanup = remove_staging_dir(&root);
@@ -955,6 +954,26 @@ fn stage_verified_dlc_groups_with(
         merge_verified_payload(&group_dir, payload)?;
     }
     crate::steam_manifest::verify_staged_exact(manifests, payload)
+}
+
+fn commit_steam_dlc(
+    game: &Game,
+    data_dir: &Path,
+    dlc_id: u32,
+    payload: &Path,
+    expected_base: &crate::steam_content::BaseContentReceipt,
+    job_id: &str,
+) -> Result<usize> {
+    crate::dlc::install_staged_with_guard(game, data_dir, &dlc_id.to_string(), payload, || {
+        let current = crate::steam_content::load_base_receipt(data_dir, &game.id)?;
+        if current.as_ref() != Some(expected_base) {
+            return Err(
+                "Base game revision changed during the DLC download; retry against the current base"
+                    .into(),
+            );
+        }
+        crate::jobs::begin_dlc_commit(data_dir, job_id)
+    })
 }
 
 fn merge_verified_payload(source: &Path, target: &Path) -> Result<()> {
@@ -1910,7 +1929,6 @@ mod tests {
             load_job(&data_dir, &job_id).unwrap().progress_bytes,
             Some(11)
         );
-        crate::jobs::begin_dlc_commit(&data_dir, &job_id).unwrap();
         let game_dir = data_dir.join("game");
         fs::create_dir_all(&game_dir).unwrap();
         fs::write(game_dir.join("game.exe"), b"base").unwrap();
@@ -1930,8 +1948,30 @@ mod tests {
             cover_url: None,
             banner_url: None,
         };
+        let base = crate::steam_content::BaseContentReceipt {
+            game_id: game.id.clone(),
+            app_id: 100,
+            depots: vec![crate::steam_content::DepotRevision {
+                depot_id: 101,
+                manifest_id: "11".into(),
+            }],
+            origin: crate::steam_content::BaseReceiptOrigin::ManagedInstall,
+        };
+        let mut changed = base.clone();
+        changed.depots[0].manifest_id = "12".into();
+        crate::steam_content::save_base_receipt(&data_dir, &changed).unwrap();
+        let error = commit_steam_dlc(&game, &data_dir, 900, &payload, &base, &job_id)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Base game revision changed"), "{error}");
+        assert!(!game_dir.join("data/first.bin").exists());
         assert_eq!(
-            crate::dlc::install_staged(&game, &data_dir, "900", &payload).unwrap(),
+            load_job(&data_dir, &job_id).unwrap().install_state,
+            Some(InstallState::Pending)
+        );
+        crate::steam_content::save_base_receipt(&data_dir, &base).unwrap();
+        assert_eq!(
+            commit_steam_dlc(&game, &data_dir, 900, &payload, &base, &job_id).unwrap(),
             2
         );
         crate::dlc::remove(&game, &data_dir, "900").unwrap();
