@@ -35,10 +35,13 @@ const MAX_METADATA_CACHE_ENTRIES: usize = 2048;
 const FIX_STATUS_CACHE_TTL: Duration = Duration::from_secs(15);
 
 fn steam_dlc_provider_status(data_dir: &Path, source: Option<&str>) -> Result<(), String> {
-    if source != Some("steamidra") {
+    let source_id = source.unwrap_or("steamidra");
+    if source_id != "steamidra"
+        && !azdl::plugins::plugin_has_capability(data_dir, source_id, "steam_depot_download")
+    {
         return Err("This game's source does not provide Steam depot DLC".to_string());
     }
-    azdl::steam_depot::find_depotkit_library(data_dir)
+    azdl::steam_depot::find_depotkit_library_for(data_dir, source_id)
         .map(|_| ())
         .map_err(|_| {
             "The selected download plugin is missing or has no usable depot downloader".to_string()

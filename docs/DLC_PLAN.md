@@ -129,6 +129,8 @@ Completion evidence: shared files, different-content overlays, DLC A/B removal o
 
 Move the hardcoded manifest-provider URL and downloader discovery behind the game's selected source adapter. Define structured metadata and artifact-resolution capabilities, then implement them for the existing Steam path. Bind engine selection to an explicit provider capability instead of selecting any installed library with a matching symbol. Keep archive delivery compatible.
 
+Manifest bundle download URLs are now dynamically derived from the selected plugin's declared `catalogUrl` or `downloadUrl`, removing the hardcoded provider endpoint while preserving compatibility. Downloader discovery is gated by explicit provider capability (`steam_depot_download`), checked in both the core and the desktop status check, with offline capability and URL derivation tests.
+
 A provider that needs its own download process can later implement the versioned session ABI described in [DLC.md](DLC.md), with staging, progress, cancellation, and artifact receipts. Implementing that ABI is independent of the Steam subset downloader. Built-in content and server-managed content remain explicit delivery states; this plan does not equate a metadata entry with an installable artifact.
 
 ## First deliverable and validation boundary

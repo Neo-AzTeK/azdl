@@ -75,12 +75,25 @@ fn validate_manifest_archive(path: &Path, app_id: u32) -> Result<()> {
 }
 
 fn fetch_provider_bundle(root: &Path, app_id: u32) -> Result<PathBuf> {
+    fetch_provider_bundle_for(None, "steamidra", root, app_id)
+}
+
+fn fetch_provider_bundle_for(
+    data_dir: Option<&Path>,
+    plugin_id: &str,
+    root: &Path,
+    app_id: u32,
+) -> Result<PathBuf> {
     fs::create_dir_all(root)?;
     let archive = root.join(format!("{app_id}.zip"));
     if fs::symlink_metadata(&archive).is_ok_and(|meta| meta.file_type().is_symlink()) {
         return Err("Manifest archive path is a symbolic link".into());
     }
-    let url = format!("https://ryuu.badkiko.ru/v1/download/{app_id}");
+    let url = if let Some(dir) = data_dir {
+        crate::plugins::manifest_download_url_for_plugin(dir, plugin_id, app_id)
+    } else {
+        format!("https://ryuu.badkiko.ru/v1/download/{app_id}")
+    };
     if !archive.is_file() || archive.metadata()?.len() == 0 {
         let output = clean_command("curl")
             .args([
@@ -298,12 +311,29 @@ fn has_depotkit_symbol(path: &Path) -> bool {
     }
 }
 
-/// Find the native Steam depot engine declared by the installed steamidra plugin.
+/// Find the native Steam depot engine declared by the installed provider plugin.
 pub fn find_depotkit_library(data_dir: &Path) -> Result<PathBuf> {
-    let path = crate::plugins::installed_library_file(data_dir, "steamidra")
-        .map_err(|_| "Steam depot downloader engine not found in the installed steamidra plugin")?;
+    find_depotkit_library_for(data_dir, "steamidra")
+}
+
+/// Find the native Steam depot engine declared by an installed plugin with depot download capability.
+pub fn find_depotkit_library_for(data_dir: &Path, plugin_id: &str) -> Result<PathBuf> {
+    let path = crate::plugins::installed_library_file(data_dir, plugin_id).map_err(|_| {
+        format!("Steam depot downloader engine not found in the installed {plugin_id} plugin")
+    })?;
+    if plugin_id != "steamidra"
+        && !crate::plugins::plugin_has_capability(data_dir, plugin_id, "steam_depot_download")
+    {
+        return Err(format!(
+            "The installed {plugin_id} plugin does not declare depot download capability"
+        )
+        .into());
+    }
     if !has_depotkit_symbol(&path) {
-        return Err("The installed steamidra plugin does not provide a depot downloader".into());
+        return Err(format!(
+            "The installed {plugin_id} plugin does not provide a depot downloader"
+        )
+        .into());
     }
     Ok(path)
 }
@@ -856,7 +886,13 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         )?;
         crate::steam_manifest::check_additive_install(&manifests, &game.install_dir)?;
         crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
-        let lib_path = find_depotkit_library(data_dir).map_err(
+        let plugin_id = game
+            .origin
+            .as_ref()
+            .and_then(|o| o.qualified_id.split_once(':'))
+            .map(|(p, _)| p)
+            .unwrap_or("steamidra");
+        let lib_path = find_depotkit_library_for(data_dir, plugin_id).map_err(
             |_| "The selected download plugin does not provide a usable depot downloader",
         )?;
         let mut job = load_job(data_dir, &job_id)?;
@@ -1206,7 +1242,13 @@ fn install_steam_manifest_game_in_inner(
 ) -> Result<InstallOutcome> {
     prepare_base_scratch(data_dir, download_dir)?;
 
-    let manifest_url = format!("https://ryuu.badkiko.ru/v1/download/{app_id}");
+    let plugin_id = if game.source_id.is_empty() {
+        "steamidra"
+    } else {
+        &game.source_id
+    };
+    let manifest_url =
+        crate::plugins::manifest_download_url_for_plugin(data_dir, plugin_id, app_id);
     let manifest_zip = download_dir.join(format!("{app_id}.zip"));
     if !manifest_zip.is_file() || manifest_zip.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
         let output = clean_command("curl")
