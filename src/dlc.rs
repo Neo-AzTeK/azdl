@@ -9,6 +9,7 @@ use crate::jobs::{
 use crate::sha256::file_sha256;
 use crate::{Game, Result, validate_id};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -26,6 +27,9 @@ pub struct DlcFile {
     /// Whether this transaction created the target rather than reusing existing bytes.
     #[serde(default = "default_true")]
     pub created: bool,
+    /// SHA-256 of the base file saved under `backup/` before an archive overlay.
+    #[serde(default)]
+    pub backup_sha256: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -270,7 +274,7 @@ fn ensure_no_interrupted(game: &Game, data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Install an additive DLC archive. Existing game files are never overwritten.
+/// Install a DLC archive, preserving replaced base files for recovery and removal.
 pub fn install_archive(
     game: &Game,
     data_dir: &Path,
@@ -293,7 +297,7 @@ fn install_archive_unlocked(
     if !archive.is_file() {
         return Err("DLC archive is missing".into());
     }
-    install_payload_unlocked(game, data_dir, dlc_id, |payload| {
+    install_payload_unlocked(game, data_dir, dlc_id, true, |payload| {
         extract_checked(&archive, payload)
     })
 }
@@ -324,7 +328,7 @@ pub(crate) fn install_staged_with_guard(
         return Err("DLC staging directory is missing".into());
     }
     guard()?;
-    install_payload_unlocked(game, data_dir, dlc_id, |payload| {
+    install_payload_unlocked(game, data_dir, dlc_id, false, |payload| {
         let mut files = Vec::new();
         collect_files(&source_dir, &source_dir, &mut files)?;
         for relative in files {
@@ -341,6 +345,7 @@ fn install_payload_unlocked(
     game: &Game,
     data_dir: &Path,
     dlc_id: &str,
+    allow_base_overlay: bool,
     prepare_payload: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<usize> {
     let install = fs::canonicalize(&game.install_dir)?;
@@ -372,17 +377,61 @@ fn install_payload_unlocked(
             .map(|id| read_manifest(&state_dir(data_dir, &game.id, &id), game, &id))
             .collect::<Result<Vec<_>>>()?;
         let mut entries = Vec::with_capacity(files.len());
+        let mut portable_paths = BTreeSet::new();
         for relative in files {
+            let portable = relative.to_string_lossy().replace('\\', "/").to_lowercase();
+            if !portable_paths.insert(portable.clone()) {
+                return Err("DLC files collide on Windows".into());
+            }
+            if installed_manifests
+                .iter()
+                .flat_map(|manifest| &manifest.files)
+                .any(|file| {
+                    file.path != relative
+                        && file
+                            .path
+                            .to_string_lossy()
+                            .replace('\\', "/")
+                            .to_lowercase()
+                            == portable
+                })
+            {
+                return Err("DLC file path collides with an installed DLC on Windows".into());
+            }
             let target = check_target(&install, &relative)?;
             let sha256 = file_sha256(&payload.join(&relative))?;
+            let references = installed_manifests
+                .iter()
+                .flat_map(|manifest| &manifest.files)
+                .filter(|file| file.path == relative)
+                .collect::<Vec<_>>();
+            if references.iter().any(|file| file.backup_sha256.is_some()) {
+                return Err(
+                    format!("Another DLC overlay already owns {}", relative.display()).into(),
+                );
+            }
+            let mut backup_sha256 = None;
             let created = match fs::symlink_metadata(&target) {
                 Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
-                    if file_sha256(&target)? != sha256 {
-                        return Err(format!(
-                            "DLC conflicts with an existing game file: {}",
-                            relative.display()
-                        )
-                        .into());
+                    let existing_hash = file_sha256(&target)?;
+                    if existing_hash != sha256 {
+                        if !allow_base_overlay || !references.is_empty() {
+                            return Err(format!(
+                                "DLC conflicts with an existing game file: {}",
+                                relative.display()
+                            )
+                            .into());
+                        }
+                        let backup = staging.join("backup").join(&relative);
+                        fs::create_dir_all(backup.parent().ok_or("invalid DLC backup path")?)?;
+                        fs::copy(&target, &backup)?;
+                        File::open(&backup)?.sync_all()?;
+                        if file_sha256(&backup)? != existing_hash
+                            || file_sha256(&target)? != existing_hash
+                        {
+                            return Err("Base file changed while preparing DLC backup".into());
+                        }
+                        backup_sha256 = Some(existing_hash);
                     }
                     false
                 }
@@ -391,22 +440,22 @@ fn install_payload_unlocked(
                 Err(error) => return Err(error.into()),
             };
             let managed = created
-                || installed_manifests.iter().any(|manifest| {
-                    manifest
-                        .files
-                        .iter()
-                        .any(|file| file.path == relative && file.sha256 == sha256 && file.managed)
-                });
+                || backup_sha256.is_some()
+                || references
+                    .iter()
+                    .any(|file| file.sha256 == sha256 && file.managed);
             let name = relative
                 .file_name()
                 .ok_or("DLC file has no name")?
                 .to_string_lossy();
-            let staged_path = if created {
+            let staged_path = if created || backup_sha256.is_some() {
                 relative.with_file_name(format!(".{name}.azdl-{dlc_id}-{nonce}.partial"))
             } else {
                 PathBuf::new()
             };
-            if created && fs::symlink_metadata(check_target(&install, &staged_path)?).is_ok() {
+            if !staged_path.as_os_str().is_empty()
+                && fs::symlink_metadata(check_target(&install, &staged_path)?).is_ok()
+            {
                 return Err("DLC staging path already exists".into());
             }
             entries.push(DlcFile {
@@ -415,7 +464,17 @@ fn install_payload_unlocked(
                 staged_path,
                 managed,
                 created,
+                backup_sha256,
             });
+        }
+        for portable in &portable_paths {
+            let mut parent = portable.as_str();
+            while let Some(split) = parent.rfind('/') {
+                parent = &parent[..split];
+                if portable_paths.contains(parent) {
+                    return Err("DLC files use a file as a directory on Windows".into());
+                }
+            }
         }
         let manifest = DlcManifest {
             game_id: game.id.clone(),
@@ -429,7 +488,7 @@ fn install_payload_unlocked(
         output.sync_all()?;
         fs::rename(&staging, &state)?;
         for entry in &manifest.files {
-            if !entry.created {
+            if !entry.created && entry.backup_sha256.is_none() {
                 let target = check_target(&install, &entry.path)?;
                 if file_sha256(&target)? != entry.sha256 {
                     return Err("Shared DLC file changed during installation".into());
@@ -438,7 +497,11 @@ fn install_payload_unlocked(
             }
             let target = check_target(&install, &entry.path)?;
             let staged_target = check_target(&install, &entry.staged_path)?;
-            if fs::symlink_metadata(&target).is_ok() {
+            if let Some(backup_hash) = &entry.backup_sha256 {
+                if file_sha256(&target)? != *backup_hash {
+                    return Err("Base file changed during DLC installation".into());
+                }
+            } else if fs::symlink_metadata(&target).is_ok() {
                 return Err("DLC target changed during installation".into());
             }
             fs::create_dir_all(target.parent().ok_or("invalid DLC target")?)?;
@@ -453,7 +516,12 @@ fn install_payload_unlocked(
                 return Err(error.into());
             }
             drop(output);
-            if fs::symlink_metadata(&target).is_ok() {
+            if let Some(backup_hash) = &entry.backup_sha256 {
+                if file_sha256(&target)? != *backup_hash {
+                    return Err("Base file changed during DLC installation".into());
+                }
+                fs::remove_file(&target)?;
+            } else if fs::symlink_metadata(&target).is_ok() {
                 return Err("DLC target changed during installation".into());
             }
             if fs::hard_link(&staged_target, &target).is_err() {
@@ -744,11 +812,15 @@ fn recover_unlocked(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
     // Verify all installed targets before deleting staging files or the state record.
     let mut partial = Vec::new();
     for file in &manifest.files {
-        if !file.created {
+        if !file.created && file.backup_sha256.is_none() {
             continue;
         }
         let target = check_target(&manifest.install_dir, &file.path)?;
-        if target.exists() && file_sha256(&target)? != file.sha256 {
+        if target.exists() {
+            let current_hash = file_sha256(&target)?;
+            if current_hash == file.sha256 || file.backup_sha256.as_ref() == Some(&current_hash) {
+                continue;
+            }
             let payload = state.join("payload").join(&file.path);
             if !fs::symlink_metadata(&payload)
                 .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
@@ -834,20 +906,80 @@ fn remove_unlocked(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
         .map(|id| read_manifest(&state_dir(data_dir, &game.id, &id), game, &id))
         .collect::<Result<Vec<_>>>()?;
     for file in &manifest.files {
-        if !file.managed || (!complete && !file.created) {
+        if !file.managed || (!complete && !file.created && file.backup_sha256.is_none()) {
             continue;
         }
         let target = check_target(install, &file.path)?;
-        if target.exists() && file_sha256(&target)? != file.sha256 {
-            return Err(format!(
-                "DLC file has been modified; cannot safely remove {}",
-                file.path.display()
-            )
-            .into());
+        if let Some(backup_hash) = &file.backup_sha256 {
+            let backup = check_target(&state, &Path::new("backup").join(&file.path))?;
+            let metadata = fs::symlink_metadata(&backup)?;
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || file_sha256(&backup)? != *backup_hash
+            {
+                return Err("DLC base backup is missing or changed".into());
+            }
+        }
+        if target.exists() {
+            let current_hash = file_sha256(&target)?;
+            if current_hash != file.sha256 && file.backup_sha256.as_ref() != Some(&current_hash) {
+                return Err(format!(
+                    "DLC file has been modified; cannot safely remove {}",
+                    file.path.display()
+                )
+                .into());
+            }
         }
     }
     for file in manifest.files.iter().rev() {
-        if !file.managed || (!complete && !file.created) {
+        if !file.managed || (!complete && !file.created && file.backup_sha256.is_none()) {
+            continue;
+        }
+        if let Some(backup_hash) = &file.backup_sha256 {
+            if other_manifests
+                .iter()
+                .any(|other| other.files.iter().any(|entry| entry.path == file.path))
+            {
+                return Err("Another DLC depends on the file being restored".into());
+            }
+            let target = check_target(install, &file.path)?;
+            let staged = check_target(install, &file.staged_path)?;
+            let backup = check_target(&state, &Path::new("backup").join(&file.path))?;
+            match fs::symlink_metadata(&staged) {
+                Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
+                    fs::remove_file(&staged)?;
+                }
+                Ok(_) => return Err("DLC restore staging path is not a regular file".into()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            let mut source = File::open(&backup)?;
+            let mut output = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged)?;
+            io::copy(&mut source, &mut output)?;
+            output.sync_all()?;
+            drop(output);
+            if file_sha256(&staged)? != *backup_hash {
+                return Err("DLC restore staging file does not match backup".into());
+            }
+            if target.exists() {
+                let current_hash = file_sha256(&target)?;
+                if current_hash == *backup_hash {
+                    fs::remove_file(staged)?;
+                    continue;
+                }
+                if current_hash != file.sha256 {
+                    return Err(format!(
+                        "DLC file has been modified; cannot safely remove {}",
+                        file.path.display()
+                    )
+                    .into());
+                }
+                fs::remove_file(&target)?;
+            }
+            fs::rename(staged, target)?;
             continue;
         }
         if other_manifests.iter().any(|manifest| {
@@ -882,6 +1014,84 @@ mod tests {
     use crate::{Library, Runner};
     use std::collections::BTreeMap;
     use std::process::Command;
+
+    #[test]
+    fn archive_overlay_restores_base_after_move_and_interruption() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-dlc-overlay-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let data_dir = root.join("data");
+        let install_dir = root.join("games/base");
+        fs::create_dir_all(install_dir.join("content")).unwrap();
+        fs::write(install_dir.join("content/shared.bin"), b"base").unwrap();
+        let mut game = Game {
+            id: "base".into(),
+            title: "Base".into(),
+            install_dir,
+            executable: PathBuf::from("base.exe"),
+            runner: Runner::Auto,
+            arguments: Vec::new(),
+            environment: BTreeMap::new(),
+            last_played_unix: None,
+            origin: None,
+            steam_app_id: None,
+            launch_options: Vec::new(),
+            selected_launch_option_id: None,
+            cover_url: None,
+            banner_url: None,
+        };
+        let install_overlay = |game: &Game, id: &str| {
+            install_payload_unlocked(game, &data_dir, id, true, |payload| {
+                fs::create_dir_all(payload.join("content"))?;
+                fs::write(payload.join("content/shared.bin"), b"addon")?;
+                Ok(())
+            })
+        };
+        assert_eq!(install_overlay(&game, "addon").unwrap(), 1);
+        assert_eq!(
+            fs::read(game.install_dir.join("content/shared.bin")).unwrap(),
+            b"addon"
+        );
+        let state = state_dir(&data_dir, &game.id, "addon");
+        assert_eq!(
+            fs::read(state.join("backup/content/shared.bin")).unwrap(),
+            b"base"
+        );
+        let error = install_overlay(&game, "other").unwrap_err().to_string();
+        assert!(error.contains("overlay already owns"), "{error}");
+        fs::write(game.install_dir.join("content/shared.bin"), b"user edit").unwrap();
+        assert!(remove(&game, &data_dir, "addon").is_err());
+        assert_eq!(
+            fs::read(game.install_dir.join("content/shared.bin")).unwrap(),
+            b"user edit"
+        );
+        fs::write(game.install_dir.join("content/shared.bin"), b"addon").unwrap();
+        prepare_move(&game, &data_dir).unwrap();
+        let moved = root.join("moved/base");
+        fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        fs::rename(&game.install_dir, &moved).unwrap();
+        game.install_dir = moved;
+        remove(&game, &data_dir, "addon").unwrap();
+        assert_eq!(
+            fs::read(game.install_dir.join("content/shared.bin")).unwrap(),
+            b"base"
+        );
+        assert_eq!(install_overlay(&game, "addon").unwrap(), 1);
+        fs::remove_file(state.join("complete")).unwrap();
+        fs::remove_file(game.install_dir.join("content/shared.bin")).unwrap();
+        recover_interrupted(&game, &data_dir, "addon").unwrap();
+        assert_eq!(
+            fs::read(game.install_dir.join("content/shared.bin")).unwrap(),
+            b"base"
+        );
+        assert!(!state.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn catalog_dlc_rejects_path_like_id_before_creating_staging() {
