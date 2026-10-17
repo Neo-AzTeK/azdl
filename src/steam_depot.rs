@@ -753,6 +753,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
                 )
             })
             .collect::<Result<Vec<_>>>()?;
+        crate::steam_manifest::validate_manifest_set(&manifests)?;
         let total_bytes = manifests
             .iter()
             .flat_map(|manifest| &manifest.files)

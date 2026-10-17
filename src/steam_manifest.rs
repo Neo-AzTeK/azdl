@@ -334,7 +334,11 @@ fn expected_files(manifests: &[DepotManifest]) -> Result<BTreeSet<PathBuf>> {
             {
                 return Err("Selected depot manifest has an unsafe file path".into());
             }
-            let portable = file.path.to_string_lossy().to_lowercase();
+            let portable = file
+                .path
+                .to_string_lossy()
+                .replace('\\', "/")
+                .to_lowercase();
             if let Some(previous) = expected.insert(portable, file)
                 && (previous.path != file.path
                     || previous.size != file.size
@@ -342,6 +346,19 @@ fn expected_files(manifests: &[DepotManifest]) -> Result<BTreeSet<PathBuf>> {
             {
                 return Err(format!(
                     "Selected depots require conflicting content at {}",
+                    file.path.display()
+                )
+                .into());
+            }
+        }
+    }
+    for (portable, file) in &expected {
+        let mut parent = portable.as_str();
+        while let Some(split) = parent.rfind('/') {
+            parent = &parent[..split];
+            if expected.contains_key(parent) {
+                return Err(format!(
+                    "Selected depots use a file as a directory at {}",
                     file.path.display()
                 )
                 .into());
@@ -393,6 +410,31 @@ pub fn verify_staged_exact(manifests: &[DepotManifest], staged_dir: &Path) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_manifests_reject_file_directory_and_case_conflicts() {
+        let manifest = |depot_id, path: &str| DepotManifest {
+            depot_id,
+            manifest_id: u64::from(depot_id),
+            files: vec![ManifestFile {
+                path: PathBuf::from(path),
+                size: 4,
+                sha1: Sha1::digest(b"data").into(),
+            }],
+        };
+        let child = manifest(101, "data/addon.bin");
+        let parent_file = manifest(102, "data");
+        let error = validate_manifest_set(&[child.clone(), parent_file])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("file as a directory"), "{error}");
+
+        let case_conflict = manifest(103, "DATA/addon.bin");
+        let error = validate_manifest_set(&[child, case_conflict])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("conflicting content"), "{error}");
+    }
 
     fn encode_varint(mut value: u64) -> Vec<u8> {
         let mut output = Vec::new();
