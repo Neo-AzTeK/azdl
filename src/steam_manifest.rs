@@ -199,11 +199,13 @@ pub fn read_manifest(
     let mut depot_id = None;
     let mut manifest_id = None;
     let mut encrypted = false;
+    let mut clear_crc = None;
     for (number, value) in fields(metadata)? {
         match (number, value) {
             (1, Field::Number(value)) => depot_id = Some(u32::try_from(value)?),
             (2, Field::Number(value)) => manifest_id = Some(value),
             (4, Field::Number(value)) => encrypted = value != 0,
+            (9, Field::Number(value)) => clear_crc = Some(u32::try_from(value)?),
             _ => {}
         }
     }
@@ -212,6 +214,15 @@ pub fn read_manifest(
     }
     if encrypted {
         return Err("Depot manifest filenames are encrypted".into());
+    }
+    if let Some(expected_crc) = clear_crc {
+        let payload_len = u32::try_from(payload.len())?;
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&payload_len.to_le_bytes());
+        hasher.update(payload);
+        if hasher.finalize() != expected_crc {
+            return Err("Depot manifest payload CRC does not match metadata".into());
+        }
     }
     let mut files = Vec::new();
     for (number, value) in fields(payload)? {
@@ -473,11 +484,41 @@ mod tests {
         let payload = bytes(1, &file);
         let mut metadata = number(1, 200);
         metadata.extend(number(2, 300));
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&(payload.len() as u32).to_le_bytes());
+        hasher.update(&payload);
+        metadata.extend(number(9, u64::from(hasher.finalize())));
         let mut result = section(PAYLOAD_MAGIC, &payload);
         result.extend(section(METADATA_MAGIC, &metadata));
         result.extend(section(SIGNATURE_MAGIC, &[]));
         result.extend(END_MAGIC.to_le_bytes());
         result
+    }
+
+    #[test]
+    fn manifest_rejects_payload_changed_after_crc_was_recorded() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-manifest-crc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("depot.manifest");
+        let mut bytes = fixture("data/addon.bin", b"content");
+        fs::write(&source, &bytes).unwrap();
+        read_manifest(&source, 200, 300).unwrap();
+        let index = bytes
+            .windows(b"data/addon.bin".len())
+            .position(|window| window == b"data/addon.bin")
+            .unwrap();
+        bytes[index] = b'D';
+        fs::write(&source, bytes).unwrap();
+        let error = read_manifest(&source, 200, 300).unwrap_err().to_string();
+        assert!(error.contains("payload CRC"), "{error}");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
