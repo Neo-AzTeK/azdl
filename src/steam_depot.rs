@@ -939,6 +939,22 @@ fn publish_verified_base(
     Ok(())
 }
 
+fn save_new_base_receipt_with(
+    target: &Path,
+    manifests: &[crate::steam_manifest::DepotManifest],
+    save: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if let Err(error) = save() {
+        let rollback = crate::steam_manifest::verify_staged_exact(manifests, target)
+            .and_then(|_| remove_staging_dir(target));
+        return match rollback {
+            Ok(()) => Err(format!("Base receipt could not be saved; verified new files were removed: {error}").into()),
+            Err(rollback_error) => Err(format!("Base receipt could not be saved: {error}; published files were retained because safe rollback failed: {rollback_error}").into()),
+        };
+    }
+    Ok(())
+}
+
 fn finish_base_install<T>(result: Result<T>, scratch: &Path) -> Result<T> {
     let cleanup = remove_staging_dir(scratch);
     match (result, cleanup) {
@@ -1285,22 +1301,30 @@ fn install_steam_manifest_game_in_inner(
         }
         return Err(e);
     }
-    crate::steam_content::save_base_receipt(
-        data_dir,
-        &crate::steam_content::BaseContentReceipt {
-            game_id: game.id.clone(),
-            app_id,
-            depots: downloads
-                .depots
-                .iter()
-                .map(|depot| crate::steam_content::DepotRevision {
-                    depot_id: depot.depot_id,
-                    manifest_id: depot.manifest_id.to_string(),
-                })
-                .collect(),
-            origin: crate::steam_content::BaseReceiptOrigin::ManagedInstall,
-        },
-    )?;
+    let receipt = crate::steam_content::BaseContentReceipt {
+        game_id: game.id.clone(),
+        app_id,
+        depots: downloads
+            .depots
+            .iter()
+            .map(|depot| crate::steam_content::DepotRevision {
+                depot_id: depot.depot_id,
+                manifest_id: depot.manifest_id.to_string(),
+            })
+            .collect(),
+        origin: crate::steam_content::BaseReceiptOrigin::ManagedInstall,
+    };
+    if let Err(error) = save_new_base_receipt_with(&target_dir, &manifests, || {
+        crate::steam_content::save_base_receipt(data_dir, &receipt)
+    }) {
+        if let Ok(mut failed) = load_job(data_dir, &job_id) {
+            failed.status = JobStatus::Failed;
+            failed.error = Some(error.to_string());
+            failed.updated_unix = now().unwrap_or_default();
+            let _ = save_job(data_dir, &failed);
+        }
+        return Err(error);
+    }
 
     // 9. Normalize backslash paths on Linux
     let _ = normalize_windows_paths(&target_dir);
@@ -1452,9 +1476,28 @@ mod tests {
         assert!(publish_verified_base(&stage, &target, std::slice::from_ref(&manifest)).is_err());
         assert_eq!(fs::read(target.join("user-file")).unwrap(), b"preserve");
         fs::remove_file(target.join("user-file")).unwrap();
-        publish_verified_base(&stage, &target, &[manifest]).unwrap();
+        publish_verified_base(&stage, &target, std::slice::from_ref(&manifest)).unwrap();
         assert_eq!(fs::read(target.join("base.bin")).unwrap(), b"base");
         assert!(!stage.exists());
+
+        let error = save_new_base_receipt_with(&target, std::slice::from_ref(&manifest), || {
+            Err("receipt disk full".into())
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("verified new files were removed"), "{error}");
+        assert!(!target.exists());
+
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join("base.bin"), b"base").unwrap();
+        publish_verified_base(&stage, &target, std::slice::from_ref(&manifest)).unwrap();
+        fs::write(target.join("base.bin"), b"changed").unwrap();
+        let error =
+            save_new_base_receipt_with(&target, &[manifest], || Err("receipt disk full".into()))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("published files were retained"), "{error}");
+        assert_eq!(fs::read(target.join("base.bin")).unwrap(), b"changed");
         fs::remove_dir_all(root).unwrap();
     }
 
