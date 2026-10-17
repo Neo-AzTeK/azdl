@@ -854,6 +854,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             crate::steam_metadata::fetch_appinfo,
             fetch_provider_bundle,
         )?;
+        crate::steam_manifest::check_additive_install(&manifests, &game.install_dir)?;
         crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
         let lib_path = find_depotkit_library(data_dir).map_err(
             |_| "The selected download plugin does not provide a usable depot downloader",

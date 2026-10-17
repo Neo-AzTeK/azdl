@@ -310,6 +310,48 @@ pub fn verify_installed(
     Ok(result)
 }
 
+/// Reject DLC files that would replace different installed bytes before downloading a depot.
+/// The commit transaction repeats this check after staging because game files can change.
+pub fn check_additive_install(manifests: &[DepotManifest], install_dir: &Path) -> Result<()> {
+    validate_manifest_set(manifests)?;
+    let root = fs::canonicalize(install_dir)?;
+    if !root.is_dir() {
+        return Err("Game installation directory is missing".into());
+    }
+    let mut buffer = [0_u8; 64 * 1024];
+    for manifest in manifests {
+        for entry in &manifest.files {
+            let Some(path) = existing_file(&root, &entry.path)? else {
+                continue;
+            };
+            if fs::metadata(&path)?.len() != entry.size {
+                return Err(format!(
+                    "DLC depot would replace an existing game file at {}; ordered overlay support is required",
+                    entry.path.display()
+                )
+                .into());
+            }
+            let mut file = File::open(&path)?;
+            let mut hasher = Sha1::new();
+            loop {
+                let size = file.read(&mut buffer)?;
+                if size == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..size]);
+            }
+            if hasher.finalize().as_slice() != entry.sha1 {
+                return Err(format!(
+                    "DLC depot would replace an existing game file at {}; ordered overlay support is required",
+                    entry.path.display()
+                )
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn collect_staged_files(root: &Path, relative: &Path, files: &mut BTreeSet<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(root.join(relative))? {
         let entry = entry?;
@@ -445,6 +487,39 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("conflicting content"), "{error}");
+    }
+
+    #[test]
+    fn additive_preflight_rejects_overlays_before_download() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-dlc-additive-check-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let manifest = DepotManifest {
+            depot_id: 200,
+            manifest_id: 300,
+            files: vec![ManifestFile {
+                path: PathBuf::from("content/addon.bin"),
+                size: 3,
+                sha1: Sha1::digest(b"new").into(),
+            }],
+        };
+        check_additive_install(std::slice::from_ref(&manifest), &root).unwrap();
+        fs::create_dir(root.join("content")).unwrap();
+        fs::write(root.join("content/addon.bin"), b"new").unwrap();
+        check_additive_install(std::slice::from_ref(&manifest), &root).unwrap();
+        fs::write(root.join("content/addon.bin"), b"old").unwrap();
+        let error = check_additive_install(&[manifest], &root)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ordered overlay support"), "{error}");
+        assert_eq!(fs::read(root.join("content/addon.bin")).unwrap(), b"old");
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn encode_varint(mut value: u64) -> Vec<u8> {
