@@ -14,6 +14,7 @@ use std::ffi::{CStr, CString, c_char, c_double, c_int, c_void};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 #[repr(C)]
@@ -310,7 +311,7 @@ pub fn find_depotkit_library(data_dir: &Path) -> Result<PathBuf> {
 struct ProgressContext<'a> {
     data_dir: &'a Path,
     job_id: &'a str,
-    ctrl: *mut c_void,
+    ctrl: usize,
     last_update: Instant,
     cancel_fn: Option<unsafe extern "C" fn(*mut c_void)>,
     completed_bytes: u64,
@@ -322,7 +323,10 @@ extern "C" fn depotkit_progress_cb(prog: *const DepotkitProgress, user_data: *mu
         return;
     }
     unsafe {
-        let ctx = &mut *(user_data as *mut ProgressContext);
+        let context = &*(user_data as *const Mutex<ProgressContext>);
+        let mut ctx = context
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let p = &*prog;
 
         // Throttle progress writes and cancellation checks to every 400ms
@@ -334,12 +338,9 @@ extern "C" fn depotkit_progress_cb(prog: *const DepotkitProgress, user_data: *mu
                 .data_dir
                 .join("jobs")
                 .join(format!("{}.cancel", ctx.job_id));
-            if cancel_marker.exists()
-                && let Some(cancel_fn) = ctx.cancel_fn
-                && !ctx.ctrl.is_null()
-            {
-                cancel_fn(ctx.ctrl);
-            }
+            let cancel = cancel_marker.exists() && ctx.cancel_fn.is_some() && ctx.ctrl != 0;
+            let cancel_fn = ctx.cancel_fn;
+            let ctrl = ctx.ctrl;
 
             if let Ok(mut job) = load_job(ctx.data_dir, ctx.job_id) {
                 job.updated_unix = now().unwrap_or_default();
@@ -347,6 +348,10 @@ extern "C" fn depotkit_progress_cb(prog: *const DepotkitProgress, user_data: *mu
                 job.progress_bytes = Some(job.progress_bytes.unwrap_or(0).max(bytes));
                 job.total_bytes = ctx.overall_bytes.or(Some(p.total_bytes));
                 let _ = save_job(ctx.data_dir, &job);
+            }
+            drop(ctx);
+            if cancel && let Some(cancel_fn) = cancel_fn {
+                cancel_fn(ctrl as *mut c_void);
             }
         }
     }
@@ -447,21 +452,21 @@ fn download_steam_depots_with_progress(
     };
 
     let cancel_fn_ptr = cancel_ctrl.as_ref().map(|s| **s);
-    let mut ctx = ProgressContext {
+    let ctx = Mutex::new(ProgressContext {
         data_dir,
         job_id,
-        ctrl,
+        ctrl: ctrl as usize,
         last_update: Instant::now(),
         cancel_fn: cancel_fn_ptr,
         completed_bytes: span.completed_bytes,
         overall_bytes: span.overall_bytes,
-    };
+    });
 
     let res = unsafe {
         download(
             &req,
             Some(depotkit_progress_cb),
-            &mut ctx as *mut ProgressContext as *mut c_void,
+            (&ctx as *const Mutex<ProgressContext>).cast_mut().cast(),
             ctrl,
         )
     };
@@ -1652,28 +1657,66 @@ mod tests {
             _pad: 0,
             detail: std::ptr::null(),
         };
-        let mut context = ProgressContext {
+        let context = Mutex::new(ProgressContext {
             data_dir: &root,
             job_id: &id,
-            ctrl: std::ptr::null_mut(),
+            ctrl: 0,
             last_update: Instant::now() - Duration::from_secs(1),
             cancel_fn: None,
             completed_bytes: 0,
             overall_bytes: Some(300),
-        };
-        depotkit_progress_cb(&report, (&mut context as *mut ProgressContext).cast());
+        });
+        depotkit_progress_cb(
+            &report,
+            (&context as *const Mutex<ProgressContext>)
+                .cast_mut()
+                .cast(),
+        );
         assert_eq!(load_job(&root, &id).unwrap().progress_bytes, Some(50));
-        context.completed_bytes = 100;
-        context.last_update = Instant::now() - Duration::from_secs(1);
+        {
+            let mut state = context.lock().unwrap();
+            state.completed_bytes = 100;
+            state.last_update = Instant::now() - Duration::from_secs(1);
+        }
         let second = DepotkitProgress {
             bytes_downloaded: 10,
             total_bytes: 200,
             ..report
         };
-        depotkit_progress_cb(&second, (&mut context as *mut ProgressContext).cast());
+        depotkit_progress_cb(
+            &second,
+            (&context as *const Mutex<ProgressContext>)
+                .cast_mut()
+                .cast(),
+        );
         let job = load_job(&root, &id).unwrap();
         assert_eq!(job.progress_bytes, Some(110));
         assert_eq!(job.total_bytes, Some(300));
+        context.lock().unwrap().last_update = Instant::now() - Duration::from_secs(1);
+        std::thread::scope(|scope| {
+            for bytes in 11..=16 {
+                let context = &context;
+                scope.spawn(move || {
+                    let report = DepotkitProgress {
+                        bytes_downloaded: bytes,
+                        total_bytes: 200,
+                        rate_bytes_sec: 0.0,
+                        total_written: bytes,
+                        unused: 0,
+                        phase: 0,
+                        _pad: 0,
+                        detail: std::ptr::null(),
+                    };
+                    depotkit_progress_cb(
+                        &report,
+                        (context as *const Mutex<ProgressContext>).cast_mut().cast(),
+                    );
+                });
+            }
+        });
+        let job = load_job(&root, &id).unwrap();
+        assert!(job.progress_bytes.unwrap() >= 111);
+        assert!(job.progress_bytes.unwrap() <= 116);
         fs::remove_dir_all(root).unwrap();
     }
 
