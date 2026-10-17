@@ -1976,23 +1976,24 @@ mod commands {
                 Ok(json!({ "success": true, "executable": executable }))
             }
             Action::GameRemove { id } => {
-                if state
-                    .tasks
-                    .lock()
-                    .map_err(|_| "State lock poisoned")?
-                    .iter()
-                    .any(|task| {
+                let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
+                azdl::remove_game_with_guard(&mut library, data_dir, &id, || {
+                    let tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
+                    if let Some(task) = tasks.iter().find(|task| {
                         task.game_id.as_deref() == Some(&id)
                             && task.status == "running"
-                            && task.id.starts_with("dlc-")
-                    })
-                {
-                    return Err(
-                        "Wait for the DLC install to finish before removing this game".into(),
-                    );
-                }
-                let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
-                azdl::remove_game(&mut library, data_dir, &id).map_err(|e| e.to_string())?;
+                            && (task.id.starts_with("dlc-") || task.id.starts_with("move-"))
+                    }) {
+                        return Err(if task.id.starts_with("dlc-") {
+                            "Wait for the DLC install to finish before removing this game"
+                        } else {
+                            "Wait for the game move to finish before removing this game"
+                        }
+                        .into());
+                    }
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?;
                 if let Ok(mut tasks) = state.tasks.lock() {
                     tasks.retain(|t| {
                         t.id != format!("install-{id}") && t.game_id.as_deref() != Some(&id)
@@ -4370,6 +4371,25 @@ mod tests {
         let remove_req = Action::GameRemove {
             id: "test-game".into(),
         };
+        for (task_id, expected) in [
+            ("dlc-test-game-200", "DLC install"),
+            ("move-test-game", "game move"),
+        ] {
+            state.tasks.lock().unwrap().push(TaskInfo {
+                id: task_id.into(),
+                label: "Changing game content".into(),
+                status: "running".into(),
+                pid: None,
+                game_id: Some("test-game".into()),
+                log_tail: String::new(),
+            });
+            let error = handle_run_action(&state, remove_req.clone())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(game_dir.join("game.bin").exists());
+            state.tasks.lock().unwrap().clear();
+        }
         let res_rem = handle_run_action(&state, remove_req).unwrap();
         assert_eq!(res_rem["removed"], "test-game");
 

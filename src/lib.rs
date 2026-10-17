@@ -214,8 +214,19 @@ pub fn validate_id(id: &str) -> Result<()> {
 /// Safely remove a game from the library and remove its installed files from disk,
 /// along with any associated prefixes, shortcuts, and leftover download/staging files.
 pub fn remove_game(library: &mut Library, data_dir: &Path, id: &str) -> Result<()> {
+    remove_game_with_guard(library, data_dir, id, || Ok(()))
+}
+
+/// Remove a game after checking desktop activity under its content lock.
+pub fn remove_game_with_guard(
+    library: &mut Library,
+    data_dir: &Path,
+    id: &str,
+    guard: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     validate_id(id)?;
     let _lock = dlc::lock_game(data_dir, id)?;
+    guard()?;
     if jobs::has_active_dlc_download(data_dir, id)? {
         return Err("Wait for the DLC download to finish before removing this game".into());
     }
