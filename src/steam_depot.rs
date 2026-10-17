@@ -904,7 +904,10 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
 
 fn prepare_dlc_retry(data_dir: &Path, payload: &Path, job_id: &str) -> Result<()> {
     crate::jobs::clear_cancel(data_dir, job_id)?;
-    remove_staging_dir(payload)
+    let root = payload
+        .parent()
+        .ok_or("DLC staging payload has no parent")?;
+    remove_staging_dir(root)
 }
 
 fn remove_staging_dir(path: &Path) -> Result<()> {
@@ -1958,7 +1961,7 @@ mod tests {
     }
 
     #[test]
-    fn dlc_retry_discards_old_payload_and_cancel_marker_but_keeps_receipts() {
+    fn dlc_retry_discards_old_provider_groups_payload_and_cancel_marker_but_keeps_receipts() {
         let data_dir = std::env::temp_dir().join(format!(
             "azdl-dlc-retry-{}-{}",
             std::process::id(),
@@ -1974,6 +1977,11 @@ mod tests {
             .join("payload");
         fs::create_dir_all(&payload).unwrap();
         fs::write(payload.join("old-depot.bin"), b"stale").unwrap();
+        let scratch = payload.parent().unwrap();
+        fs::create_dir_all(scratch.join("provider-456/manifest")).unwrap();
+        fs::write(scratch.join("provider-456/456.zip"), b"stale provider").unwrap();
+        fs::create_dir_all(scratch.join("group-456")).unwrap();
+        fs::write(scratch.join("group-456/partial.bin"), b"partial").unwrap();
         let receipt = data_dir.join("dlc").join("test-game").join("123");
         fs::create_dir_all(&receipt).unwrap();
         fs::write(receipt.join("state.json"), b"journal").unwrap();
@@ -1984,17 +1992,8 @@ mod tests {
 
         prepare_dlc_retry(&data_dir, &payload, &id).unwrap();
 
-        assert!(!payload.exists());
+        assert!(!scratch.exists());
         assert!(!cancel.exists());
-        assert_eq!(fs::read(receipt.join("state.json")).unwrap(), b"journal");
-        fs::create_dir_all(payload.parent().unwrap().join("group-456")).unwrap();
-        fs::write(
-            payload.parent().unwrap().join("group-456/partial.bin"),
-            b"partial",
-        )
-        .unwrap();
-        remove_staging_dir(payload.parent().unwrap()).unwrap();
-        assert!(!payload.parent().unwrap().exists());
         assert_eq!(fs::read(receipt.join("state.json")).unwrap(), b"journal");
         drop(worker);
         fs::remove_dir_all(data_dir).unwrap();
