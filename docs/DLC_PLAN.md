@@ -55,6 +55,8 @@ The current grouped staging path then passed `tests/live_dlc_install.rs` on a fr
 
 An offline two-App fixture now drives the same grouped staging loop as production with a controlled downloader. It verifies distinct content App IDs, exact per-group and combined bytes, cumulative progress, one DLC commit, and clean removal. A native multi-App download is still required for transport acceptance.
 
+After a process interruption, a Steam DLC retry now refreshes provider metadata and reuses only complete staged depot groups whose bytes match the newly selected exact manifests. The two-App fixture keeps one valid group and redownloads a changed second group; incomplete chunks still restart from zero. Normal terminal outcomes continue to clear scratch data.
+
 ## Proposed core model
 
 Keep these concepts independent:

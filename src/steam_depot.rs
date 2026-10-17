@@ -918,7 +918,39 @@ fn prepare_dlc_retry(data_dir: &Path, payload: &Path, job_id: &str) -> Result<()
     let root = payload
         .parent()
         .ok_or("DLC staging payload has no parent")?;
-    remove_staging_dir(root)
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("DLC staging root is not a regular directory".into());
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            return Err("DLC retry scratch contains a symbolic link".into());
+        }
+        let preserve_group = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix("group-"))
+            .and_then(|id| id.parse::<u32>().ok())
+            .is_some_and(|id| id > 0);
+        if preserve_group && metadata.is_dir() {
+            continue;
+        }
+        if metadata.is_dir() {
+            remove_staging_dir(&path)?;
+        } else if metadata.is_file() {
+            fs::remove_file(path)?;
+        } else {
+            return Err("DLC retry scratch contains a non-regular entry".into());
+        }
+    }
+    Ok(())
 }
 
 fn remove_staging_dir(path: &Path) -> Result<()> {
@@ -949,18 +981,6 @@ fn stage_verified_dlc_groups_with(
     for (content_app_id, group) in &downloads.groups {
         crate::jobs::check_dlc_cancelled(data_dir, job_id)?;
         let group_dir = root.join(format!("group-{content_app_id}"));
-        remove_staging_dir(&group_dir)?;
-        fs::create_dir_all(&group_dir)?;
-        download(
-            &group_dir,
-            *content_app_id,
-            group,
-            DownloadProgressSpan {
-                completed_bytes,
-                overall_bytes: (total_bytes > 0).then_some(total_bytes),
-            },
-        )?;
-        normalize_windows_paths(&group_dir)?;
         let group_manifests = group
             .iter()
             .map(|depot| {
@@ -971,6 +991,23 @@ fn stage_verified_dlc_groups_with(
                 )
             })
             .collect::<Result<Vec<_>>>()?;
+        let reusable = fs::symlink_metadata(&group_dir)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+            && crate::steam_manifest::verify_staged_exact(&group_manifests, &group_dir).is_ok();
+        if !reusable {
+            remove_staging_dir(&group_dir)?;
+            fs::create_dir_all(&group_dir)?;
+            download(
+                &group_dir,
+                *content_app_id,
+                group,
+                DownloadProgressSpan {
+                    completed_bytes,
+                    overall_bytes: (total_bytes > 0).then_some(total_bytes),
+                },
+            )?;
+            normalize_windows_paths(&group_dir)?;
+        }
         crate::steam_manifest::verify_staged_exact(&group_manifests, &group_dir)?;
         let group_bytes = group_manifests
             .iter()
@@ -1966,6 +2003,31 @@ mod tests {
             load_job(&data_dir, &job_id).unwrap().progress_bytes,
             Some(11)
         );
+        remove_staging_dir(&payload).unwrap();
+        fs::create_dir_all(&payload).unwrap();
+        fs::write(root.join("group-200/data/second.bin"), b"changed").unwrap();
+        let mut retried = Vec::new();
+        stage_verified_dlc_groups_with(
+            &data_dir,
+            &job_id,
+            &payload,
+            &downloads,
+            &manifests,
+            11,
+            |group_dir, app_id, depots, span| {
+                retried.push((app_id, depots[0].depot_id, span.completed_bytes));
+                fs::create_dir_all(group_dir.join("data"))?;
+                fs::write(group_dir.join("data/second.bin"), b"second")?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(retried, vec![(200, 202, 5)]);
+        assert_eq!(fs::read(payload.join("data/first.bin")).unwrap(), b"first");
+        assert_eq!(
+            fs::read(payload.join("data/second.bin")).unwrap(),
+            b"second"
+        );
         let game_dir = data_dir.join("game");
         fs::create_dir_all(&game_dir).unwrap();
         fs::write(game_dir.join("game.exe"), b"base").unwrap();
@@ -2285,7 +2347,7 @@ mod tests {
     }
 
     #[test]
-    fn dlc_retry_discards_old_provider_groups_payload_and_cancel_marker_but_keeps_receipts() {
+    fn dlc_retry_discards_provider_payload_and_cancel_marker_but_keeps_groups_and_receipts() {
         let data_dir = std::env::temp_dir().join(format!(
             "azdl-dlc-retry-{}-{}",
             std::process::id(),
@@ -2316,7 +2378,12 @@ mod tests {
 
         prepare_dlc_retry(&data_dir, &payload, &id).unwrap();
 
-        assert!(!scratch.exists());
+        assert!(!payload.exists());
+        assert!(!scratch.join("provider-456").exists());
+        assert_eq!(
+            fs::read(scratch.join("group-456/partial.bin")).unwrap(),
+            b"partial"
+        );
         assert!(!cancel.exists());
         assert_eq!(fs::read(receipt.join("state.json")).unwrap(), b"journal");
         drop(worker);
