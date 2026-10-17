@@ -263,6 +263,13 @@ pub fn list_interrupted(game: &Game, data_dir: &Path) -> Result<Vec<String>> {
     Ok(ids)
 }
 
+fn ensure_no_interrupted(game: &Game, data_dir: &Path) -> Result<()> {
+    if !list_interrupted(game, data_dir)?.is_empty() {
+        return Err("Recover interrupted DLC before changing game content".into());
+    }
+    Ok(())
+}
+
 /// Install an additive DLC archive. Existing game files are never overwritten.
 pub fn install_archive(
     game: &Game,
@@ -340,6 +347,7 @@ fn install_payload_unlocked(
     if !install.is_dir() {
         return Err("Base game installation is missing".into());
     }
+    ensure_no_interrupted(game, data_dir)?;
     let state = state_dir(data_dir, &game.id, dlc_id);
     if fs::symlink_metadata(&state).is_ok() {
         return Err("DLC is already installed or has an interrupted installation".into());
@@ -637,6 +645,7 @@ fn install_catalog_dlc_unlocked_with(
 ) -> Result<usize> {
     validate_id(&game.id)?;
     validate_id(&addon.id)?;
+    ensure_no_interrupted(game, data_dir)?;
     if addon.kind != AddonKind::Dlc || !addon.content_available {
         return Err("The selected provider has no downloadable content for this DLC".into());
     }
@@ -800,6 +809,7 @@ pub fn remove_with_guard(
     validate_id(dlc_id)?;
     let _lock = lock_game(data_dir, &game.id)?;
     guard()?;
+    ensure_no_interrupted(game, data_dir)?;
     if !fs::symlink_metadata(state_dir(data_dir, &game.id, dlc_id).join("complete"))
         .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
     {
@@ -1361,6 +1371,10 @@ mod tests {
             b"bonus"
         );
         remove(&game, &root, "depot-dlc").unwrap();
+        let stable_source = root.join("stable-source");
+        fs::create_dir_all(&stable_source).unwrap();
+        fs::write(stable_source.join("stable.dat"), b"stable").unwrap();
+        install_staged(&game, &root, "stable", &stable_source).unwrap();
         install_archive(&game, &root, "bonus2", &archive).unwrap();
         let interrupted = state_dir(&root, &game.id, "bonus2");
         let manifest: DlcManifest =
@@ -1369,6 +1383,14 @@ mod tests {
         let staged = game_dir.join(&manifest.files[0].staged_path);
         fs::write(&staged, b"partial").unwrap();
         assert_eq!(list_interrupted(&game, &root).unwrap(), vec!["bonus2"]);
+        let error = install_staged(&game, &root, "bonus3", &source)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Recover interrupted DLC"), "{error}");
+        assert!(!state_dir(&root, &game.id, "bonus3").exists());
+        let error = remove(&game, &root, "stable").unwrap_err().to_string();
+        assert!(error.contains("Recover interrupted DLC"), "{error}");
+        assert_eq!(fs::read(game_dir.join("stable.dat")).unwrap(), b"stable");
         let target = game_dir.join("Content/DLC/bonus.dat");
         fs::write(&target, b"changed").unwrap();
         assert!(recover_interrupted(&game, &root, "bonus2").is_err());
@@ -1380,6 +1402,8 @@ mod tests {
         recover_interrupted(&game, &root, "bonus2").unwrap();
         assert!(!staged.exists());
         assert!(!game_dir.join("Content/DLC/bonus.dat").exists());
+        remove(&game, &root, "stable").unwrap();
+        assert!(!game_dir.join("stable.dat").exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

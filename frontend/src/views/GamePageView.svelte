@@ -74,6 +74,7 @@
   let dlcPending = $state('');
   let dlcToRemove = $state(null);
   let dlcToRecover = $state(null);
+  let hasInterruptedDlc = $derived((dlcInfo.interrupted || []).length > 0);
   let activeDlcIds = $derived(new Set((tasks || [])
     .filter((task) => task.status === 'running' && task.id?.startsWith(`dlc-${installedRecord?.id}-`))
     .map((task) => task.id.slice(`dlc-${installedRecord.id}-`.length))));
@@ -1106,9 +1107,9 @@
                   {#if addon.interrupted}
                     <button class="md3-btn danger" disabled={!!dlcPending || activeDlcIds.has(addon.id)} onclick={() => dlcToRecover = addon}>Recover</button>
                   {:else if addon.installed}
-                    <button class="md3-btn danger" disabled={!!dlcPending || activeDlcIds.has(addon.id)} onclick={() => dlcToRemove = addon}>Remove</button>
+                    <button class="md3-btn danger" disabled={hasInterruptedDlc || !!dlcPending || activeDlcIds.has(addon.id)} title={hasInterruptedDlc ? 'Recover interrupted DLC first' : undefined} onclick={() => dlcToRemove = addon}>Remove</button>
                   {:else}
-                    <button class="md3-btn" disabled={!addon.content_available || !!dlcPending || activeDlcIds.has(addon.id)} onclick={() => installDlc(addon)}>
+                    <button class="md3-btn" disabled={hasInterruptedDlc || !addon.content_available || !!dlcPending || activeDlcIds.has(addon.id)} title={hasInterruptedDlc ? 'Recover interrupted DLC first' : undefined} onclick={() => installDlc(addon)}>
                       {activeDlcIds.has(addon.id) || dlcPending === addon.id ? 'Checking...' : addon.present_unmanaged ? 'Recheck' : addon.needs_existing_check ? 'Check Files' : addon.needs_provider_check ? 'Check & Install' : addon.content_available ? 'Install' : 'Unavailable'}
                     </button>
                   {/if}

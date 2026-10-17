@@ -808,6 +808,9 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
                 total.checked_add(file.size).ok_or("DLC size exceeds u64")
             })?;
         let check_lock = crate::dlc::lock_game(data_dir, &game.id)?;
+        if !crate::dlc::list_interrupted(game, data_dir)?.is_empty() {
+            return Err("Recover interrupted DLC before changing game content".into());
+        }
         let mut all_present = true;
         for manifest in &manifests {
             if !crate::steam_manifest::verify_installed(manifest, &game.install_dir)?.complete() {
