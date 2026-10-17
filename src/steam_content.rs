@@ -74,10 +74,14 @@ pub fn dlc_depot_availability(
         let Some(child) = child else {
             return DlcDepotAvailability::Unknown;
         };
-        if child.parent_app_id != Some(parent_id) {
-            return DlcDepotAvailability::Unavailable(
-                "Steam DLC metadata does not identify this game as its parent",
-            );
+        match child.parent_app_id {
+            Some(id) if id != parent_id => {
+                return DlcDepotAvailability::Unavailable(
+                    "Steam DLC metadata identifies a different parent game",
+                );
+            }
+            None => return DlcDepotAvailability::Unknown,
+            _ => {}
         }
         child
             .depots
@@ -88,9 +92,7 @@ pub fn dlc_depot_availability(
         parent_depots
     };
     if depots.is_empty() {
-        return DlcDepotAvailability::Unavailable(
-            "Steam identifies no separate downloadable files for this DLC",
-        );
+        return DlcDepotAvailability::Unknown;
     }
     let selected = depots
         .into_iter()
@@ -517,14 +519,32 @@ mod tests {
             203,
         )
         .unwrap();
-        assert!(matches!(
+        assert_eq!(
             dlc_depot_availability(Some(&parent), Some(&child), 100, 203),
-            DlcDepotAvailability::Unavailable(reason) if reason.contains("no separate downloadable files")
-        ));
+            DlcDepotAvailability::Unknown
+        );
         assert!(matches!(
             dlc_depot_availability(Some(&parent), Some(&child), 101, 203),
-            DlcDepotAvailability::Unavailable(reason) if reason.contains("parent")
+            DlcDepotAvailability::Unavailable(reason) if reason.contains("different parent")
         ));
+        let no_parent = crate::steam_metadata::parse_appinfo(
+            br#"{"data":{"206":{"common":{"type":"DLC"},"depots":{"406":{"manifests":{"public":{"gid":"126"}}}}}}}"#,
+            206,
+        )
+        .unwrap();
+        assert_eq!(
+            dlc_depot_availability(Some(&parent), Some(&no_parent), 100, 206),
+            DlcDepotAvailability::Unknown
+        );
+        let empty_depots = crate::steam_metadata::parse_appinfo(
+            br#"{"data":{"207":{"common":{"parent":"100","type":"DLC"},"depots":{}}}}"#,
+            207,
+        )
+        .unwrap();
+        assert_eq!(
+            dlc_depot_availability(Some(&parent), Some(&empty_depots), 100, 207),
+            DlcDepotAvailability::Unknown
+        );
         let separate = crate::steam_metadata::parse_appinfo(
             br#"{"data":{"204":{"common":{"parent":"100","type":"DLC"},"depots":{"401":{"manifests":{"public":{"gid":"123"}},"config":{"oslist":"windows"}}}}}}"#,
             204,

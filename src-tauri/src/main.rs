@@ -3330,6 +3330,11 @@ mod commands {
                         }
                         _ => None,
                     };
+                    let unknown_reason = matches!(
+                        delivery,
+                        azdl::steam_content::DlcDepotAvailability::Unknown
+                    )
+                    .then_some("Steam metadata has not identified downloadable files for this DLC yet.");
                     let can_check_content = steam_source
                         && unavailable_reason.is_none()
                         && !receipt_error
@@ -3355,7 +3360,9 @@ mod commands {
                         } else if !steam_source {
                             steam_eligibility.as_ref().err().map(String::as_str)
                         } else {
-                            unavailable_reason.or_else(|| steam_eligibility.as_ref().err().map(String::as_str))
+                            unavailable_reason
+                                .or_else(|| steam_eligibility.as_ref().err().map(String::as_str))
+                                .or(unknown_reason)
                         },
                     }));
                 }

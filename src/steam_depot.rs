@@ -734,6 +734,12 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
                 .collect::<BTreeSet<_>>();
             (child, selected_ids)
         };
+        if selected_ids.is_empty() {
+            return Err(format!(
+                "Steam metadata does not identify a Windows/English depot for DLC {dlc_id}"
+            )
+            .into());
+        }
         let downloads = resolve_dlc_download_groups(&root, &source_metadata, &selected_ids)?;
         crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
         let manifests = downloads
