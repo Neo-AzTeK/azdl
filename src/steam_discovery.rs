@@ -284,7 +284,32 @@ fn fetch_games(query: &str) -> Result<Vec<SteamStoreGame>> {
         let url = format!(
             "https://store.steampowered.com/api/appdetails/?appids={app_id}&l=english&cc=US"
         );
-        let payload = read_store_json(&url)?;
+        return lookup_app_id_with(
+            app_id,
+            || read_store_json(&url),
+            || crate::steam_metadata::fetch_appinfo(app_id),
+        );
+    }
+    if query.is_empty() {
+        let payload = read_store_json(
+            "https://store.steampowered.com/api/featuredcategories/?l=english&cc=US",
+        )?;
+        return Ok(parse_featured_results(&payload));
+    }
+    let url = format!(
+        "https://store.steampowered.com/api/storesearch/?term={}&l=english&cc=US&count=50",
+        encode_query(query)
+    );
+    Ok(parse_search_results(&read_store_json(&url)?))
+}
+
+fn lookup_app_id_with(
+    app_id: u32,
+    read_store: impl FnOnce() -> Result<Value>,
+    load_appinfo: impl FnOnce() -> Result<crate::steam_metadata::SteamAppMetadata>,
+) -> Result<Vec<SteamStoreGame>> {
+    let store = read_store();
+    if let Ok(payload) = &store {
         let entry = &payload[app_id.to_string()];
         if entry.get("success").and_then(Value::as_bool) == Some(true)
             && let Some(data) = entry.get("data")
@@ -311,25 +336,50 @@ fn fetch_games(query: &str) -> Result<Vec<SteamStoreGame>> {
                 tiny_image: None,
             }]);
         }
-        return Ok(Vec::new());
     }
-    if query.is_empty() {
-        let payload = read_store_json(
-            "https://store.steampowered.com/api/featuredcategories/?l=english&cc=US",
-        )?;
-        return Ok(parse_featured_results(&payload));
+    if let Ok(metadata) = load_appinfo()
+        && let Some(title) = metadata.name
+    {
+        return Ok(vec![SteamStoreGame::new(app_id, title)]);
     }
-    let url = format!(
-        "https://store.steampowered.com/api/storesearch/?term={}&l=english&cc=US&count=50",
-        encode_query(query)
-    );
-    Ok(parse_search_results(&read_store_json(&url)?))
+    store.map(|_| Vec::new())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn numeric_dlc_lookup_uses_appinfo_when_store_page_is_unlisted() {
+        let metadata = crate::steam_metadata::parse_appinfo(
+            br#"{"data":{"900":{"common":{"name":"Unlisted DLC","type":"DLC","parent":"100"}}}}"#,
+            900,
+        )
+        .unwrap();
+        let result = lookup_app_id_with(
+            900,
+            || Ok(json!({"900":{"success":false}})),
+            || Ok(metadata.clone()),
+        )
+        .unwrap();
+        assert_eq!(result, vec![SteamStoreGame::new(900, "Unlisted DLC")]);
+        assert_eq!(metadata.parent_app_id, Some(100));
+
+        let result =
+            lookup_app_id_with(900, || Err("Store request failed".into()), || Ok(metadata))
+                .unwrap();
+        assert_eq!(result, vec![SteamStoreGame::new(900, "Unlisted DLC")]);
+        assert!(
+            lookup_app_id_with(
+                901,
+                || Ok(json!({"901":{"success":false}})),
+                || Err("No appinfo".into()),
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
 
     #[test]
     fn search_filters_non_apps_and_duplicate_ids() {
