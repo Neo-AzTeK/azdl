@@ -1681,6 +1681,46 @@ mod tests {
         merge_verified_payload(&second, &combined).unwrap();
         verify_staged_exact(&[base.clone(), addon], &combined).unwrap();
 
+        let game_dir = root.join("game");
+        fs::create_dir_all(game_dir.join("data")).unwrap();
+        fs::write(game_dir.join("data/game.exe"), b"base game").unwrap();
+        let game = Game {
+            id: "grouped-dlc-game".into(),
+            title: "Grouped DLC game".into(),
+            install_dir: game_dir.clone(),
+            executable: PathBuf::from("data/game.exe"),
+            runner: crate::Runner::Auto,
+            arguments: Vec::new(),
+            environment: Default::default(),
+            last_played_unix: None,
+            origin: None,
+            steam_app_id: Some(100),
+            launch_options: Vec::new(),
+            selected_launch_option_id: None,
+            cover_url: None,
+            banner_url: None,
+        };
+        assert_eq!(
+            crate::dlc::install_staged(&game, &root, "900", &combined).unwrap(),
+            2
+        );
+        assert_eq!(fs::read(game_dir.join("data/base.bin")).unwrap(), b"first");
+        assert_eq!(
+            fs::read(game_dir.join("data/addon.bin")).unwrap(),
+            b"second"
+        );
+        assert_eq!(
+            crate::dlc::list_installed(&game, &root).unwrap(),
+            vec!["900"]
+        );
+        crate::dlc::remove(&game, &root, "900").unwrap();
+        assert!(!game_dir.join("data/base.bin").exists());
+        assert!(!game_dir.join("data/addon.bin").exists());
+        assert_eq!(
+            fs::read(game_dir.join("data/game.exe")).unwrap(),
+            b"base game"
+        );
+
         let conflict_dir = root.join("conflict");
         fs::create_dir_all(conflict_dir.join("data")).unwrap();
         fs::write(conflict_dir.join("data/base.bin"), b"other").unwrap();
