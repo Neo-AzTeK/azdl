@@ -939,6 +939,31 @@ fn publish_verified_base(
     Ok(())
 }
 
+fn finish_base_install<T>(result: Result<T>, scratch: &Path) -> Result<T> {
+    let cleanup = remove_staging_dir(scratch);
+    match (result, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => {
+            Err(format!("Base game installed, but scratch cleanup failed: {error}").into())
+        }
+        (Err(error), Err(cleanup_error)) => {
+            Err(format!("{error}; scratch cleanup failed: {cleanup_error}").into())
+        }
+    }
+}
+
+fn prepare_base_scratch(data_dir: &Path, scratch: &Path) -> Result<()> {
+    let root = data_dir.join("downloads");
+    if fs::symlink_metadata(&root).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err("Download scratch root is a symbolic link".into());
+    }
+    fs::create_dir_all(&root)?;
+    remove_staging_dir(scratch)?;
+    fs::create_dir(scratch)?;
+    Ok(())
+}
+
 /// Perform end-to-end installation of a Steam manifest-based catalog game:
 /// downloads manifest and addons, invokes native depotkit engine, normalizes paths,
 /// overlays addons, registers into library, and tracks full progress in the transfers drawer.
@@ -972,10 +997,35 @@ pub fn install_steam_manifest_game_in(
         return Ok(InstallOutcome::Installed(id));
     }
     let _game_lock = crate::dlc::lock_game(data_dir, &game.id)?;
+    let lib_path = find_depotkit_library(data_dir)
+        .map_err(|_| "The selected download plugin does not provide a usable depot downloader")?;
 
     // 2. Prepare downloads directory
-    let download_dir = data_dir.join("downloads").join(format!("steam-{app_id}"));
-    fs::create_dir_all(&download_dir)?;
+    let download_dir = data_dir
+        .join("downloads")
+        .join(format!("steam-{app_id}-{}", game.id));
+    let result = install_steam_manifest_game_in_inner(
+        library,
+        data_dir,
+        games_dir,
+        game,
+        app_id,
+        &lib_path,
+        &download_dir,
+    );
+    finish_base_install(result, &download_dir)
+}
+
+fn install_steam_manifest_game_in_inner(
+    library: &mut Library,
+    data_dir: &Path,
+    games_dir: &Path,
+    game: &CatalogGame,
+    app_id: u32,
+    lib_path: &Path,
+    download_dir: &Path,
+) -> Result<InstallOutcome> {
+    prepare_base_scratch(data_dir, download_dir)?;
 
     let manifest_url = format!("https://ryuu.badkiko.ru/v1/download/{app_id}");
     let manifest_zip = download_dir.join(format!("{app_id}.zip"));
@@ -1077,11 +1127,7 @@ pub fn install_steam_manifest_game_in(
         }
     }
 
-    // 4. Check if native depotkit engine is available
-    let lib_path = find_depotkit_library(data_dir)
-        .map_err(|_| "The selected download plugin does not provide a usable depot downloader")?;
-
-    // 5. Parse depots from Lua manifests
+    // 4. Parse depots from Lua manifests
     let appinfo = crate::steam_metadata::fetch_appinfo(app_id)?;
     let selected_ids = appinfo
         .depots
@@ -1091,7 +1137,7 @@ pub fn install_steam_manifest_game_in(
         .map(|depot| depot.depot_id)
         .collect::<std::collections::BTreeSet<_>>();
     let downloads = resolve_dlc_download_groups_with(
-        &download_dir,
+        download_dir,
         &appinfo,
         &selected_ids,
         crate::steam_metadata::fetch_appinfo,
@@ -1179,7 +1225,7 @@ pub fn install_steam_manifest_game_in(
             remove_staging_dir(&group_dir)?;
             fs::create_dir(&group_dir)?;
             download_steam_depots_with_progress(
-                &lib_path,
+                lib_path,
                 &group_dir,
                 *content_app_id,
                 group,
@@ -1323,6 +1369,51 @@ mod tests {
             .map(|addon| addon.id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(selected, vec!["fix"]);
+    }
+
+    #[test]
+    fn base_install_removes_scratch_on_success_and_failure() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-base-scratch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for success in [true, false] {
+            let scratch = root.join(if success { "success" } else { "failure" });
+            fs::create_dir_all(scratch.join("group")).unwrap();
+            fs::write(scratch.join("group/partial.bin"), b"partial").unwrap();
+            let result = if success {
+                finish_base_install(Ok(()), &scratch)
+            } else {
+                finish_base_install(Err("download failed".into()), &scratch)
+            };
+            assert_eq!(result.is_ok(), success);
+            assert!(!scratch.exists());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn base_install_discards_interrupted_scratch_before_retry() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-base-retry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let scratch = root.join("downloads/steam-100-game");
+        fs::create_dir_all(scratch.join("group-100")).unwrap();
+        fs::write(scratch.join("group-100/partial.bin"), b"stale").unwrap();
+        prepare_base_scratch(&root, &scratch).unwrap();
+        assert!(scratch.is_dir());
+        assert!(fs::read_dir(&scratch).unwrap().next().is_none());
+        finish_base_install(Ok(()), &scratch).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

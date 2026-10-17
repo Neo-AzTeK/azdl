@@ -1344,7 +1344,14 @@ mod tests {
 
     #[test]
     fn plugin_manifest_game_stages_setup_and_outcome() {
-        let root = std::env::temp_dir().join(format!("azdl-cat-plugin-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "azdl-cat-plugin-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         fs::create_dir_all(&root).unwrap();
         let payload = br#"{"entries":[{
             "id": "steam-3892270",
@@ -1364,35 +1371,10 @@ mod tests {
         game.package_type = PackageType::Plugin;
         assert_eq!(game.steam_app_id, Some(3892270));
 
-        let source = root.join("manifest-fixture");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(
-            source.join("3892270.lua"),
-            b"addappid(3892271, 1, \"00112233445566778899aabbccddeeff\")",
-        )
-        .unwrap();
-        fs::write(source.join("3892271_123.manifest"), b"manifest").unwrap();
-        let downloads = root.join("downloads/steam-3892270");
-        fs::create_dir_all(&downloads).unwrap();
-        assert!(
-            std::process::Command::new("bsdtar")
-                .arg("-a")
-                .arg("-cf")
-                .arg(downloads.join("3892270.zip"))
-                .arg("-C")
-                .arg(&source)
-                .arg(".")
-                .status()
-                .unwrap()
-                .success()
-        );
-
         let mut library = Library::default();
         let error = install_game(&mut library, &root, game).unwrap_err();
         assert!(error.to_string().contains("depot downloader"));
-        let cached_depots = root.join("downloads/steam-3892270/depotcache");
-        assert!(root.join("downloads/steam-3892270").exists());
-        let _ = cached_depots;
+        assert!(!root.join("downloads").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
