@@ -63,6 +63,7 @@
         (libGame) =>
           (libGame.id && libGame.id.toLowerCase() === gId) ||
           (libGame.id && qId && libGame.id.toLowerCase() === qId) ||
+          (libGame.steam_app_id && game.steam_app_id && Number(libGame.steam_app_id) === Number(game.steam_app_id)) ||
           (libGame.title && libGame.title.trim().toLowerCase() === gTitle)
       ) || (game.install_dir ? game : null)
     );
@@ -79,11 +80,13 @@
   let previousDlcTasks = new Set();
 
   async function refreshDlc(id) {
+    const selectedId = game?.selected_dlc_id;
     try {
-      const info = await getGameDlc(id);
-      if (installedRecord?.id === id) dlcInfo = info;
+      const candidate = Number(selectedId);
+      const info = await getGameDlc(id, Number.isInteger(candidate) && candidate > 0 ? candidate : null);
+      if (installedRecord?.id === id && game?.selected_dlc_id === selectedId) dlcInfo = info;
     } catch (error) {
-      if (installedRecord?.id === id) {
+      if (installedRecord?.id === id && game?.selected_dlc_id === selectedId) {
         notifyError(error);
       }
     }
@@ -92,6 +95,7 @@
   $effect(() => {
     const id = installedRecord?.id;
     void dlcRevision;
+    void game?.selected_dlc_id;
     if (id) refreshDlc(id);
     else dlcInfo = { available: [], installed: [] };
   });
@@ -108,7 +112,8 @@
   $effect(() => {
     if (game?.selected_dlc_id && isInstalled && dlcInfo.available.length > 0) {
       activeDetailTab = 'overview';
-      tick().then(() => document.getElementById('section-dlc')?.scrollIntoView({ behavior: 'smooth' }));
+      tick().then(() => (document.getElementById(`dlc-${game.selected_dlc_id}`)
+        || document.getElementById('section-dlc'))?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
     }
   });
 
@@ -1091,9 +1096,9 @@
             <section id="section-dlc" class="steam-section-card">
               <h3 class="section-heading">Downloadable Content</h3>
               {#each dlcInfo.available as addon (addon.id)}
-                <div class="dlc-row">
+                <div id={`dlc-${addon.id}`} class="dlc-row" class:selected={game?.selected_dlc_id === addon.id}>
                   <span class="dlc-details">
-                    <span>{addon.title}</span>
+                    <span>{game?.selected_dlc_id === addon.id ? game.selected_dlc_title || addon.title : addon.title}</span>
                     {#if !addon.installed && !addon.interrupted && addon.reason}
                       <small>{addon.reason}</small>
                     {/if}
@@ -1571,6 +1576,12 @@
     gap: 1rem;
     padding: 0.75rem 0;
     border-top: 1px solid var(--md-sys-color-outline-variant);
+    scroll-margin-block: 5rem;
+  }
+  .dlc-row.selected {
+    background: var(--md-sys-color-surface-container-high);
+    border-radius: var(--md-sys-shape-medium);
+    padding-inline: 0.75rem;
   }
   .dlc-details {
     display: flex;

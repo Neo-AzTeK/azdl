@@ -129,9 +129,9 @@ export async function getState() {
   };
 }
 
-export async function getGameDlc(id) {
+export async function getGameDlc(id, candidateDlcId = null) {
   if (!isDesktop()) return { available: [], installed: [] };
-  return await withBusy(() => invoke('get_game_dlc', { id }));
+  return await withBusy(() => invoke('get_game_dlc', { id, candidateDlcId }));
 }
 
 export async function getRunners() {

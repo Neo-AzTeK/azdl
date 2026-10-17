@@ -103,6 +103,16 @@ describe('API - Desktop Mode IPC Bridge', () => {
     expect(mockInvoke).toHaveBeenCalledWith('search_steam_games', { query: 'halflife' });
   });
 
+  it('passes the selected catalog DLC to the parent game lookup', async () => {
+    mockInvoke.mockResolvedValueOnce({ available: [{ id: '3875100' }], installed: [] });
+    const result = await api.getGameDlc('parent-game', 3875100);
+    expect(mockInvoke).toHaveBeenCalledWith('get_game_dlc', {
+      id: 'parent-game',
+      candidateDlcId: 3875100,
+    });
+    expect(result.available[0].id).toBe('3875100');
+  });
+
   it('invokes diagnose with id', async () => {
     mockInvoke.mockResolvedValueOnce({ checks: [] });
     await api.diagnoseGame('hl2');

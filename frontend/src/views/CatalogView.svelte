@@ -42,6 +42,11 @@
         notify.error('The parent game for this DLC is unavailable.');
         return true;
       }
+      const dlcId = Number(entry.steam_app_id);
+      if (!Number.isInteger(dlcId) || dlcId <= 0) {
+        notify.error('This DLC has no valid Steam App ID.');
+        return true;
+      }
       if (!parentTitle) {
         parentTitle = (await getSteamDetails(parentId))?.name;
       }
@@ -51,7 +56,8 @@
         source_id: 'steam',
         steam_app_id: parentId,
         title: parentTitle || `Steam game ${parentId}`,
-        selected_dlc_id: String(entry.steam_app_id),
+        selected_dlc_id: String(dlcId),
+        selected_dlc_title: entry.title,
       });
       return true;
     }

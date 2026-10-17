@@ -5,7 +5,7 @@ use azdl::Result as AzdlResult;
 use azdl::data_dir;
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -43,6 +43,30 @@ fn steam_dlc_provider_status(data_dir: &Path, source: Option<&str>) -> Result<()
         .map_err(|_| {
             "The selected download plugin is missing or has no usable depot downloader".to_string()
         })
+}
+
+fn dlc_ids_for_display(
+    app_id: u32,
+    observations: &[azdl::steam_content::ObservedDlcReceipt],
+    appinfo: Option<&azdl::steam_metadata::SteamAppMetadata>,
+    store_ids: Option<&[u32]>,
+    candidate_dlc_id: Option<u32>,
+) -> Vec<u32> {
+    let mut ids = observations
+        .iter()
+        .filter(|receipt| receipt.app_id == app_id)
+        .map(|receipt| receipt.dlc_id)
+        .collect::<BTreeSet<_>>();
+    if let Some(appinfo) = appinfo {
+        ids.extend(appinfo.dlc_ids.iter().copied());
+    }
+    if let Some(store_ids) = store_ids {
+        ids.extend(store_ids.iter().copied());
+    }
+    if let Some(candidate) = candidate_dlc_id.filter(|id| *id > 0) {
+        ids.insert(candidate);
+    }
+    ids.into_iter().collect()
 }
 
 fn reserve_metadata_lookup(pending: &mut HashSet<String>, key: String) -> bool {
@@ -3221,7 +3245,11 @@ mod commands {
     }
 
     #[tauri::command]
-    pub async fn get_game_dlc(state: State<'_, AppState>, id: String) -> Result<Value, String> {
+    pub async fn get_game_dlc(
+        state: State<'_, AppState>,
+        id: String,
+        candidate_dlc_id: Option<u32>,
+    ) -> Result<Value, String> {
         let data_dir = state.data_dir.clone();
         tauri::async_runtime::spawn_blocking(move || {
             let library = load_library(&data_dir).map_err(|e| e.to_string())?;
@@ -3253,23 +3281,20 @@ mod commands {
                     .map_err(|e| e.to_string())?;
                 let appinfo = azdl::steam_metadata::fetch_appinfo(app_id);
                 let store_ids = azdl::steam_metadata::fetch_store_dlc_ids(app_id);
-                let mut ids = observations
-                    .iter()
-                    .filter(|receipt| receipt.app_id == app_id)
-                    .map(|receipt| receipt.dlc_id)
-                    .collect::<std::collections::BTreeSet<_>>();
                 let mut depots = std::collections::BTreeMap::new();
                 match &appinfo {
                     Ok(metadata) => {
                         depots = azdl::steam_metadata::dlc_depots(metadata);
-                        ids.extend(metadata.dlc_ids.iter().copied());
                     }
                     Err(error) => metadata_error = Some(error.to_string()),
                 }
-                if let Ok(store_ids) = &store_ids {
-                    ids.extend(store_ids.iter().copied());
-                }
-                let ids = ids.into_iter().collect::<Vec<_>>();
+                let ids = super::dlc_ids_for_display(
+                    app_id,
+                    &observations,
+                    appinfo.as_ref().ok(),
+                    store_ids.as_ref().ok().map(Vec::as_slice),
+                    candidate_dlc_id,
+                );
                 let source = game
                     .origin
                     .as_ref()
@@ -3308,7 +3333,7 @@ mod commands {
                         Err(error) => Err(error.to_string()),
                     }
                 };
-                let details = ids
+                let mut details = ids
                     .chunks(4)
                     .take(if appinfo.is_ok() || store_ids.is_ok() { 3 } else { 0 })
                     .flat_map(|batch| {
@@ -3330,6 +3355,12 @@ mod commands {
                         })
                     })
                     .collect::<std::collections::HashMap<_, _>>();
+                if let Some(candidate) = candidate_dlc_id.filter(|id| *id > 0)
+                    && !details.contains_key(&candidate)
+                    && let Ok(detail) = azdl::steam_metadata::fetch_appinfo(candidate)
+                {
+                    details.insert(candidate, detail);
+                }
                 for dlc_id in ids {
                     let id = dlc_id.to_string();
                     if available.iter().any(|addon| addon["id"] == id) {
@@ -3868,6 +3899,25 @@ mod tests {
         let missing_provider = steam_dlc_provider_status(&root, Some("steamidra")).unwrap_err();
         assert!(missing_provider.contains("missing"));
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn selected_catalog_dlc_survives_missing_parent_lists() {
+        let ids = dlc_ids_for_display(100, &[], None, None, Some(200));
+        assert_eq!(ids, vec![200]);
+        assert!(dlc_ids_for_display(100, &[], None, None, Some(0)).is_empty());
+
+        let observation = azdl::steam_content::ObservedDlcReceipt {
+            game_id: "game".into(),
+            app_id: 100,
+            dlc_id: 200,
+            depots: Vec::new(),
+            verified_unix: 1,
+        };
+        assert_eq!(
+            dlc_ids_for_display(100, &[observation], None, Some(&[200, 201]), Some(201)),
+            vec![200, 201]
+        );
     }
 
     #[test]
