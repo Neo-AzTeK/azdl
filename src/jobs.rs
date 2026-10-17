@@ -332,6 +332,18 @@ pub fn list_jobs(data_dir: &Path) -> Result<Vec<DownloadJob>> {
     Ok(jobs)
 }
 
+/// Whether a live DLC worker is downloading or committing content for this game.
+pub fn has_active_dlc_download(data_dir: &Path, game_id: &str) -> Result<bool> {
+    Ok(list_jobs(data_dir)?.iter().any(|job| {
+        job.kind == JobKind::Dlc
+            && job.status == JobStatus::Running
+            && job
+                .install
+                .as_ref()
+                .is_some_and(|plan| plan.game_id == game_id)
+    }))
+}
+
 fn dlc_active_lock_path(data_dir: &Path, id: &str) -> Result<PathBuf> {
     Ok(job_path(data_dir, id)?.with_extension("active-lock"))
 }

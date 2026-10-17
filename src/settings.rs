@@ -339,6 +339,9 @@ pub fn move_game_to_drive(
         .ok_or_else(|| format!("Game '{game_id}' not found in library"))?;
 
     let _dlc_lock = crate::dlc::lock_game(data_dir, game_id)?;
+    if crate::jobs::has_active_dlc_download(data_dir, game_id)? {
+        return Err("Wait for the DLC download to finish before moving this game".into());
+    }
     crate::dlc::prepare_move(game, data_dir)?;
 
     let old_dir = &game.install_dir;
@@ -380,6 +383,67 @@ pub fn move_game_to_drive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moving_game_waits_for_active_dlc_download() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-move-dlc-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let game_dir = root.join("games/game");
+        fs::create_dir_all(&game_dir).unwrap();
+        fs::write(game_dir.join("game.exe"), b"base").unwrap();
+        let drive = add_storage_drive(&root, "Other", &root.join("other")).unwrap();
+        let mut library = crate::Library::default();
+        crate::add_game(
+            &mut library,
+            "game",
+            "Game",
+            &game_dir,
+            Path::new("game.exe"),
+        )
+        .unwrap();
+        let id = "00000000000000d1";
+        let worker = crate::jobs::lock_dlc_worker(&root, id).unwrap();
+        crate::jobs::save_job(
+            &root,
+            &crate::jobs::DownloadJob {
+                id: id.into(),
+                kind: crate::jobs::JobKind::Dlc,
+                url: "steam://100/dlc/200".into(),
+                target: root.join("dlc-downloads/game/200/payload"),
+                status: crate::jobs::JobStatus::Running,
+                pid: Some(std::process::id()),
+                error: None,
+                updated_unix: 0,
+                expected_sha256: None,
+                install: Some(crate::jobs::InstallPlan {
+                    game_id: "game".into(),
+                    title: "Game".into(),
+                    kind: crate::jobs::InstallKind::Archive,
+                }),
+                install_state: Some(crate::jobs::InstallState::Pending),
+                install_error: None,
+                progress_bytes: Some(0),
+                total_bytes: None,
+            },
+        )
+        .unwrap();
+        let error = move_game_to_drive(&root, &mut library, "game", &drive.id)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("DLC download"), "{error}");
+        assert!(game_dir.join("game.exe").exists());
+        assert_eq!(library.games["game"].install_dir, game_dir);
+        drop(worker);
+        let moved = move_game_to_drive(&root, &mut library, "game", &drive.id).unwrap();
+        assert_eq!(fs::read(moved.join("game.exe")).unwrap(), b"base");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn test_settings_load_save_defaults() {

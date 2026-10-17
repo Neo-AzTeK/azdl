@@ -216,11 +216,7 @@ pub fn validate_id(id: &str) -> Result<()> {
 pub fn remove_game(library: &mut Library, data_dir: &Path, id: &str) -> Result<()> {
     validate_id(id)?;
     let _lock = dlc::lock_game(data_dir, id)?;
-    if jobs::list_jobs(data_dir)?.iter().any(|job| {
-        job.kind == jobs::JobKind::Dlc
-            && job.status == jobs::JobStatus::Running
-            && job.install.as_ref().is_some_and(|plan| plan.game_id == id)
-    }) {
+    if jobs::has_active_dlc_download(data_dir, id)? {
         return Err("Wait for the DLC download to finish before removing this game".into());
     }
     let game = library

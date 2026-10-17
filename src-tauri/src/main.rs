@@ -2037,6 +2037,12 @@ mod commands {
                     let mut tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
                     if tasks
                         .iter()
+                        .any(|task| task.id == format!("move-{id}") && task.status == "running")
+                    {
+                        return Err("Wait for the game move to finish before installing DLC".into());
+                    }
+                    if tasks
+                        .iter()
                         .any(|task| task.id == task_id && task.status == "running")
                     {
                         return Ok(
@@ -2832,9 +2838,28 @@ mod commands {
                 Ok(json!({ "success": true, "default": drive_id }))
             }
             Action::StorageMoveGame { id, drive_id } => {
+                let content_lock =
+                    azdl::dlc::lock_game(data_dir, &id).map_err(|error| error.to_string())?;
+                if state
+                    .running_games
+                    .lock()
+                    .map_err(|_| "Running game state lock poisoned")?
+                    .contains_key(&id)
+                {
+                    return Err("Stop the game before moving it".into());
+                }
                 let task_id = format!("move-{id}");
                 {
                     let mut tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
+                    if tasks.iter().any(|task| {
+                        task.game_id.as_deref() == Some(&id)
+                            && task.status == "running"
+                            && task.id.starts_with("dlc-")
+                    }) {
+                        return Err(
+                            "Wait for the DLC operation to finish before moving this game".into(),
+                        );
+                    }
                     if tasks
                         .iter()
                         .any(|t| t.id == task_id && t.status == "running")
@@ -2851,6 +2876,7 @@ mod commands {
                         log_tail: String::new(),
                     });
                 }
+                drop(content_lock);
                 let state_clone = state.clone();
                 let id_clone = id.clone();
                 let drive_id_clone = drive_id.clone();
@@ -4886,6 +4912,32 @@ mod tests {
             let running = state.running_games.lock().unwrap();
             assert!(!running.contains_key("proc-game"));
         }
+    }
+
+    #[test]
+    fn game_move_waits_for_registered_dlc_task() {
+        let root = scratch();
+        let state = test_state(&root);
+        state.tasks.lock().unwrap().push(TaskInfo {
+            id: "dlc-game-200".into(),
+            label: "Installing DLC".into(),
+            status: "running".into(),
+            pid: None,
+            game_id: Some("game".into()),
+            log_tail: String::new(),
+        });
+        let error = handle_run_action(
+            &state,
+            Action::StorageMoveGame {
+                id: "game".into(),
+                drive_id: "default".into(),
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("DLC operation"), "{error}");
+        assert_eq!(state.tasks.lock().unwrap().len(), 1);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
