@@ -30,6 +30,9 @@ pub struct DlcFile {
     /// SHA-256 of the base file saved under `backup/` before an archive overlay.
     #[serde(default)]
     pub backup_sha256: Option<String>,
+    /// This DLC shares the visible overlay bytes and an independent base backup.
+    #[serde(default)]
+    pub shared_overlay: bool,
 }
 
 fn default_true() -> bool {
@@ -402,15 +405,11 @@ fn install_payload_unlocked(
             let sha256 = file_sha256(&payload.join(&relative))?;
             let references = installed_manifests
                 .iter()
-                .flat_map(|manifest| &manifest.files)
-                .filter(|file| file.path == relative)
+                .flat_map(|manifest| manifest.files.iter().map(move |file| (manifest, file)))
+                .filter(|(_, file)| file.path == relative)
                 .collect::<Vec<_>>();
-            if references.iter().any(|file| file.backup_sha256.is_some()) {
-                return Err(
-                    format!("Another DLC overlay already owns {}", relative.display()).into(),
-                );
-            }
             let mut backup_sha256 = None;
+            let mut shared_overlay = false;
             let created = match fs::symlink_metadata(&target) {
                 Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
                     let existing_hash = file_sha256(&target)?;
@@ -432,6 +431,36 @@ fn install_payload_unlocked(
                             return Err("Base file changed while preparing DLC backup".into());
                         }
                         backup_sha256 = Some(existing_hash);
+                    } else if let Some((owner, file)) = references
+                        .iter()
+                        .find(|(_, file)| file.backup_sha256.is_some())
+                    {
+                        if references.iter().any(|(_, other)| {
+                            other.sha256 != sha256
+                                || other.backup_sha256 != file.backup_sha256
+                        }) {
+                            return Err("Installed DLC overlay ownership is inconsistent".into());
+                        }
+                        let backup_hash = file
+                            .backup_sha256
+                            .as_ref()
+                            .ok_or("DLC overlay has no backup hash")?;
+                        let from = check_target(
+                            &state_dir(data_dir, &game.id, &owner.dlc_id),
+                            &Path::new("backup").join(&relative),
+                        )?;
+                        if file_sha256(&from)? != *backup_hash {
+                            return Err("Installed DLC overlay backup has changed".into());
+                        }
+                        let backup = staging.join("backup").join(&relative);
+                        fs::create_dir_all(backup.parent().ok_or("invalid DLC backup path")?)?;
+                        fs::copy(&from, &backup)?;
+                        File::open(&backup)?.sync_all()?;
+                        if file_sha256(&backup)? != *backup_hash {
+                            return Err("Shared DLC overlay backup copy does not match".into());
+                        }
+                        backup_sha256 = Some(backup_hash.clone());
+                        shared_overlay = true;
                     }
                     false
                 }
@@ -443,7 +472,7 @@ fn install_payload_unlocked(
                 || backup_sha256.is_some()
                 || references
                     .iter()
-                    .any(|file| file.sha256 == sha256 && file.managed);
+                    .any(|(_, file)| file.sha256 == sha256 && file.managed);
             let name = relative
                 .file_name()
                 .ok_or("DLC file has no name")?
@@ -465,6 +494,7 @@ fn install_payload_unlocked(
                 managed,
                 created,
                 backup_sha256,
+                shared_overlay,
             });
         }
         for portable in &portable_paths {
@@ -488,7 +518,7 @@ fn install_payload_unlocked(
         output.sync_all()?;
         fs::rename(&staging, &state)?;
         for entry in &manifest.files {
-            if !entry.created && entry.backup_sha256.is_none() {
+            if !entry.created && (entry.backup_sha256.is_none() || entry.shared_overlay) {
                 let target = check_target(&install, &entry.path)?;
                 if file_sha256(&target)? != entry.sha256 {
                     return Err("Shared DLC file changed during installation".into());
@@ -936,11 +966,20 @@ fn remove_unlocked(game: &Game, data_dir: &Path, dlc_id: &str) -> Result<()> {
             continue;
         }
         if let Some(backup_hash) = &file.backup_sha256 {
-            if other_manifests
+            let other_owners = other_manifests
                 .iter()
-                .any(|other| other.files.iter().any(|entry| entry.path == file.path))
-            {
-                return Err("Another DLC depends on the file being restored".into());
+                .flat_map(|other| &other.files)
+                .filter(|entry| entry.path == file.path)
+                .collect::<Vec<_>>();
+            if !other_owners.is_empty() {
+                if other_owners.iter().any(|other| {
+                    !other.managed
+                        || other.sha256 != file.sha256
+                        || other.backup_sha256.as_ref() != Some(backup_hash)
+                }) {
+                    return Err("Another DLC has incompatible overlay ownership".into());
+                }
+                continue;
             }
             let target = check_target(install, &file.path)?;
             let staged = check_target(install, &file.staged_path)?;
@@ -1062,8 +1101,38 @@ mod tests {
             fs::read(state.join("backup/content/shared.bin")).unwrap(),
             b"base"
         );
-        let error = install_overlay(&game, "other").unwrap_err().to_string();
-        assert!(error.contains("overlay already owns"), "{error}");
+        assert_eq!(install_overlay(&game, "other").unwrap(), 1);
+        let other_state = state_dir(&data_dir, &game.id, "other");
+        assert_eq!(
+            fs::read(other_state.join("backup/content/shared.bin")).unwrap(),
+            b"base"
+        );
+        fs::remove_file(other_state.join("complete")).unwrap();
+        recover_interrupted(&game, &data_dir, "other").unwrap();
+        assert_eq!(
+            fs::read(game.install_dir.join("content/shared.bin")).unwrap(),
+            b"addon"
+        );
+        assert_eq!(install_overlay(&game, "other").unwrap(), 1);
+        remove(&game, &data_dir, "addon").unwrap();
+        assert_eq!(
+            fs::read(game.install_dir.join("content/shared.bin")).unwrap(),
+            b"addon"
+        );
+        remove(&game, &data_dir, "other").unwrap();
+        assert_eq!(
+            fs::read(game.install_dir.join("content/shared.bin")).unwrap(),
+            b"base"
+        );
+        assert_eq!(install_overlay(&game, "addon").unwrap(), 1);
+        assert_eq!(install_overlay(&game, "other").unwrap(), 1);
+        remove(&game, &data_dir, "other").unwrap();
+        remove(&game, &data_dir, "addon").unwrap();
+        assert_eq!(
+            fs::read(game.install_dir.join("content/shared.bin")).unwrap(),
+            b"base"
+        );
+        assert_eq!(install_overlay(&game, "addon").unwrap(), 1);
         fs::write(game.install_dir.join("content/shared.bin"), b"user edit").unwrap();
         assert!(remove(&game, &data_dir, "addon").is_err());
         assert_eq!(
