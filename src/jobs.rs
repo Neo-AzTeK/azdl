@@ -170,7 +170,32 @@ fn process_alive(pid: u32) -> bool {
     Path::new("/proc").join(pid.to_string()).is_dir()
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+fn process_alive(pid: u32) -> bool {
+    use std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit_handle: i32, process_id: u32) -> *mut c_void;
+        fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    if pid == 0 {
+        return false;
+    }
+    // SYNCHRONIZE is sufficient to test whether the launcher worker has exited.
+    let handle = unsafe { OpenProcess(0x0010_0000, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;
+    let alive = unsafe { WaitForSingleObject(handle, 0) == WAIT_TIMEOUT };
+    unsafe { CloseHandle(handle) };
+    alive
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn process_alive(_pid: u32) -> bool {
     true
 }
@@ -1171,6 +1196,14 @@ pub fn clear_completed_jobs(data_dir: &Path) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_worker_liveness_distinguishes_running_and_missing_processes() {
+        assert!(process_alive(std::process::id()));
+        assert!(!process_alive(0));
+        assert!(!process_alive(u32::MAX));
+    }
 
     #[test]
     fn dlc_cancellation_stops_before_commit_and_rejects_after_commit_begins() {
