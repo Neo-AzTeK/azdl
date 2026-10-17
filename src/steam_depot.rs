@@ -535,6 +535,33 @@ fn verify_legacy_base_with(
     fetch_bundle: impl FnMut(&Path, u32) -> Result<PathBuf>,
 ) -> Result<crate::steam_content::BaseContentReceipt> {
     let app_id = metadata.app_id;
+    let depots = resolve_base_manifests_with(
+        &root.join("base-verification-provider"),
+        metadata,
+        load_app,
+        fetch_bundle,
+    )?;
+    verify_base_manifest_files(game, &depots)?;
+    Ok(crate::steam_content::BaseContentReceipt {
+        game_id: game.id.clone(),
+        app_id,
+        depots: depots
+            .iter()
+            .map(|(depot, _)| crate::steam_content::DepotRevision {
+                depot_id: depot.depot_id,
+                manifest_id: depot.manifest_id.to_string(),
+            })
+            .collect(),
+        origin: crate::steam_content::BaseReceiptOrigin::VerifiedLegacy,
+    })
+}
+
+fn resolve_base_manifests_with(
+    root: &Path,
+    metadata: &SteamAppMetadata,
+    load_app: impl FnMut(u32) -> Result<SteamAppMetadata>,
+    fetch_bundle: impl FnMut(&Path, u32) -> Result<PathBuf>,
+) -> Result<Vec<(DepotInfo, crate::steam_manifest::DepotManifest)>> {
     let selected_ids = metadata
         .depots
         .iter()
@@ -548,14 +575,9 @@ fn verify_legacy_base_with(
                 .into(),
         );
     }
-    let depots = resolve_dlc_download_groups_with(
-        &root.join("base-verification-provider"),
-        metadata,
-        &selected_ids,
-        load_app,
-        fetch_bundle,
-    )?
-    .depots;
+    let depots =
+        resolve_dlc_download_groups_with(root, metadata, &selected_ids, load_app, fetch_bundle)?
+            .depots;
     let manifests = depots
         .iter()
         .map(|depot| {
@@ -567,7 +589,14 @@ fn verify_legacy_base_with(
         })
         .collect::<Result<Vec<_>>>()?;
     crate::steam_manifest::validate_manifest_set(&manifests)?;
-    for (depot, manifest) in depots.iter().zip(&manifests) {
+    Ok(depots.into_iter().zip(manifests).collect())
+}
+
+fn verify_base_manifest_files(
+    game: &Game,
+    depots: &[(DepotInfo, crate::steam_manifest::DepotManifest)],
+) -> Result<()> {
+    for (depot, manifest) in depots {
         let result = crate::steam_manifest::verify_installed(manifest, &game.install_dir)?;
         if !result.complete() {
             return Err(format!(
@@ -577,18 +606,7 @@ fn verify_legacy_base_with(
             .into());
         }
     }
-    Ok(crate::steam_content::BaseContentReceipt {
-        game_id: game.id.clone(),
-        app_id,
-        depots: depots
-            .iter()
-            .map(|depot| crate::steam_content::DepotRevision {
-                depot_id: depot.depot_id,
-                manifest_id: depot.manifest_id.to_string(),
-            })
-            .collect(),
-        origin: crate::steam_content::BaseReceiptOrigin::VerifiedLegacy,
-    })
+    Ok(())
 }
 
 /// Verify existing DLC files, or download selected depots into a managed base game.
@@ -827,6 +845,12 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             }
         };
         crate::steam_content::validate_base_revision(&receipt, &metadata)?;
+        let base_manifests = resolve_base_manifests_with(
+            &root.join("base-verification-provider"),
+            &metadata,
+            crate::steam_metadata::fetch_appinfo,
+            fetch_provider_bundle,
+        )?;
         crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
         let lib_path = find_depotkit_library(data_dir).map_err(
             |_| "The selected download plugin does not provide a usable depot downloader",
@@ -856,7 +880,15 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
                     )
                 },
             )?;
-            commit_steam_dlc(game, data_dir, dlc_id, &payload, &receipt, &job_id)
+            commit_steam_dlc(
+                game,
+                data_dir,
+                dlc_id,
+                &payload,
+                &receipt,
+                &base_manifests,
+                &job_id,
+            )
         })()
     })();
     let cleanup = remove_staging_dir(&root);
@@ -962,6 +994,7 @@ fn commit_steam_dlc(
     dlc_id: u32,
     payload: &Path,
     expected_base: &crate::steam_content::BaseContentReceipt,
+    base_manifests: &[(DepotInfo, crate::steam_manifest::DepotManifest)],
     job_id: &str,
 ) -> Result<usize> {
     crate::dlc::install_staged_with_guard(game, data_dir, &dlc_id.to_string(), payload, || {
@@ -972,6 +1005,7 @@ fn commit_steam_dlc(
                     .into(),
             );
         }
+        verify_base_manifest_files(game, base_manifests)?;
         crate::jobs::begin_dlc_commit(data_dir, job_id)
     })
 }
@@ -1957,12 +1991,28 @@ mod tests {
             }],
             origin: crate::steam_content::BaseReceiptOrigin::ManagedInstall,
         };
+        let base_depot = depot(101, 11, "game.exe", b"base");
+        let base_manifest = crate::steam_manifest::read_manifest(
+            &base_depot.manifest_path,
+            base_depot.depot_id,
+            base_depot.manifest_id,
+        )
+        .unwrap();
+        let base_manifests = vec![(base_depot, base_manifest)];
         let mut changed = base.clone();
         changed.depots[0].manifest_id = "12".into();
         crate::steam_content::save_base_receipt(&data_dir, &changed).unwrap();
-        let error = commit_steam_dlc(&game, &data_dir, 900, &payload, &base, &job_id)
-            .unwrap_err()
-            .to_string();
+        let error = commit_steam_dlc(
+            &game,
+            &data_dir,
+            900,
+            &payload,
+            &base,
+            &base_manifests,
+            &job_id,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("Base game revision changed"), "{error}");
         assert!(!game_dir.join("data/first.bin").exists());
         assert_eq!(
@@ -1970,8 +2020,32 @@ mod tests {
             Some(InstallState::Pending)
         );
         crate::steam_content::save_base_receipt(&data_dir, &base).unwrap();
+        fs::write(game_dir.join("game.exe"), b"changed").unwrap();
+        let error = commit_steam_dlc(
+            &game,
+            &data_dir,
+            900,
+            &payload,
+            &base,
+            &base_manifests,
+            &job_id,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("Base depot 101 differs"), "{error}");
+        assert!(!game_dir.join("data/first.bin").exists());
+        fs::write(game_dir.join("game.exe"), b"base").unwrap();
         assert_eq!(
-            commit_steam_dlc(&game, &data_dir, 900, &payload, &base, &job_id).unwrap(),
+            commit_steam_dlc(
+                &game,
+                &data_dir,
+                900,
+                &payload,
+                &base,
+                &base_manifests,
+                &job_id
+            )
+            .unwrap(),
             2
         );
         crate::dlc::remove(&game, &data_dir, "900").unwrap();
