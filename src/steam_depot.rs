@@ -513,6 +513,22 @@ pub fn verify_legacy_base(
     root: &Path,
     metadata: &crate::steam_metadata::SteamAppMetadata,
 ) -> Result<crate::steam_content::BaseContentReceipt> {
+    verify_legacy_base_with(
+        game,
+        root,
+        metadata,
+        crate::steam_metadata::fetch_appinfo,
+        fetch_provider_bundle,
+    )
+}
+
+fn verify_legacy_base_with(
+    game: &Game,
+    root: &Path,
+    metadata: &SteamAppMetadata,
+    load_app: impl FnMut(u32) -> Result<SteamAppMetadata>,
+    fetch_bundle: impl FnMut(&Path, u32) -> Result<PathBuf>,
+) -> Result<crate::steam_content::BaseContentReceipt> {
     let app_id = metadata.app_id;
     let selected_ids = metadata
         .depots
@@ -527,19 +543,27 @@ pub fn verify_legacy_base(
                 .into(),
         );
     }
-    let depots = resolve_dlc_download_groups(
+    let depots = resolve_dlc_download_groups_with(
         &root.join("base-verification-provider"),
         metadata,
         &selected_ids,
+        load_app,
+        fetch_bundle,
     )?
     .depots;
-    for depot in &depots {
-        let manifest = crate::steam_manifest::read_manifest(
-            &depot.manifest_path,
-            depot.depot_id,
-            depot.manifest_id,
-        )?;
-        let result = crate::steam_manifest::verify_installed(&manifest, &game.install_dir)?;
+    let manifests = depots
+        .iter()
+        .map(|depot| {
+            crate::steam_manifest::read_manifest(
+                &depot.manifest_path,
+                depot.depot_id,
+                depot.manifest_id,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    crate::steam_manifest::validate_manifest_set(&manifests)?;
+    for (depot, manifest) in depots.iter().zip(&manifests) {
+        let result = crate::steam_manifest::verify_installed(manifest, &game.install_dir)?;
         if !result.complete() {
             return Err(format!(
                 "Base depot {} differs from the current provider manifest ({} missing, {} changed files); reinstall the base game before adding DLC",
@@ -1377,6 +1401,51 @@ fn install_steam_manifest_game_in_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha1::{Digest, Sha1};
+
+    fn binary_manifest_fixture(
+        depot_id: u32,
+        manifest_id: u64,
+        path: &str,
+        body: &[u8],
+    ) -> Vec<u8> {
+        fn varint(mut value: u64) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            while value >= 128 {
+                bytes.push((value as u8 & 0x7f) | 0x80);
+                value >>= 7;
+            }
+            bytes.push(value as u8);
+            bytes
+        }
+        fn number(field: u8, value: u64) -> Vec<u8> {
+            let mut bytes = vec![field << 3];
+            bytes.extend(varint(value));
+            bytes
+        }
+        fn field_bytes(field: u8, value: &[u8]) -> Vec<u8> {
+            let mut bytes = vec![(field << 3) | 2];
+            bytes.extend(varint(value.len() as u64));
+            bytes.extend(value);
+            bytes
+        }
+        fn section(magic: u32, payload: &[u8]) -> Vec<u8> {
+            let mut bytes = magic.to_le_bytes().to_vec();
+            bytes.extend((payload.len() as u32).to_le_bytes());
+            bytes.extend(payload);
+            bytes
+        }
+        let mut file = field_bytes(1, path.as_bytes());
+        file.extend(number(2, body.len() as u64));
+        file.extend(field_bytes(5, &Sha1::digest(body)));
+        let mut metadata = number(1, u64::from(depot_id));
+        metadata.extend(number(2, manifest_id));
+        let mut manifest = section(0x71F617D0, &field_bytes(1, &file));
+        manifest.extend(section(0x1F4812BE, &metadata));
+        manifest.extend(section(0x1B81B817, &[]));
+        manifest.extend(0x32C415AB_u32.to_le_bytes());
+        manifest
+    }
 
     #[test]
     fn base_install_does_not_fetch_catalog_dlc_archives() {
@@ -1735,6 +1804,116 @@ mod tests {
         fs::write(shared_bundle.join("202_23.manifest"), b"wrong").unwrap();
         let error = resolve().unwrap_err().to_string();
         assert!(error.contains("provider revision differs"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_base_verifies_parent_and_shared_depot_bytes_before_receipt() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-shared-base-verify-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let game_dir = root.join("game");
+        let parent_bundle = root.join("parent-provider");
+        let shared_bundle = root.join("shared-provider");
+        for dir in [&game_dir, &parent_bundle, &shared_bundle] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(game_dir.join("base.bin"), b"base").unwrap();
+        fs::write(game_dir.join("shared.bin"), b"shared").unwrap();
+        let key = "0123456789abcdef0123456789abcdef";
+        fs::write(
+            parent_bundle.join("100.lua"),
+            format!("addappid(101,0,\"{key}\")\nsetManifestid(101,\"11\")"),
+        )
+        .unwrap();
+        fs::write(
+            shared_bundle.join("200.lua"),
+            format!("addappid(102,0,\"{key}\")\nsetManifestid(102,\"22\")"),
+        )
+        .unwrap();
+        fs::write(
+            parent_bundle.join("101_11.manifest"),
+            binary_manifest_fixture(101, 11, "base.bin", b"base"),
+        )
+        .unwrap();
+        fs::write(
+            shared_bundle.join("102_22.manifest"),
+            binary_manifest_fixture(102, 22, "shared.bin", b"shared"),
+        )
+        .unwrap();
+        let parent = crate::steam_metadata::parse_appinfo(
+            br#"{"data":{"100":{"depots":{"101":{"manifests":{"public":{"gid":"11"}}},"102":{"depotfromapp":"200"}}}}}"#,
+            100,
+        )
+        .unwrap();
+        let shared = crate::steam_metadata::parse_appinfo(
+            br#"{"data":{"200":{"depots":{"102":{"manifests":{"public":{"gid":"22"}}}}}}}"#,
+            200,
+        )
+        .unwrap();
+        let game = Game {
+            id: "game".into(),
+            title: "Game".into(),
+            install_dir: game_dir.clone(),
+            executable: PathBuf::from("base.bin"),
+            runner: crate::Runner::Auto,
+            arguments: Vec::new(),
+            environment: BTreeMap::new(),
+            last_played_unix: None,
+            origin: None,
+            steam_app_id: Some(100),
+            launch_options: Vec::new(),
+            selected_launch_option_id: None,
+            cover_url: None,
+            banner_url: None,
+        };
+        let verify = || {
+            verify_legacy_base_with(
+                &game,
+                &root,
+                &parent,
+                |id| {
+                    assert_eq!(id, 200);
+                    Ok(shared.clone())
+                },
+                |_, id| match id {
+                    100 => Ok(parent_bundle.clone()),
+                    200 => Ok(shared_bundle.clone()),
+                    _ => panic!("unexpected provider App ID"),
+                },
+            )
+        };
+        let receipt = verify().unwrap();
+        assert_eq!(
+            receipt.origin,
+            crate::steam_content::BaseReceiptOrigin::VerifiedLegacy
+        );
+        assert_eq!(
+            receipt.depots,
+            vec![
+                crate::steam_content::DepotRevision {
+                    depot_id: 101,
+                    manifest_id: "11".into()
+                },
+                crate::steam_content::DepotRevision {
+                    depot_id: 102,
+                    manifest_id: "22".into()
+                },
+            ]
+        );
+        assert!(!root.join("content-receipts").exists());
+        assert_eq!(fs::read(game_dir.join("base.bin")).unwrap(), b"base");
+        assert_eq!(fs::read(game_dir.join("shared.bin")).unwrap(), b"shared");
+
+        fs::write(game_dir.join("shared.bin"), b"changed").unwrap();
+        let error = verify().unwrap_err().to_string();
+        assert!(error.contains("Base depot 102 differs"), "{error}");
+        assert!(!root.join("content-receipts").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
