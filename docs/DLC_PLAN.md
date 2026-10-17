@@ -102,7 +102,7 @@ Keep the existing DLC section on the installed game's page as the management sur
 
 Keep DLC work in the existing background task and transfer drawer flow. Register its job before lengthy metadata or base-file checks so the user can see that work started, and persist enough state to recover after restart. Tauri remains a command/event adapter; Svelte displays core state and available actions. Add phase labels only if the existing status proves confusing in use.
 
-Keep Install, Remove, and Recover actions in the existing `GamePageView.svelte` section. Managed and verified legacy DLC records now remain visible after metadata lookup errors. Fix further concrete defects without a broader state or component rewrite. Reuse the current notifications service and activity indicator.
+Keep Install, Remove, and Recover actions in the existing `GamePageView.svelte` section. Managed and verified legacy DLC records remain visible after metadata lookup errors. If the selected depot plugin is removed, the rows remain visible while install and check actions become unavailable with a reason; the provider absence path has an offline test. Fix further concrete defects without a broader state or component rewrite. Reuse the current notifications service and activity indicator.
 
 File installation does not establish that a game grants access to content; included content must not create a fake download or claim activation. Steam's game-facing APIs distinguish ownership and installation; their callbacks do not replace azdl's own job events. See [ISteamApps](https://partner.steamgames.com/doc/api/ISteamApps?l=english).
 

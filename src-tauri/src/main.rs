@@ -34,6 +34,17 @@ const MAX_CONCURRENT_METADATA_LOOKUPS: usize = 8;
 const MAX_METADATA_CACHE_ENTRIES: usize = 2048;
 const FIX_STATUS_CACHE_TTL: Duration = Duration::from_secs(15);
 
+fn steam_dlc_provider_status(data_dir: &Path, source: Option<&str>) -> Result<(), String> {
+    if source != Some("steamidra") {
+        return Err("This game's source does not provide Steam depot DLC".to_string());
+    }
+    azdl::steam_depot::find_depotkit_library(data_dir)
+        .map(|_| ())
+        .map_err(|_| {
+            "The selected download plugin is missing or has no usable depot downloader".to_string()
+        })
+}
+
 fn reserve_metadata_lookup(pending: &mut HashSet<String>, key: String) -> bool {
     if pending.len() >= MAX_CONCURRENT_METADATA_LOOKUPS || pending.contains(&key) {
         return false;
@@ -3259,33 +3270,43 @@ mod commands {
                     ids.extend(store_ids.iter().copied());
                 }
                 let ids = ids.into_iter().collect::<Vec<_>>();
-                let steam_source = game
+                let source = game
                     .origin
                     .as_ref()
                     .and_then(|origin| origin.qualified_id.split_once(':'))
-                    .is_some_and(|(source, _)| source == "steamidra");
+                    .map(|(source, _)| source);
+                let steam_source = source == Some("steamidra");
+                let provider_status = super::steam_dlc_provider_status(&data_dir, source);
                 let base_receipt = azdl::steam_content::load_base_receipt(&data_dir, &game.id);
                 let needs_existing_check = steam_source && matches!(&base_receipt, Ok(None));
                 let receipt_error = base_receipt.is_err();
-                let revision_mismatch = matches!((&base_receipt, &appinfo), (Ok(Some(receipt)), Ok(metadata))
-                        if azdl::steam_content::validate_base_revision(receipt, metadata).is_err());
-                let steam_eligibility = if steam_source {
-                    match base_receipt {
-                        Ok(Some(receipt)) => match &appinfo {
-                            Ok(metadata) => azdl::steam_content::validate_base_revision(
-                                &receipt, metadata,
-                            )
+                let revision_check = match (&base_receipt, &appinfo) {
+                    (Ok(Some(receipt)), Ok(metadata)) if provider_status.is_ok() => Some(
+                        azdl::steam_content::validate_base_revision(receipt, metadata)
                             .map_err(|error| error.to_string()),
-                            Err(error) => Err(error.to_string()),
-                        },
+                    ),
+                    _ => None,
+                };
+                let revision_mismatch = revision_check
+                    .as_ref()
+                    .is_some_and(|result| result.is_err());
+                let steam_eligibility = if let Err(error) = &provider_status {
+                    Err(error.clone())
+                } else {
+                    match &base_receipt {
+                        Ok(Some(_)) => revision_check.unwrap_or_else(|| {
+                            Err(appinfo
+                                .as_ref()
+                                .err()
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| "Base revision could not be checked".to_string()))
+                        }),
                         Ok(None) => Err(
                             "An older install needs a file check before missing DLC can be downloaded"
                                 .to_string(),
                         ),
                         Err(error) => Err(error.to_string()),
                     }
-                } else {
-                    Err("This game's source does not provide Steam depot DLC".to_string())
                 };
                 let details = ids
                     .chunks(4)
@@ -3335,7 +3356,7 @@ mod commands {
                         azdl::steam_content::DlcDepotAvailability::Unknown
                     )
                     .then_some("Steam metadata has not identified downloadable files for this DLC yet.");
-                    let can_check_content = steam_source
+                    let can_check_content = provider_status.is_ok()
                         && unavailable_reason.is_none()
                         && !receipt_error
                         && (!revision_mismatch || observed.is_some());
@@ -3355,7 +3376,9 @@ mod commands {
                         "interrupted": interrupted.contains(&id),
                         "depot_count": related.map_or(0, Vec::len),
                         "public_manifest_count": manifest_count,
-                        "reason": if observed.is_some() {
+                        "reason": if let Err(error) = &provider_status {
+                            Some(error.as_str())
+                        } else if observed.is_some() {
                             Some("Existing files matched a provider manifest when last checked. They are not managed by azdl and cannot be removed here.")
                         } else if !steam_source {
                             steam_eligibility.as_ref().err().map(String::as_str)
@@ -3829,6 +3852,23 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steam_dlc_requires_its_installed_download_provider() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-dlc-provider-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let wrong_source = steam_dlc_provider_status(&root, Some("other")).unwrap_err();
+        assert!(wrong_source.contains("does not provide Steam depot DLC"));
+        let missing_provider = steam_dlc_provider_status(&root, Some("steamidra")).unwrap_err();
+        assert!(missing_provider.contains("missing"));
+        assert!(!root.exists());
+    }
 
     #[test]
     fn steam_app_details_use_store_header_image() {
