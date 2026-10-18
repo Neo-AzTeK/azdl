@@ -661,7 +661,16 @@ fn install_plugin_game(
             .and_then(|s| s.parse::<u32>().ok())
     });
 
-    if game.source_id == "steamidra"
+    if (game.source_id == "steamidra"
+        || (crate::plugins::plugin_has_capability(
+            data_dir,
+            &game.source_id,
+            "steam_depot_download",
+        ) && crate::plugins::plugin_has_capability(
+            data_dir,
+            &game.source_id,
+            "manifest_provider",
+        )))
         && let Some(app_id) = steam_app_id
     {
         return crate::steam_depot::install_steam_manifest_game_in(

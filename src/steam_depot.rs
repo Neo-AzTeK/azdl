@@ -90,7 +90,7 @@ fn fetch_provider_bundle_for(
         return Err("Manifest archive path is a symbolic link".into());
     }
     let url = if let Some(dir) = data_dir {
-        crate::plugins::manifest_download_url_for_plugin(dir, plugin_id, app_id)
+        crate::plugins::manifest_download_url_for_plugin(dir, plugin_id, app_id)?
     } else {
         format!("https://ryuu.badkiko.ru/v1/download/{app_id}")
     };
@@ -648,6 +648,8 @@ struct ResolvedDlcDownloads {
 
 fn resolve_dlc_download_groups(
     root: &Path,
+    data_dir: &Path,
+    plugin_id: &str,
     metadata: &SteamAppMetadata,
     selected_ids: &BTreeSet<u32>,
 ) -> Result<ResolvedDlcDownloads> {
@@ -656,7 +658,9 @@ fn resolve_dlc_download_groups(
         metadata,
         selected_ids,
         crate::steam_metadata::fetch_appinfo,
-        fetch_provider_bundle,
+        |bundle_root, app_id| {
+            fetch_provider_bundle_for(Some(data_dir), plugin_id, bundle_root, app_id)
+        },
     )
 }
 
@@ -747,10 +751,15 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         .origin
         .as_ref()
         .and_then(|origin| origin.qualified_id.split_once(':'))
-        .map(|(source, _)| source);
-    if source != Some("steamidra") {
+        .map(|(source, _)| source)
+        .ok_or("This game has no selected download source")?;
+    if source != "steamidra"
+        && (!crate::plugins::plugin_has_capability(data_dir, source, "steam_depot_download")
+            || !crate::plugins::plugin_has_capability(data_dir, source, "manifest_provider"))
+    {
         return Err("This game's source does not provide Steam depot DLC".into());
     }
+    let _ = crate::plugins::manifest_download_url_for_plugin(data_dir, source, dlc_id)?;
     let root = data_dir
         .join("dlc-downloads")
         .join(&game.id)
@@ -817,7 +826,8 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             )
             .into());
         }
-        let downloads = resolve_dlc_download_groups(&root, &source_metadata, &selected_ids)?;
+        let downloads =
+            resolve_dlc_download_groups(&root, data_dir, source, &source_metadata, &selected_ids)?;
         crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
         let manifests = downloads
             .depots
@@ -872,7 +882,15 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         let receipt = match receipt.as_ref() {
             Some(receipt) => receipt.clone(),
             None => {
-                let verified = verify_legacy_base(game, &root, &metadata)?;
+                let verified = verify_legacy_base_with(
+                    game,
+                    &root,
+                    &metadata,
+                    crate::steam_metadata::fetch_appinfo,
+                    |bundle_root, app_id| {
+                        fetch_provider_bundle_for(Some(data_dir), source, bundle_root, app_id)
+                    },
+                )?;
                 crate::steam_content::save_base_receipt(data_dir, &verified)?;
                 verified
             }
@@ -882,17 +900,13 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             &root.join("base-verification-provider"),
             &metadata,
             crate::steam_metadata::fetch_appinfo,
-            fetch_provider_bundle,
+            |bundle_root, app_id| {
+                fetch_provider_bundle_for(Some(data_dir), source, bundle_root, app_id)
+            },
         )?;
         crate::steam_manifest::check_additive_install(&manifests, &game.install_dir)?;
         crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
-        let plugin_id = game
-            .origin
-            .as_ref()
-            .and_then(|o| o.qualified_id.split_once(':'))
-            .map(|(p, _)| p)
-            .unwrap_or("steamidra");
-        let lib_path = find_depotkit_library_for(data_dir, plugin_id).map_err(
+        let lib_path = find_depotkit_library_for(data_dir, source).map_err(
             |_| "The selected download plugin does not provide a usable depot downloader",
         )?;
         let mut job = load_job(data_dir, &job_id)?;
@@ -1212,7 +1226,12 @@ pub fn install_steam_manifest_game_in(
         return Ok(InstallOutcome::Installed(id));
     }
     let _game_lock = crate::dlc::lock_game(data_dir, &game.id)?;
-    let lib_path = find_depotkit_library(data_dir)
+    let plugin_id = if game.source_id.is_empty() {
+        "steamidra"
+    } else {
+        &game.source_id
+    };
+    let lib_path = find_depotkit_library_for(data_dir, plugin_id)
         .map_err(|_| "The selected download plugin does not provide a usable depot downloader")?;
 
     // 2. Prepare downloads directory
@@ -1248,7 +1267,7 @@ fn install_steam_manifest_game_in_inner(
         &game.source_id
     };
     let manifest_url =
-        crate::plugins::manifest_download_url_for_plugin(data_dir, plugin_id, app_id);
+        crate::plugins::manifest_download_url_for_plugin(data_dir, plugin_id, app_id)?;
     let manifest_zip = download_dir.join(format!("{app_id}.zip"));
     if !manifest_zip.is_file() || manifest_zip.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
         let output = clean_command("curl")
@@ -1366,7 +1385,7 @@ fn install_steam_manifest_game_in_inner(
             if manifest_app_id == app_id {
                 Ok(unpack_dir.clone())
             } else {
-                fetch_provider_bundle(root, manifest_app_id)
+                fetch_provider_bundle_for(Some(data_dir), plugin_id, root, manifest_app_id)
             }
         },
     )?;

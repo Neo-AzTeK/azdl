@@ -436,8 +436,7 @@ fn install_payload_unlocked(
                         .find(|(_, file)| file.backup_sha256.is_some())
                     {
                         if references.iter().any(|(_, other)| {
-                            other.sha256 != sha256
-                                || other.backup_sha256 != file.backup_sha256
+                            other.sha256 != sha256 || other.backup_sha256 != file.backup_sha256
                         }) {
                             return Err("Installed DLC overlay ownership is inconsistent".into());
                         }

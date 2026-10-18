@@ -29,7 +29,9 @@ pub struct PluginManifest {
 impl PluginManifest {
     /// Whether this plugin advertises a specific capability token.
     pub fn has_capability(&self, cap: &str) -> bool {
-        self.capabilities.iter().any(|c| c.eq_ignore_ascii_case(cap))
+        self.capabilities
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(cap))
             || (self.id == "steamidra"
                 && matches!(
                     cap,
@@ -48,24 +50,46 @@ pub fn derive_manifest_download_url(catalog_url: &str, app_id: u32) -> String {
     }
 }
 
-/// Resolve the manifest bundle download URL from the plugin's configuration, falling back to default.
-pub fn manifest_download_url_for_plugin(data_dir: &Path, plugin_id: &str, app_id: u32) -> String {
-    let root = plugin_dir(data_dir).join(plugin_id);
-    if let Ok(manifest) = read_manifest(&root) {
-        if let Some(template) = manifest.download_url.as_deref() {
-            if template.contains("{app_id}") {
-                return template.replace("{app_id}", &app_id.to_string());
-            }
-            if template.contains("{id}") {
-                return template.replace("{id}", &app_id.to_string());
-            }
-            return format!("{template}/{app_id}");
-        }
-        if let Some(catalog) = manifest.catalog_url.as_deref() {
-            return derive_manifest_download_url(catalog, app_id);
-        }
+/// Resolve a selected plugin's HTTPS manifest bundle URL for one Steam app.
+pub fn manifest_download_url_for_plugin(
+    data_dir: &Path,
+    plugin_id: &str,
+    app_id: u32,
+) -> Result<String> {
+    validate_id(plugin_id)?;
+    if app_id == 0 {
+        return Err("Steam App ID is missing".into());
     }
-    format!("https://ryuu.badkiko.ru/v1/download/{app_id}")
+    let root = plugin_dir(data_dir).join(plugin_id);
+    let manifest = read_manifest(&root).map_err(|_| {
+        format!("The selected {plugin_id} plugin is missing or has an invalid manifest")
+    })?;
+    if manifest.id != plugin_id {
+        return Err("Installed plugin manifest ID does not match the selected source".into());
+    }
+    let url = if let Some(template) = manifest.download_url.as_deref() {
+        if template.contains("{app_id}") {
+            template.replace("{app_id}", &app_id.to_string())
+        } else if template.contains("{id}") {
+            template.replace("{id}", &app_id.to_string())
+        } else {
+            format!("{}/{app_id}", template.trim_end_matches('/'))
+        }
+    } else if let Some(catalog) = manifest.catalog_url.as_deref() {
+        derive_manifest_download_url(catalog, app_id)
+    } else if plugin_id == "steamidra" {
+        format!("https://ryuu.badkiko.ru/v1/download/{app_id}")
+    } else {
+        return Err(format!("The selected {plugin_id} plugin has no manifest download URL").into());
+    };
+    if !url.starts_with("https://")
+        || url["https://".len()..].starts_with('/')
+        || url["https://".len()..].is_empty()
+        || url.chars().any(char::is_whitespace)
+    {
+        return Err("Plugin manifest download URL must use HTTPS".into());
+    }
+    Ok(url)
 }
 
 /// Check if an installed plugin advertises a specific capability.
@@ -819,12 +843,25 @@ mod steam_selection_tests {
         fs::create_dir_all(&provider).unwrap();
         fs::write(
             provider.join("plugin.json"),
-            br#"{"id":"custom_provider","name":"Custom","version":"1","apiVersion":4,"library":"plugin","catalogUrl":"https://mirror.example.org/v1/catalog","capabilities":["steam_depot_download"]}"#,
+            br#"{"id":"custom_provider","name":"Custom","version":"1","apiVersion":4,"library":"plugin","catalogUrl":"https://mirror.example.org/v1/catalog","capabilities":["steam_depot_download","manifest_provider"]}"#,
         )
         .unwrap();
 
-        assert!(plugin_has_capability(&root, "custom_provider", "steam_depot_download"));
-        assert!(!plugin_has_capability(&root, "custom_provider", "unknown_cap"));
+        assert!(plugin_has_capability(
+            &root,
+            "custom_provider",
+            "steam_depot_download"
+        ));
+        assert!(plugin_has_capability(
+            &root,
+            "custom_provider",
+            "manifest_provider"
+        ));
+        assert!(!plugin_has_capability(
+            &root,
+            "custom_provider",
+            "unknown_cap"
+        ));
         // steamidra has built-in defaults
         let steamidra_dir = root.join("plugins/steamidra");
         fs::create_dir_all(&steamidra_dir).unwrap();
@@ -833,16 +870,42 @@ mod steam_selection_tests {
             br#"{"id":"steamidra","name":"Steam","version":"1","apiVersion":4,"library":"plugin"}"#,
         )
         .unwrap();
-        assert!(plugin_has_capability(&root, "steamidra", "steam_depot_download"));
-        assert!(plugin_has_capability(&root, "steamidra", "manifest_provider"));
+        assert!(plugin_has_capability(
+            &root,
+            "steamidra",
+            "steam_depot_download"
+        ));
+        assert!(plugin_has_capability(
+            &root,
+            "steamidra",
+            "manifest_provider"
+        ));
 
         // URL derivation from catalogUrl
-        let url = manifest_download_url_for_plugin(&root, "custom_provider", 12345);
+        let url = manifest_download_url_for_plugin(&root, "custom_provider", 12345).unwrap();
         assert_eq!(url, "https://mirror.example.org/v1/download/12345");
 
         // Fallback when missing or no catalogUrl
-        let fallback = manifest_download_url_for_plugin(&root, "nonexistent", 12345);
+        let fallback = manifest_download_url_for_plugin(&root, "steamidra", 12345).unwrap();
         assert_eq!(fallback, "https://ryuu.badkiko.ru/v1/download/12345");
+        let missing = manifest_download_url_for_plugin(&root, "nonexistent", 12345).unwrap_err();
+        assert!(
+            missing
+                .to_string()
+                .contains("missing or has an invalid manifest")
+        );
+
+        fs::write(
+            provider.join("plugin.json"),
+            br#"{"id":"custom_provider","name":"Custom","version":"1","apiVersion":4,"library":"plugin","capabilities":["steam_depot_download","manifest_provider"]}"#,
+        )
+        .unwrap();
+        assert!(
+            manifest_download_url_for_plugin(&root, "custom_provider", 12345)
+                .unwrap_err()
+                .to_string()
+                .contains("no manifest download URL")
+        );
 
         fs::remove_dir_all(root).unwrap();
     }

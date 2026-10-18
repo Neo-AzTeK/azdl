@@ -34,13 +34,20 @@ const MAX_CONCURRENT_METADATA_LOOKUPS: usize = 8;
 const MAX_METADATA_CACHE_ENTRIES: usize = 2048;
 const FIX_STATUS_CACHE_TTL: Duration = Duration::from_secs(15);
 
-fn steam_dlc_provider_status(data_dir: &Path, source: Option<&str>) -> Result<(), String> {
-    let source_id = source.unwrap_or("steamidra");
+fn steam_dlc_provider_status(
+    data_dir: &Path,
+    source: Option<&str>,
+    app_id: u32,
+) -> Result<(), String> {
+    let source_id = source.ok_or("This game has no selected download source")?;
     if source_id != "steamidra"
-        && !azdl::plugins::plugin_has_capability(data_dir, source_id, "steam_depot_download")
+        && (!azdl::plugins::plugin_has_capability(data_dir, source_id, "steam_depot_download")
+            || !azdl::plugins::plugin_has_capability(data_dir, source_id, "manifest_provider"))
     {
         return Err("This game's source does not provide Steam depot DLC".to_string());
     }
+    azdl::plugins::manifest_download_url_for_plugin(data_dir, source_id, app_id)
+        .map_err(|error| error.to_string())?;
     azdl::steam_depot::find_depotkit_library_for(data_dir, source_id)
         .map(|_| ())
         .map_err(|_| {
@@ -3330,10 +3337,9 @@ mod commands {
                     .as_ref()
                     .and_then(|origin| origin.qualified_id.split_once(':'))
                     .map(|(source, _)| source);
-                let steam_source = source == Some("steamidra");
-                let provider_status = super::steam_dlc_provider_status(&data_dir, source);
+                let provider_status = super::steam_dlc_provider_status(&data_dir, source, app_id);
                 let base_receipt = azdl::steam_content::load_base_receipt(&data_dir, &game.id);
-                let needs_existing_check = steam_source && matches!(&base_receipt, Ok(None));
+                let needs_existing_check = provider_status.is_ok() && matches!(&base_receipt, Ok(None));
                 let receipt_error = base_receipt.is_err();
                 let revision_check = match (&base_receipt, &appinfo) {
                     (Ok(Some(receipt)), Ok(metadata)) if provider_status.is_ok() => Some(
@@ -3441,8 +3447,6 @@ mod commands {
                             Some(error.as_str())
                         } else if observed.is_some() {
                             Some("Existing files matched a provider manifest when last checked. They are not managed by azdl and cannot be removed here.")
-                        } else if !steam_source {
-                            steam_eligibility.as_ref().err().map(String::as_str)
                         } else {
                             unavailable_reason
                                 .or_else(|| steam_eligibility.as_ref().err().map(String::as_str))
@@ -3924,10 +3928,11 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let wrong_source = steam_dlc_provider_status(&root, Some("other")).unwrap_err();
+        let wrong_source = steam_dlc_provider_status(&root, Some("other"), 100).unwrap_err();
         assert!(wrong_source.contains("does not provide Steam depot DLC"));
-        let missing_provider = steam_dlc_provider_status(&root, Some("steamidra")).unwrap_err();
-        assert!(missing_provider.contains("missing"));
+        let missing_provider =
+            steam_dlc_provider_status(&root, Some("steamidra"), 100).unwrap_err();
+        assert!(missing_provider.contains("missing or has an invalid manifest"));
         assert!(!root.exists());
     }
 
