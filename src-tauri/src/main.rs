@@ -530,6 +530,14 @@ pub enum Action {
     EaRollback {
         id: String,
     },
+    DlcLicensePatch {
+        id: String,
+        #[serde(default)]
+        dlc_ids: Option<Vec<u32>>,
+    },
+    DlcLicenseRollback {
+        id: String,
+    },
     JobPause {
         id: String,
     },
@@ -1188,6 +1196,8 @@ mod commands {
                     "steamstub": scan_steamstub_cached(state, game),
                     "ea_heal_applied": azdl::fixes::has_ea_backup(&game.install_dir),
                     "ea_heal_available": azdl::fixes::has_ea_target(&game.install_dir),
+                    "dlc_patch_applied": azdl::fixes::has_dlc_installed_patch(&game.install_dir),
+                    "dlc_patch_available": azdl::fixes::has_dlc_installed_target(&game.install_dir),
                     "is_running": is_running,
                     "active_operation": active_op,
                 })
@@ -2375,6 +2385,27 @@ mod commands {
                 let msg = azdl::fixes::rollback_ea_activation(&game.install_dir)
                     .map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "message": msg }))
+            }
+            Action::DlcLicensePatch { id, dlc_ids } => {
+                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let game = library
+                    .games
+                    .get(&id)
+                    .ok_or_else(|| format!("Game {id} not found"))?;
+                let target_ids = dlc_ids.unwrap_or_default();
+                let patched = azdl::fixes::patch_dlc_installed_ids(&game.install_dir, &target_ids)
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({ "success": true, "patched": patched }))
+            }
+            Action::DlcLicenseRollback { id } => {
+                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let game = library
+                    .games
+                    .get(&id)
+                    .ok_or_else(|| format!("Game {id} not found"))?;
+                let restored = azdl::fixes::rollback_dlc_installed(&game.install_dir)
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({ "success": true, "restored": restored }))
             }
             Action::JobPause { id } => {
                 if azdl::jobs::load_job(data_dir, &id).is_ok() {

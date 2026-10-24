@@ -1244,6 +1244,43 @@
                 </div>
               {/if}
 
+              <!-- DLC License Bypass Patch (if target dll is present or patch applied) -->
+              {#if installedRecord.dlc_patch_available || installedRecord.dlc_patch_applied}
+                <div class="tool-card">
+                  <div class="tool-header">
+                    <div class="tool-header-left">
+                      <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+                      </svg>
+                      <h4>DLC License Bypass</h4>
+                    </div>
+                    <span class="tool-pill" class:active={installedRecord.dlc_patch_applied} class:inactive={!installedRecord.dlc_patch_applied}>
+                      {installedRecord.dlc_patch_applied ? 'Patched' : 'Original'}
+                    </span>
+                  </div>
+                  <p class="tool-desc">
+                    Bypasses Steamworks <code>BIsDlcInstalled</code> entitlement checks in <code>steam_api64.dll</code> so Unity and Godot load offline DLCs under Wine/Proton.
+                  </p>
+                  {#if installedRecord.dlc_patch_applied}
+                    <button
+                      class="md3-btn tonal"
+                      disabled={pendingAction === 'dlc-license-rollback'}
+                      onclick={() => handleAction({ action: 'dlc-license-rollback' }, 'DLC license patch rolled back')}
+                    >
+                      <span>Rollback DLC Patch</span>
+                    </button>
+                  {:else}
+                    <button
+                      class="md3-btn primary"
+                      disabled={pendingAction === 'dlc-license-patch'}
+                      onclick={() => handleAction({ action: 'dlc-license-patch' }, 'DLC license patch applied')}
+                    >
+                      <span>Apply DLC License Patch</span>
+                    </button>
+                  {/if}
+                </div>
+              {/if}
+
               <!-- Standalone Game Patch (if present) -->
               {#if installedRecord.patch}
                 <div class="tool-card">
