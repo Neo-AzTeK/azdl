@@ -352,7 +352,11 @@ pub fn check_additive_install(manifests: &[DepotManifest], install_dir: &Path) -
     Ok(())
 }
 
-fn collect_staged_files(root: &Path, relative: &Path, files: &mut BTreeSet<PathBuf>) -> Result<()> {
+pub(crate) fn collect_staged_files(
+    root: &Path,
+    relative: &Path,
+    files: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
     for entry in fs::read_dir(root.join(relative))? {
         let entry = entry?;
         let path = entry.path();
@@ -372,7 +376,7 @@ fn collect_staged_files(root: &Path, relative: &Path, files: &mut BTreeSet<PathB
     Ok(())
 }
 
-fn expected_files(manifests: &[DepotManifest]) -> Result<BTreeSet<PathBuf>> {
+pub(crate) fn expected_files(manifests: &[DepotManifest]) -> Result<BTreeSet<PathBuf>> {
     if manifests.is_empty() {
         return Err("No depot manifests were selected for staging verification".into());
     }

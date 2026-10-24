@@ -1016,6 +1016,25 @@ fn remove_staging_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Removes any files from staging that are not listed in the expected depot manifests.
+pub fn prune_unlisted_staged_files(
+    manifests: &[crate::steam_manifest::DepotManifest],
+    staged_dir: &Path,
+) -> Result<()> {
+    if !staged_dir.is_dir() {
+        return Ok(());
+    }
+    let allowed = crate::steam_manifest::expected_files(manifests)?;
+    let root = fs::canonicalize(staged_dir)?;
+    let mut staged = BTreeSet::new();
+    crate::steam_manifest::collect_staged_files(&root, Path::new(""), &mut staged)?;
+    for extra in staged.difference(&allowed) {
+        let path = root.join(extra);
+        let _ = fs::remove_file(&path);
+    }
+    Ok(())
+}
+
 fn stage_verified_dlc_groups_with(
     data_dir: &Path,
     job_id: &str,
@@ -1046,7 +1065,6 @@ fn stage_verified_dlc_groups_with(
             .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
             && crate::steam_manifest::verify_staged_exact(&group_manifests, &group_dir).is_ok();
         if !reusable {
-            remove_staging_dir(&group_dir)?;
             fs::create_dir_all(&group_dir)?;
             download(
                 &group_dir,
@@ -1058,6 +1076,7 @@ fn stage_verified_dlc_groups_with(
                 },
             )?;
             normalize_windows_paths(&group_dir)?;
+            let _ = prune_unlisted_staged_files(&group_manifests, &group_dir);
         }
         crate::steam_manifest::verify_staged_exact(&group_manifests, &group_dir)?;
         let group_bytes = group_manifests
@@ -1458,25 +1477,11 @@ fn install_steam_manifest_game_in_inner(
 
     // 8. Fetch each content App ID separately and merge only verified files.
     let dl_result = (|| -> Result<()> {
-        fs::create_dir(&base_stage)?;
+        fs::create_dir_all(&base_stage)?;
         let mut completed_bytes = 0_u64;
         for (content_app_id, group) in &downloads.groups {
             let group_dir = download_dir.join(format!("group-{content_app_id}"));
-            remove_staging_dir(&group_dir)?;
-            fs::create_dir(&group_dir)?;
-            download_steam_depots_with_progress(
-                lib_path,
-                &group_dir,
-                *content_app_id,
-                group,
-                data_dir,
-                &job_id,
-                DownloadProgressSpan {
-                    completed_bytes,
-                    overall_bytes: (total_bytes > 0).then_some(total_bytes),
-                },
-            )?;
-            normalize_windows_paths(&group_dir)?;
+            fs::create_dir_all(&group_dir)?;
             let group_manifests = group
                 .iter()
                 .map(|depot| {
@@ -1487,6 +1492,25 @@ fn install_steam_manifest_game_in_inner(
                     )
                 })
                 .collect::<Result<Vec<_>>>()?;
+            let reusable = fs::symlink_metadata(&group_dir)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+                && crate::steam_manifest::verify_staged_exact(&group_manifests, &group_dir).is_ok();
+            if !reusable {
+                download_steam_depots_with_progress(
+                    lib_path,
+                    &group_dir,
+                    *content_app_id,
+                    group,
+                    data_dir,
+                    &job_id,
+                    DownloadProgressSpan {
+                        completed_bytes,
+                        overall_bytes: (total_bytes > 0).then_some(total_bytes),
+                    },
+                )?;
+                normalize_windows_paths(&group_dir)?;
+                let _ = prune_unlisted_staged_files(&group_manifests, &group_dir);
+            }
             crate::steam_manifest::verify_staged_exact(&group_manifests, &group_dir)?;
             merge_verified_payload(&group_dir, &base_stage)?;
             remove_staging_dir(&group_dir)?;
@@ -1510,9 +1534,13 @@ fn install_steam_manifest_game_in_inner(
         Ok(())
     })();
     if dl_result.is_err() {
-        let _ = remove_staging_dir(&base_stage);
-        for (content_app_id, _) in &downloads.groups {
-            let _ = remove_staging_dir(&download_dir.join(format!("group-{content_app_id}")));
+        let is_cancelled = load_job(data_dir, &job_id)
+            .is_ok_and(|j| j.status == JobStatus::Cancelled);
+        if is_cancelled {
+            let _ = remove_staging_dir(&base_stage);
+            for (content_app_id, _) in &downloads.groups {
+                let _ = remove_staging_dir(&download_dir.join(format!("group-{content_app_id}")));
+            }
         }
     }
     if let Err(e) = dl_result {
@@ -2580,6 +2608,35 @@ mod tests {
         let good_file = temp.join("SubFolder").join("Nested").join("file.txt");
         assert!(good_file.is_file());
         assert_eq!(fs::read(&good_file).unwrap(), b"content");
+
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn prunes_unlisted_files_and_preserves_valid_depot_files() {
+        let temp = std::env::temp_dir().join(format!("azdl-test-prune-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(temp.join("data")).unwrap();
+
+        let valid_file = temp.join("data").join("file1.bin");
+        let unlisted_file = temp.join("data").join("unlisted.tmp");
+        fs::write(&valid_file, b"valid content").unwrap();
+        fs::write(&unlisted_file, b"stray download artifact").unwrap();
+
+        let manifests = vec![crate::steam_manifest::DepotManifest {
+            depot_id: 100,
+            manifest_id: 1,
+            files: vec![crate::steam_manifest::ManifestFile {
+                path: PathBuf::from("data/file1.bin"),
+                size: 13,
+                sha1: [0u8; 20],
+            }],
+        }];
+
+        prune_unlisted_staged_files(&manifests, &temp).unwrap();
+
+        assert!(valid_file.is_file());
+        assert!(!unlisted_file.exists());
 
         let _ = fs::remove_dir_all(&temp);
     }
