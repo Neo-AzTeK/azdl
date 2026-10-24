@@ -781,7 +781,10 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
     }
     let prefix_dir = match &runner {
         Runner::Proton(_) => {
-            let pfx = data_dir.join("compatdata").join(&effective_game.id).join("pfx");
+            let pfx = data_dir
+                .join("compatdata")
+                .join(&effective_game.id)
+                .join("pfx");
             if pfx.is_dir() {
                 pfx
             } else {

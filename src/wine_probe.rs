@@ -308,7 +308,9 @@ mod tests {
             Some("Unity Crash Handler")
         );
         assert_eq!(
-            detect_crash_reporter("Z:\\games\\test\\Engine\\Binaries\\Win64\\CrashReportClient.exe"),
+            detect_crash_reporter(
+                "Z:\\games\\test\\Engine\\Binaries\\Win64\\CrashReportClient.exe"
+            ),
             Some("Unreal Engine Crash Reporter")
         );
         assert_eq!(
@@ -324,7 +326,9 @@ mod tests {
     #[test]
     fn validates_error_dialog_titles() {
         assert!(title_looks_like_error("Fatal Error"));
-        assert!(title_looks_like_error("Fatal Error: DX11 feature level 11.0 is required"));
+        assert!(title_looks_like_error(
+            "Fatal Error: DX11 feature level 11.0 is required"
+        ));
         assert!(title_looks_like_error("Unhandled Exception"));
         assert!(title_looks_like_error("Error Code: 0x80070057"));
         assert!(title_looks_like_error("Protection failed to initialize"));

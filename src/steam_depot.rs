@@ -1534,8 +1534,8 @@ fn install_steam_manifest_game_in_inner(
         Ok(())
     })();
     if dl_result.is_err() {
-        let is_cancelled = load_job(data_dir, &job_id)
-            .is_ok_and(|j| j.status == JobStatus::Cancelled);
+        let is_cancelled =
+            load_job(data_dir, &job_id).is_ok_and(|j| j.status == JobStatus::Cancelled);
         if is_cancelled {
             let _ = remove_staging_dir(&base_stage);
             for (content_app_id, _) in &downloads.groups {

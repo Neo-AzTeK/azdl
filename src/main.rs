@@ -494,7 +494,10 @@ fn run() -> Result<()> {
                 }
                 "apply" => {
                     let ok = azdl::installscript::apply_installscript_for_game(game, &prefix_dir)?;
-                    println!("Applied installscript registry entries for {}: {}", game.id, ok);
+                    println!(
+                        "Applied installscript registry entries for {}: {}",
+                        game.id, ok
+                    );
                 }
                 _ => return Err(usage().into()),
             }

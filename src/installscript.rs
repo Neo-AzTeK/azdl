@@ -53,12 +53,7 @@ pub fn is_ubisoft_game(game_dir: &Path) -> bool {
     find_any_file_named(game_dir, &indicators, 0, 3)
 }
 
-fn find_any_file_named(
-    dir: &Path,
-    names: &[&str],
-    depth: usize,
-    max_depth: usize,
-) -> bool {
+fn find_any_file_named(dir: &Path, names: &[&str], depth: usize, max_depth: usize) -> bool {
     if depth > max_depth {
         return false;
     }
@@ -74,9 +69,7 @@ fn find_any_file_named(
                     return true;
                 }
             }
-        } else if path.is_dir()
-            && find_any_file_named(&path, names, depth + 1, max_depth)
-        {
+        } else if path.is_dir() && find_any_file_named(&path, names, depth + 1, max_depth) {
             return true;
         }
     }
@@ -267,10 +260,7 @@ pub fn append_to_wine_reg(reg_path: &Path, entries: &[RegistryEntry]) -> Result<
 }
 
 /// Applies all discovered install scripts and Ubisoft bypass entries for a game to its Wine prefix.
-pub fn apply_installscript_for_game(
-    game: &Game,
-    prefix_dir: &Path,
-) -> Result<bool> {
+pub fn apply_installscript_for_game(game: &Game, prefix_dir: &Path) -> Result<bool> {
     if !game.install_dir.is_dir() || !prefix_dir.is_dir() {
         return Ok(false);
     }
@@ -326,12 +316,7 @@ pub fn find_installscript_files(game_dir: &Path) -> Vec<PathBuf> {
     results
 }
 
-fn scan_scripts_recursive(
-    dir: &Path,
-    out: &mut Vec<PathBuf>,
-    depth: usize,
-    max_depth: usize,
-) {
+fn scan_scripts_recursive(dir: &Path, out: &mut Vec<PathBuf>, depth: usize, max_depth: usize) {
     if depth > max_depth {
         return;
     }
@@ -360,7 +345,8 @@ mod tests {
     use super::*;
 
     fn test_dir(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("azdl_vdf_test_{}_{}", name, std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("azdl_vdf_test_{}_{}", name, std::process::id()));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
@@ -406,7 +392,11 @@ mod tests {
     fn appends_entries_to_wine_reg() {
         let dir = test_dir("wine_reg");
         let reg_file = dir.join("system.reg");
-        fs::write(&reg_file, "WINE REGISTRY Version 2\n;; All keys relative to \\Machine\n").unwrap();
+        fs::write(
+            &reg_file,
+            "WINE REGISTRY Version 2\n;; All keys relative to \\Machine\n",
+        )
+        .unwrap();
 
         let entries = vec![
             RegistryEntry {
