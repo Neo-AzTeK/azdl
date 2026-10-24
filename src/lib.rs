@@ -12,6 +12,7 @@ pub mod archive;
 pub mod bundled_fix;
 pub mod catalog;
 pub mod cmd;
+pub mod dependencies;
 pub mod discovery;
 pub mod dlc;
 pub mod doctor;
@@ -762,6 +763,13 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
     }
     let _ = fixes::heal_ea_activation(&effective_game.install_dir);
     let _ = goldberg::prepare_goldberg_for_game(&effective_game, data_dir);
+    if let Ok(installed_deps) =
+        dependencies::ensure_game_dependencies(&effective_game, &runner, data_dir)
+    {
+        for action in installed_deps {
+            eprintln!("Dependency provisioning: {action}");
+        }
+    }
     if steamless::scan_game_steamstub(&effective_game).stub_present {
         match steamless::unpack_game(&effective_game, data_dir) {
             Ok(count) if count > 0 => eprintln!("Steamless unpacked {count} executable(s)"),

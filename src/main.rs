@@ -42,7 +42,7 @@ use std::fs;
 use std::path::Path;
 
 fn usage() -> &'static str {
-    "Usage:\n  azdl list\n  azdl runners\n  azdl shortcut create|status|remove <id> [desktop-directory]\n  azdl steam shortcut create|status|remove <id> [shortcuts.vdf]\n  azdl jobs fetch <https-url> <relative-destination> [sha256]\n  azdl jobs fetch-install <id> <title> <file|archive|setup|setup-archive> <https-url> <filename> [sha256]\n  azdl jobs list|show <job-id>|retry <job-id>\n  azdl jobs pause|resume|cancel <job-id>\n  azdl plugins install <package.arach>|list|store|store-refresh\n  azdl plugins store-install <plugin-id>\n  azdl scan <title> <install-dir>\n  azdl import <id> <title> <install-dir>\n  azdl add <id> <title> <install-dir> <executable>\n  azdl fetch <id> <title> <https-url> <filename>\n  azdl fetch-magnet <id> <title> <magnet-uri>\n  azdl install-file <id> <title> <file-path>\n  azdl install-archive <id> <title> <archive-path>\n  azdl fetch-archive <id> <title> <https-url> <archive-filename>\n  azdl fetch-archive-parts <id> <title> <first-part-filename> <part1-https-url> <part2-https-url> [...]\n  azdl setup run <id> <title> <installer.exe|installer.msi> [installer args...]\n  azdl setup fetch <id> <title> <https-url> <installer-filename> [installer args...]\n  azdl setup archive <id> <title> <archive-path> [installer args...]\n  azdl setup fetch-archive <id> <title> <https-url> <archive-filename> [installer args...]\n  azdl setup scan|import <id> <title>\n  azdl setup add <id> <title> <install-dir> <executable>\n  azdl pending add <id> <title> <portable|setup> <install-dir> <executable>\n  azdl steam featured|search <query>\n  azdl steam install <appid> <plugin-id>\n  azdl steam scan|import <appid>\n  azdl patch apply <id> <extracted-patch-dir>\n  azdl patch archive <id> <archive-path> [archive-root]\n  azdl patch fetch <id> <https-url> <archive-filename>\n  azdl patch fetch-parts <id> <first-part-filename> <part1-https-url> <part2-https-url> [...]\n  azdl patch status|enable|disable|rollback <id>\n  azdl overlay status|enable|disable <id>\n  azdl fix-status <id>\n  azdl doctor <id>\n  azdl executable <id> <path-inside-install-dir>\n  azdl runner <id> <auto|native|wine|proton:auto|proton:/path/to/proton>\n  azdl option list <id>\n  azdl option add <id> <option-id> <title> <executable> <working-dir|-> [arguments...]\n  azdl option select <id> <option-id|default>\n  azdl option remove <id> <option-id>\n  azdl args <id> [launch arguments...]\n  azdl env <id> <name> <value>\n  azdl env-remove <id> <name>\n  azdl launch <id> [extra arguments...]\n  azdl download <id> <https-url> <relative-destination>\n  azdl steamstub status|unpack|rollback <id>\n  azdl goldberg sync|status|rollback <id>\n  azdl fixes ea-heal|ea-rollback|provision-steam-api|patch-dlc-installed|patch-dlc-installed-rollback <id> [dlc-ids...]\n  azdl remove <id>\n\nUse AZDL_DATA_DIR to choose a library and prefix directory."
+    "Usage:\n  azdl list\n  azdl runners\n  azdl shortcut create|status|remove <id> [desktop-directory]\n  azdl steam shortcut create|status|remove <id> [shortcuts.vdf]\n  azdl jobs fetch <https-url> <relative-destination> [sha256]\n  azdl jobs fetch-install <id> <title> <file|archive|setup|setup-archive> <https-url> <filename> [sha256]\n  azdl jobs list|show <job-id>|retry <job-id>\n  azdl jobs pause|resume|cancel <job-id>\n  azdl plugins install <package.arach>|list|store|store-refresh\n  azdl plugins store-install <plugin-id>\n  azdl scan <title> <install-dir>\n  azdl import <id> <title> <install-dir>\n  azdl add <id> <title> <install-dir> <executable>\n  azdl fetch <id> <title> <https-url> <filename>\n  azdl fetch-magnet <id> <title> <magnet-uri>\n  azdl install-file <id> <title> <file-path>\n  azdl install-archive <id> <title> <archive-path>\n  azdl fetch-archive <id> <title> <https-url> <archive-filename>\n  azdl fetch-archive-parts <id> <title> <first-part-filename> <part1-https-url> <part2-https-url> [...]\n  azdl setup run <id> <title> <installer.exe|installer.msi> [installer args...]\n  azdl setup fetch <id> <title> <https-url> <installer-filename> [installer args...]\n  azdl setup archive <id> <title> <archive-path> [installer args...]\n  azdl setup fetch-archive <id> <title> <https-url> <archive-filename> [installer args...]\n  azdl setup scan|import <id> <title>\n  azdl setup add <id> <title> <install-dir> <executable>\n  azdl pending add <id> <title> <portable|setup> <install-dir> <executable>\n  azdl steam featured|search <query>\n  azdl steam install <appid> <plugin-id>\n  azdl steam scan|import <appid>\n  azdl patch apply <id> <extracted-patch-dir>\n  azdl patch archive <id> <archive-path> [archive-root]\n  azdl patch fetch <id> <https-url> <archive-filename>\n  azdl patch fetch-parts <id> <first-part-filename> <part1-https-url> <part2-https-url> [...]\n  azdl patch status|enable|disable|rollback <id>\n  azdl overlay status|enable|disable <id>\n  azdl fix-status <id>\n  azdl doctor <id>\n  azdl executable <id> <path-inside-install-dir>\n  azdl runner <id> <auto|native|wine|proton:auto|proton:/path/to/proton>\n  azdl option list <id>\n  azdl option add <id> <option-id> <title> <executable> <working-dir|-> [arguments...]\n  azdl option select <id> <option-id|default>\n  azdl option remove <id> <option-id>\n  azdl args <id> [launch arguments...]\n  azdl env <id> <name> <value>\n  azdl env-remove <id> <name>\n  azdl launch <id> [extra arguments...]\n  azdl download <id> <https-url> <relative-destination>\n  azdl steamstub status|unpack|rollback <id>\n  azdl goldberg sync|status|rollback <id>\n  azdl dependencies <id> [status|install-vcredist|install-directx]\n  azdl fixes ea-heal|ea-rollback|provision-steam-api|patch-dlc-installed|patch-dlc-installed-rollback <id> [dlc-ids...]\n  azdl remove <id>\n\nUse AZDL_DATA_DIR to choose a library and prefix directory."
 }
 
 fn report_setup(outcome: SetupOutcome, id: &str) {
@@ -449,6 +449,34 @@ fn run() -> Result<()> {
                     );
                 }
                 _ => return Err(usage().into()),
+            }
+        }
+        Some("dependencies") if args.len() >= 2 => {
+            let game = library.games.get(&args[1]).ok_or("unknown game ID")?;
+            let prefix_dir = data.join("prefixes").join(&game.id);
+            if args.len() == 2 || args[2] == "status" {
+                let status = azdl::dependencies::diagnose_prefix_dependencies(&prefix_dir);
+                println!(
+                    "Dependencies for {}: vcredist_x64={}, vcredist_x86={}, directx={}",
+                    game.id, status.vcredist_x64, status.vcredist_x86, status.directx
+                );
+                if !status.missing.is_empty() {
+                    println!("Missing: {}", status.missing.join(", "));
+                }
+            } else if args[2] == "install-vcredist" {
+                let ok =
+                    azdl::dependencies::install_vcredist(&prefix_dir, &game.runner, &data, true)?;
+                println!("Installed VC++ 2015-2022 (x64) for {}: {}", game.id, ok);
+            } else if args[2] == "install-directx" {
+                let ok = azdl::dependencies::install_directx(
+                    &prefix_dir,
+                    &game.runner,
+                    &data,
+                    &game.install_dir,
+                )?;
+                println!("Installed DirectX for {}: {}", game.id, ok);
+            } else {
+                return Err(usage().into());
             }
         }
         Some("scan") if args.len() == 3 => {

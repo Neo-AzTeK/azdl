@@ -229,6 +229,31 @@ pub fn diagnose_game(game: &Game, data_dir: &Path) -> DiagnosticReport {
             ),
         }
     }
+    if matches!(
+        game.runner,
+        Runner::Wine | Runner::Proton(_) | Runner::Auto | Runner::ProtonAuto
+    ) {
+        let prefix_dir = data_dir.join("prefixes").join(&game.id);
+        if prefix_dir.is_dir() {
+            let dep_status = crate::dependencies::diagnose_prefix_dependencies(&prefix_dir);
+            if dep_status.missing.is_empty() {
+                add(
+                    &mut checks,
+                    Severity::Info,
+                    "Prefix runtime dependencies (VC++ 2015-2022, DirectX) are satisfied",
+                );
+            } else {
+                add(
+                    &mut checks,
+                    Severity::Info,
+                    format!(
+                        "Prefix runtime dependencies pending auto-install: {}",
+                        dep_status.missing.join(", ")
+                    ),
+                );
+            }
+        }
+    }
     if checks.is_empty() {
         add(
             &mut checks,

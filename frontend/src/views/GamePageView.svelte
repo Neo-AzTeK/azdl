@@ -1318,6 +1318,52 @@
                 </div>
               {/if}
 
+              <!-- Runtime Dependencies Auto-Provisioning (VC++ / DirectX) -->
+              {#if installedRecord.dependencies}
+                <div class="tool-card">
+                  <div class="tool-header">
+                    <div class="tool-header-left">
+                      <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M4 6h16v12H4zM2 4v16h20V4H2zm3 2h2v2H5V6zm0 3h2v2H5V9zm0 3h2v2H5v-2zm14 3h-2v-2h2v2zm0-3h-2v-2h2v2zm0-3h-2V6h2v2z"/>
+                      </svg>
+                      <h4>Runtime Dependencies</h4>
+                    </div>
+                    {#if installedRecord.dependencies.missing.length === 0}
+                      <span class="tool-pill success">Satisfied</span>
+                    {:else}
+                      <span class="tool-pill warning">Pending</span>
+                    {/if}
+                  </div>
+                  <p class="tool-desc">
+                    {#if installedRecord.dependencies.missing.length === 0}
+                      Visual C++ 2015-2022 and DirectX runtimes are satisfied in this Wine/Proton prefix.
+                    {:else}
+                      Missing: <code>{installedRecord.dependencies.missing.join(', ')}</code>. Automatically provisioned before launch.
+                    {/if}
+                  </p>
+                  <div style="display: flex; gap: 8px;">
+                    {#if !installedRecord.dependencies.vcredist_x64}
+                      <button
+                        class="md3-btn primary small"
+                        disabled={pendingAction === 'install-vcredist'}
+                        onclick={() => handleAction({ action: 'install-vcredist' }, 'Visual C++ 2015-2022 (x64) installed')}
+                      >
+                        <span>Install VC++ 2022</span>
+                      </button>
+                    {/if}
+                    {#if !installedRecord.dependencies.directx}
+                      <button
+                        class="md3-btn tonal small"
+                        disabled={pendingAction === 'install-directx'}
+                        onclick={() => handleAction({ action: 'install-directx' }, 'DirectX runtimes installed')}
+                      >
+                        <span>Install DirectX</span>
+                      </button>
+                    {/if}
+                  </div>
+                </div>
+              {/if}
+
               <!-- Standalone Game Patch (if present) -->
               {#if installedRecord.patch}
                 <div class="tool-card">
