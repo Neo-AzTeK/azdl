@@ -17,6 +17,7 @@ pub mod dlc;
 pub mod doctor;
 pub mod error;
 pub mod fixes;
+pub mod goldberg;
 pub mod jobs;
 pub mod multiplayer;
 pub mod overlay;
@@ -760,6 +761,7 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
         eprintln!("{msg}");
     }
     let _ = fixes::heal_ea_activation(&effective_game.install_dir);
+    let _ = goldberg::prepare_goldberg_for_game(&effective_game, data_dir);
     if steamless::scan_game_steamstub(&effective_game).stub_present {
         match steamless::unpack_game(&effective_game, data_dir) {
             Ok(count) if count > 0 => eprintln!("Steamless unpacked {count} executable(s)"),

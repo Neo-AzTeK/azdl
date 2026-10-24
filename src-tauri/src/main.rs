@@ -538,6 +538,12 @@ pub enum Action {
     DlcLicenseRollback {
         id: String,
     },
+    GoldbergSync {
+        id: String,
+    },
+    GoldbergRollback {
+        id: String,
+    },
     JobPause {
         id: String,
     },
@@ -1198,6 +1204,8 @@ mod commands {
                     "ea_heal_available": azdl::fixes::has_ea_target(&game.install_dir),
                     "dlc_patch_applied": azdl::fixes::has_dlc_installed_patch(&game.install_dir),
                     "dlc_patch_available": azdl::fixes::has_dlc_installed_target(&game.install_dir),
+                    "goldberg_compatible": azdl::goldberg::is_goldberg_compatible(&game.install_dir),
+                    "goldberg_has_settings": azdl::goldberg::has_goldberg_settings(&game.install_dir),
                     "is_running": is_running,
                     "active_operation": active_op,
                 })
@@ -2404,6 +2412,26 @@ mod commands {
                     .get(&id)
                     .ok_or_else(|| format!("Game {id} not found"))?;
                 let restored = azdl::fixes::rollback_dlc_installed(&game.install_dir)
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({ "success": true, "restored": restored }))
+            }
+            Action::GoldbergSync { id } => {
+                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let game = library
+                    .games
+                    .get(&id)
+                    .ok_or_else(|| format!("Game {id} not found"))?;
+                let updated = azdl::goldberg::prepare_goldberg_for_game(game, data_dir)
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({ "success": true, "updated": updated }))
+            }
+            Action::GoldbergRollback { id } => {
+                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let game = library
+                    .games
+                    .get(&id)
+                    .ok_or_else(|| format!("Game {id} not found"))?;
+                let restored = azdl::goldberg::rollback_goldberg_config(&game.install_dir)
                     .map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "restored": restored }))
             }

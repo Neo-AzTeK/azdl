@@ -1281,6 +1281,43 @@
                 </div>
               {/if}
 
+              <!-- Goldberg Steam Emulator Hook (if compatible or has settings) -->
+              {#if installedRecord.goldberg_compatible || installedRecord.goldberg_has_settings}
+                <div class="tool-card">
+                  <div class="tool-header">
+                    <div class="tool-header-left">
+                      <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/>
+                      </svg>
+                      <h4>Goldberg Emulator Settings</h4>
+                    </div>
+                    <span class="tool-pill" class:active={installedRecord.goldberg_has_settings} class:inactive={!installedRecord.goldberg_has_settings}>
+                      {installedRecord.goldberg_has_settings ? 'Configured' : 'Available'}
+                    </span>
+                  </div>
+                  <p class="tool-desc">
+                    Auto-provisions <code>steam_settings/DLC.txt</code> and offline AppID entitlements for games using the Goldberg Steam emulator.
+                  </p>
+                  {#if installedRecord.goldberg_has_settings}
+                    <button
+                      class="md3-btn tonal"
+                      disabled={pendingAction === 'goldberg-rollback'}
+                      onclick={() => handleAction({ action: 'goldberg-rollback' }, 'Goldberg configuration removed')}
+                    >
+                      <span>Remove Goldberg Config</span>
+                    </button>
+                  {:else}
+                    <button
+                      class="md3-btn primary"
+                      disabled={pendingAction === 'goldberg-sync'}
+                      onclick={() => handleAction({ action: 'goldberg-sync' }, 'Goldberg DLC configuration generated')}
+                    >
+                      <span>Generate Goldberg Config</span>
+                    </button>
+                  {/if}
+                </div>
+              {/if}
+
               <!-- Standalone Game Patch (if present) -->
               {#if installedRecord.patch}
                 <div class="tool-card">
