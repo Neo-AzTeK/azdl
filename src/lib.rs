@@ -19,6 +19,7 @@ pub mod doctor;
 pub mod error;
 pub mod fixes;
 pub mod goldberg;
+pub mod installscript;
 pub mod jobs;
 pub mod multiplayer;
 pub mod overlay;
@@ -776,6 +777,23 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
             Ok(_) => {}
             Err(e) => eprintln!("Steamless unpacking failed: {e}"),
         }
+    }
+    let prefix_dir = match &runner {
+        Runner::Proton(_) => {
+            let pfx = data_dir.join("compatdata").join(&effective_game.id).join("pfx");
+            if pfx.is_dir() {
+                pfx
+            } else {
+                data_dir.join("prefixes").join(&effective_game.id)
+            }
+        }
+        _ => data_dir.join("prefixes").join(&effective_game.id),
+    };
+    if let Ok(true) = installscript::apply_installscript_for_game(&effective_game, &prefix_dir) {
+        eprintln!("Applied Steamworks installscript & registry configuration");
+    }
+    if installscript::is_ubisoft_game(&effective_game.install_dir) {
+        cmd.arg("-uplay_steam_mode");
     }
     let fix = if let Some(launch) = &launch {
         cmd.current_dir(&launch.working_directory);
