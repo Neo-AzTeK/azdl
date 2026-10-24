@@ -40,6 +40,7 @@ pub mod steam_metadata;
 pub mod steam_shortcuts;
 pub mod steamless;
 pub mod torrent;
+pub mod wine_probe;
 
 pub use archive::normalize_windows_paths;
 pub use cmd::{clean_command, sanitize_command};

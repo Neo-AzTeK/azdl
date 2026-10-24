@@ -1812,6 +1812,16 @@ mod commands {
         })?;
         let pid = child.id();
         let game_title = game.title.clone();
+        let probe_hints = azdl::wine_probe::WineProbeHints {
+            install_dir: Some(game.install_dir.clone()),
+            executable_name: game
+                .executable
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string),
+            prefix_dir: Some(state.data_dir.join("prefixes").join(&id)),
+            fake_app_id: None,
+        };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -1840,7 +1850,28 @@ mod commands {
         let data_dir = state.data_dir.clone();
         let state_exit = state.clone();
         std::thread::spawn(move || {
-            let _ = child.wait();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) => {
+                        let status = azdl::wine_probe::check_game_status(pid, &probe_hints);
+                        if let azdl::wine_probe::GameRunStatus::Crashed {
+                            ref reason,
+                            culprit_pid: _,
+                        } = status
+                        {
+                            eprintln!(
+                                "Crash detected for game {monitored_id}: {reason}. Terminating hanging process tree."
+                            );
+                            azdl::wine_probe::terminate_game_tree(pid, &probe_hints);
+                            let _ = child.wait();
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1500));
+                    }
+                    Err(_) => break,
+                }
+            }
             if let Ok(mut map) = running_map.lock() {
                 map.remove(&monitored_id);
             }
@@ -1942,6 +1973,22 @@ mod commands {
         };
 
         signal_process_group(pid).map_err(|e| LauncherError::general(e.to_string()))?;
+
+        if let Ok(lib) = load_library(&state.data_dir)
+            && let Some(game) = lib.games.get(&id)
+        {
+            let hints = azdl::wine_probe::WineProbeHints {
+                install_dir: Some(game.install_dir.clone()),
+                executable_name: game
+                    .executable
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string),
+                prefix_dir: Some(state.data_dir.join("prefixes").join(&id)),
+                fake_app_id: None,
+            };
+            azdl::wine_probe::terminate_game_tree(pid, &hints);
+        }
 
         if let Ok(mut map) = state.running_games.lock() {
             map.remove(&id);
