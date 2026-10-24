@@ -143,9 +143,9 @@ jobs:
         run: cargo build --release -p azdl --target ${{ matrix.target }}
 
       - name: Build and bundle Desktop application (Tauri)
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         with:
-          projectPath: "./src-tauri"
+          tauriScript: "npx --prefix frontend tauri"
           args: --target ${{ matrix.target }}
 
       - name: Package Linux artifacts

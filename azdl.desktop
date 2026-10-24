@@ -2,7 +2,7 @@
 Name=azdl
 GenericName=Game Launcher
 Comment=Modern game launcher and runtime orchestrator
-Exec=/home/mixcraftio/Code/Repos/Crack/azdl/target/release/azdl-desktop %U
+Exec=azdl-desktop %U
 Icon=azdl
 Terminal=false
 Type=Application
