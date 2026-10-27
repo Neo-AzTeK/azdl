@@ -28,10 +28,14 @@ fn archive_listing(archive: &Path, verbose: bool) -> Result<String> {
         .arg(archive)
         .output()?;
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.stdout.is_empty() && stderr.contains("Too small block encountered") {
+            return Ok(String::from_utf8(output.stdout)?);
+        }
         return Err(format!(
             "could not list archive ({}): {}",
             output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+            stderr.trim()
         )
         .into());
     }

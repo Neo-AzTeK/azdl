@@ -322,6 +322,47 @@ fn patch_dlc_stream(data: &mut [u8], allowed_ids: Option<&[u32]>) -> bool {
     modified
 }
 
+/// Collects candidate DLL paths from the game directory by enumerating PE files
+/// matching steam/godotsteam naming patterns up to 2 levels deep.
+fn collect_dll_candidates(game_dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let mut stack = vec![game_dir.to_path_buf()];
+    let mut seen = 0;
+    while let Some(dir) = stack.pop() {
+        if seen >= 200 {
+            break;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            seen += 1;
+            if seen > 200 {
+                return Ok(());
+            }
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() {
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if (name.contains("steam") && name.ends_with(".dll")) || name.contains("godotsteam")
+                {
+                    out.push(path);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Scans for and patches `BIsDlcInstalled` license-check conditional jumps
 /// in `steam_api64.dll` (or the main game DLL) by flipping `jnz`/`je` to `jmp`.
 ///
@@ -347,10 +388,9 @@ pub fn patch_dlc_installed_ids(game_dir: &Path, dlc_ids: &[u32]) -> Result<bool>
         }
     }
 
-    // Fallback: search up to 200 entries within 2 directory levels for steam_api64.dll
-    if dll_paths.is_empty() {
-        find_dlc_dlls(game_dir, 0, 2, &mut dll_paths)?;
-    }
+    // Dynamic enumeration: always gather all *steam*.dll / *godotsteam* DLLs
+    // from the game directory (up to 200 entries, 2 levels deep).
+    collect_dll_candidates(game_dir, &mut dll_paths)?;
 
     // Also check the main game DLL (e.g. acm2_windows.dll)
     let main_dll_candidates = [
@@ -366,9 +406,13 @@ pub fn patch_dlc_installed_ids(game_dir: &Path, dlc_ids: &[u32]) -> Result<bool>
         }
     }
 
+    // Deduplicate paths (preserve order)
+    let mut seen = std::collections::HashSet::new();
+    dll_paths.retain(|p| seen.insert(p.clone()));
+
     let mut patched_any = false;
-    for dll_path in dll_paths {
-        let Ok(mut data) = fs::read(&dll_path) else {
+    for dll_path in &dll_paths {
+        let Ok(mut data) = fs::read(dll_path) else {
             continue;
         };
 
@@ -382,10 +426,32 @@ pub fn patch_dlc_installed_ids(game_dir: &Path, dlc_ids: &[u32]) -> Result<bool>
         ) {
             let backup_path = dll_path.with_extension("dll.dlc.bak");
             if !backup_path.exists() {
-                let _ = fs::copy(&dll_path, &backup_path);
+                let _ = fs::copy(dll_path, &backup_path);
             }
-            fs::write(&dll_path, &data)?;
-            patched_any = true;
+            if fs::write(dll_path, &data).is_ok() {
+                patched_any = true;
+            }
+        }
+
+        // Also attempt GodotSteam signature patch for godotsteam DLLs
+        let dll_name_lower = dll_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if dll_name_lower.contains("godotsteam") {
+            // Re-read since data may have been consumed by patch_dlc_stream above
+            let Ok(mut godot_data) = fs::read(dll_path) else {
+                continue;
+            };
+            if patch_godotsteam_dll(&mut godot_data) {
+                let backup_path = dll_path.with_extension("dll.dlc.bak");
+                if !backup_path.exists() {
+                    let _ = fs::copy(dll_path, &backup_path);
+                }
+                if fs::write(dll_path, &godot_data).is_ok() {
+                    patched_any = true;
+                }
+            }
         }
     }
 
@@ -449,6 +515,24 @@ pub fn rollback_dlc_installed(game_dir: &Path) -> Result<bool> {
         }
     }
 
+    // Restore from GodotSteam DLL backups (libgodotsteam*.dll)
+    let mut godotsteam_paths = Vec::new();
+    collect_dll_candidates(game_dir, &mut godotsteam_paths)?;
+    for dll_path in godotsteam_paths {
+        let name_lower = dll_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if name_lower.contains("godotsteam") {
+            let backup = dll_path.with_extension("dll.dlc.bak");
+            if backup.is_file() {
+                fs::copy(&backup, &dll_path)?;
+                let _ = fs::remove_file(&backup);
+                restored = true;
+            }
+        }
+    }
+
     Ok(restored)
 }
 
@@ -489,6 +573,18 @@ pub fn has_dlc_installed_patch(game_dir: &Path) -> bool {
             .any(|p| p.with_extension("dll.dlc.bak").is_file());
     }
 
+    // Check GodotSteam DLL backups
+    let mut godotsteam_paths = Vec::new();
+    if collect_dll_candidates(game_dir, &mut godotsteam_paths).is_ok() {
+        return godotsteam_paths.iter().any(|p| {
+            let name_lower = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            name_lower.contains("godotsteam") && p.with_extension("dll.dlc.bak").is_file()
+        });
+    }
+
     false
 }
 
@@ -520,6 +616,18 @@ pub fn has_dlc_installed_target(game_dir: &Path) -> bool {
     let mut dll_paths = Vec::new();
     if find_dlc_dlls(game_dir, 0, 2, &mut dll_paths).is_ok() {
         return !dll_paths.is_empty();
+    }
+
+    // Check GodotSteam DLL targets
+    let mut godotsteam_paths = Vec::new();
+    if collect_dll_candidates(game_dir, &mut godotsteam_paths).is_ok() {
+        return godotsteam_paths.iter().any(|p| {
+            let name_lower = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            name_lower.contains("godotsteam")
+        });
     }
 
     false
@@ -556,6 +664,327 @@ fn find_dlc_dlls(
         }
     }
     Ok(())
+}
+
+/// Lightweight representation of a PE section header entry.
+#[derive(Clone)]
+struct PeSection {
+    name: String,
+    virtual_address: u32,
+    raw_offset: u32,
+    #[allow(dead_code)]
+    virtual_size: u32,
+    raw_size: u32,
+}
+
+impl PeSection {
+    /// Convert a file offset to a Virtual Address (RVA) within this section.
+    fn offset_to_rva(&self, offset: u32) -> Option<u32> {
+        if offset >= self.raw_offset && offset < self.raw_offset + self.raw_size {
+            Some(offset - self.raw_offset + self.virtual_address)
+        } else {
+            None
+        }
+    }
+
+    /// Convert a Virtual Address (RVA) back to a file offset within this section.
+    #[allow(dead_code)]
+    fn rva_to_offset(&self, rva: u32) -> Option<u32> {
+        if rva >= self.virtual_address && rva < self.virtual_address + self.virtual_size {
+            Some(rva - self.virtual_address + self.raw_offset)
+        } else {
+            None
+        }
+    }
+}
+
+/// Parse PE section headers from a binary blob.
+/// Returns a list of sections with their virtual addresses and raw offsets.
+fn parse_pe_sections(data: &[u8]) -> Vec<PeSection> {
+    let len = data.len();
+    if len < 0x80 {
+        return Vec::new();
+    }
+
+    // Read PE header offset from DOS header (e-0x3c)
+    let pe_offset = u32::from_le_bytes([data[0x3c], data[0x3d], data[0x3e], data[0x3f]]) as usize;
+
+    if pe_offset + 24 > len {
+        return Vec::new();
+    }
+
+    // Verify PE signature
+    if &data[pe_offset..pe_offset + 4] != b"PE\0\0" {
+        return Vec::new();
+    }
+
+    // COFF header starts at pe_offset + 4
+    let coff_offset = pe_offset + 4;
+    if coff_offset + 20 > len {
+        return Vec::new();
+    }
+
+    let number_of_sections =
+        u16::from_le_bytes([data[coff_offset + 2], data[coff_offset + 3]]) as usize;
+    let optional_header_size = u16::from_le_bytes([data[coff_offset + 16], data[coff_offset + 17]]);
+
+    // Optional header starts after COFF header (20 bytes)
+    let opt_header_start = coff_offset + 20;
+    if optional_header_size == 0 || opt_header_start + optional_header_size as usize > len {
+        return Vec::new();
+    }
+
+    // Determine magic to know Optional Header size and structure
+    let magic = u16::from_le_bytes([data[opt_header_start], data[opt_header_start + 1]]);
+    if magic != 0x20b && magic != 0x10b {
+        return Vec::new(); // Not PE32+ or PE32
+    }
+
+    // Section headers start after COFF header + Optional Header
+    let section_start = if optional_header_size == 0 {
+        opt_header_start + 96 // use a minimal PE32+ optional header size as fallback
+    } else {
+        opt_header_start + optional_header_size as usize
+    };
+
+    let mut sections = Vec::with_capacity(number_of_sections);
+    for i in 0..number_of_sections {
+        let sec_offset = section_start + i * 40;
+        if sec_offset + 40 > len {
+            break;
+        }
+
+        // Section name is first 8 bytes (null-padded ASCII)
+        let raw_name = &data[sec_offset..sec_offset + 8];
+        let end = raw_name.iter().position(|&b| b == 0).unwrap_or(8);
+        let name = std::str::from_utf8(&raw_name[..end])
+            .unwrap_or("")
+            .to_string();
+
+        // Skip unnamed/empty sections
+        if name.is_empty() {
+            continue;
+        }
+
+        let virtual_address = u32::from_le_bytes([
+            data[sec_offset + 12],
+            data[sec_offset + 13],
+            data[sec_offset + 14],
+            data[sec_offset + 15],
+        ]);
+        let raw_offset = u32::from_le_bytes([
+            data[sec_offset + 20],
+            data[sec_offset + 21],
+            data[sec_offset + 22],
+            data[sec_offset + 23],
+        ]);
+        let virtual_size = u32::from_le_bytes([
+            data[sec_offset + 8],
+            data[sec_offset + 9],
+            data[sec_offset + 10],
+            data[sec_offset + 11],
+        ]);
+        let raw_size = u32::from_le_bytes([
+            data[sec_offset + 16],
+            data[sec_offset + 17],
+            data[sec_offset + 18],
+            data[sec_offset + 19],
+        ]);
+
+        sections.push(PeSection {
+            name,
+            virtual_address,
+            raw_offset,
+            virtual_size,
+            raw_size,
+        });
+    }
+
+    sections
+}
+
+/// Scans a GodotSteam DLL for the `isDLCInstalled` function and patches it to return true.
+///
+/// Strategy:
+/// 1. Parse PE section headers to identify .text and .rdata sections.
+/// 2. Find the ASCII string "Apps class not found when calling: isDLCInstalled" in .rdata.
+/// 3. Compute its RVA (str_rva).
+/// 4. Scan .text for RIP-relative `lea` instructions where (inst_rva + 7 + disp32) == str_rva.
+/// 5. Scan backward from the matching lea to the function prologue (push rbx; sub rsp, imm8 etc.)
+/// 6. Overwrite the first 6 bytes with `mov eax, 1; ret` (b8 01 00 00 00 c3).
+///
+/// Falls back to searching for `xor al, al` (32 c0) → ret pattern if PE-aware search fails.
+///
+/// Returns true if at least one byte was modified.
+pub fn patch_godotsteam_dll(dll_bytes: &mut [u8]) -> bool {
+    const TARGET_STRING: &[u8] = b"Apps class not found when calling: isDLCInstalled";
+
+    let len = dll_bytes.len();
+    if len < TARGET_STRING.len() + 10 {
+        return false;
+    }
+
+    // Parse PE section headers for RVA-aware scanning
+    let sections = parse_pe_sections(dll_bytes);
+
+    // Find .rdata and .text sections
+    let rdata_section = find_section_by_name(&sections, ".rdata");
+    let text_section = find_section_by_name(&sections, ".text");
+
+    // Strategy A: PE-aware search using section headers
+    if let (Some(rdata), Some(text)) = (rdata_section, text_section) {
+        // Find the target string within .rdata's raw range
+        let str_file_offset =
+            find_subsequence_in_range(dll_bytes, TARGET_STRING, rdata.raw_offset, rdata.raw_size);
+
+        if let Some(str_off) = str_file_offset {
+            let str_rva = match rdata.offset_to_rva(str_off) {
+                Some(rva) => rva,
+                None => return patch_xor_al_fallback(dll_bytes),
+            };
+
+            // Scan .text for RIP-relative lea instructions targeting this string's RVA
+            let text_start = text.raw_offset as usize;
+            let text_end = (text.raw_offset + text.raw_size) as usize;
+
+            for i in (text_start..text_end).rev() {
+                if i + 7 > len {
+                    continue;
+                }
+
+                // Check for lea reg, [rip + disp32]: 48/4c 8d <modrm> <disp32>
+                // RIP-relative addressing in x86-64 has (modrm & 0xc7) == 0x05
+                if (dll_bytes[i] != 0x48 && dll_bytes[i] != 0x4c) || dll_bytes[i + 1] != 0x8d {
+                    continue;
+                }
+                let modrm = dll_bytes[i + 2];
+                if (modrm & 0xc7) != 0x05 {
+                    continue;
+                }
+
+                let disp32 = i32::from_le_bytes([
+                    dll_bytes[i + 3],
+                    dll_bytes[i + 4],
+                    dll_bytes[i + 5],
+                    dll_bytes[i + 6],
+                ]);
+
+                // Convert instruction file offset to RVA
+                let inst_rva = match text.offset_to_rva(i as u32) {
+                    Some(rva) => rva,
+                    None => continue,
+                };
+
+                // RIP after this 7-byte instruction points to inst_rva + 7
+                let rip_after = inst_rva.wrapping_add(7);
+                let target_rva = (rip_after as i64 + disp32 as i64) as u32;
+
+                // Match if target_rva points to the string or within 64 bytes before (e.g. prefix)
+                let diff = str_rva.wrapping_sub(target_rva);
+                if diff <= 64 {
+                    // Found the lea that references our target string.
+                    // Now scan backward from this instruction's file offset for a prologue.
+                    let lea_file_offset = i;
+                    let prologue_start = if lea_file_offset > 128 {
+                        lea_file_offset - 128
+                    } else {
+                        text_start
+                    };
+
+                    for j in (prologue_start..lea_file_offset).rev() {
+                        // Check for push rbx; sub rsp, imm8: 40 53 48 83 ec xx
+                        if dll_bytes[j] == 0x40
+                            && j + 5 <= lea_file_offset
+                            && dll_bytes[j + 1] == 0x53
+                            && dll_bytes[j + 2] == 0x48
+                            && dll_bytes[j + 3] == 0x83
+                            && dll_bytes[j + 4] == 0xec
+                        {
+                            let patch = [0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3];
+                            if dll_bytes[j..j + patch.len()] != patch {
+                                dll_bytes[j..j + patch.len()].copy_from_slice(&patch);
+                                return true;
+                            }
+                        }
+
+                        // Check for push rdi; sub rsp, imm8: 40 57 48 83 ec xx
+                        if dll_bytes[j] == 0x40
+                            && j + 5 <= lea_file_offset
+                            && dll_bytes[j + 1] == 0x57
+                            && dll_bytes[j + 2] == 0x48
+                            && dll_bytes[j + 3] == 0x83
+                            && dll_bytes[j + 4] == 0xec
+                        {
+                            let patch = [0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3];
+                            if dll_bytes[j..j + patch.len()] != patch {
+                                dll_bytes[j..j + patch.len()].copy_from_slice(&patch);
+                                return true;
+                            }
+                        }
+
+                        // Check for push rbp; mov rbp, rsp: 55 48 89/8b ec/e5
+                        if j + 3 <= lea_file_offset
+                            && dll_bytes[j] == 0x55
+                            && dll_bytes[j + 1] == 0x48
+                            && (dll_bytes[j + 2] == 0x8b || dll_bytes[j + 2] == 0x89)
+                            && (dll_bytes[j + 3] == 0xec || dll_bytes[j + 3] == 0xe5)
+                        {
+                            let patch = [0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3];
+                            if dll_bytes[j..j + patch.len()] != patch {
+                                dll_bytes[j..j + patch.len()].copy_from_slice(&patch);
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Strategy B: Fallback — search for `xor al, al` (32 c0) → ret pattern anywhere in the binary
+    patch_xor_al_fallback(dll_bytes)
+}
+
+/// Find a section by name from parsed PE sections.
+fn find_section_by_name<'a>(sections: &'a [PeSection], name: &str) -> Option<&'a PeSection> {
+    sections.iter().find(|s| s.name == name)
+}
+
+/// Search for `needle` within a specific byte range [offset, offset + size).
+fn find_subsequence_in_range(
+    haystack: &[u8],
+    needle: &[u8],
+    offset: u32,
+    size: u32,
+) -> Option<u32> {
+    let start = offset as usize;
+    let end = (offset + size) as usize;
+    if start >= haystack.len() || end > haystack.len() || start > end {
+        return None;
+    }
+    let slice = &haystack[start..end];
+    slice
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|pos| (start + pos) as u32)
+}
+
+/// Fallback: search for `xor al, al` (32 c0) followed by ret (c3) and patch to `mov al, 1; ret`.
+fn patch_xor_al_fallback(dll_bytes: &mut [u8]) -> bool {
+    let xor_al_pattern = [0x32, 0xc0]; // xor al, al
+    if let Some(xor_offset) = find_subsequence(dll_bytes, &xor_al_pattern) {
+        let len = dll_bytes.len();
+        // Verify it's followed by a ret (c3) or return sequence
+        if xor_offset + 2 < len && dll_bytes[xor_offset + 2] == 0xc3 {
+            let patch = [0xb0, 0x01, 0xc3]; // mov al, 1; ret
+            // Only check the first 2 bytes (mov al, 1) since the ret is common to both
+            if dll_bytes[xor_offset] != patch[0] || dll_bytes[xor_offset + 1] != patch[1] {
+                dll_bytes[xor_offset..xor_offset + patch.len()].copy_from_slice(&patch);
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -725,6 +1154,128 @@ mod tests {
 
         let patched = fs::read(&dll).unwrap();
         assert_eq!(patched[64 + 12], 0xeb);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn godotsteam_patch_replaces_function_with_mov_eax_1_ret() {
+        let dir = test_dir("godotsteam");
+        // Construct a fake GodotSteam DLL with proper PE headers:
+        // - .text section (raw_offset=0x200) containing prologue + lea instruction
+        // - .rdata section (raw_offset=0x400) containing the target string
+        let mut content = vec![0u8; 2048];
+
+        // --- DOS Header (offsets 0-0x7F) ---
+        content[0] = b'M';
+        content[1] = b'Z'; // MZ signature
+        content[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes()); // e_lfanew -> PE header at 0x80
+
+        // --- PE Signature + COFF Header (offsets 0x80-0x97) ---
+        content[0x80..0x84].copy_from_slice(b"PE\0\0"); // PE signature
+        // COFF Header (20 bytes at 0x84..0x98)
+        let mut coff = [0u8; 20];
+        coff[0..2].copy_from_slice(&0x8664u16.to_le_bytes()); // Machine: x86_64
+        coff[2..4].copy_from_slice(&2u16.to_le_bytes()); // NumberOfSections: 2
+        coff[16..18].copy_from_slice(&0xE0u16.to_le_bytes()); // SizeOfOptionalHeader: 0xE0
+        coff[18..20].copy_from_slice(&0x0022u16.to_le_bytes()); // Characteristics: EXECUTABLE | LARGE_ADDRESS_AWARE
+        content[0x84..0x98].copy_from_slice(&coff);
+
+        // --- Minimal PE32+ Optional Header at offset 0x98 (0xE0 bytes) ---
+        content[0x98..0x9A].copy_from_slice(&0x20bu16.to_le_bytes()); // Magic (PE32+)
+
+        // --- Section Headers start at 0x98 + 0xE0 = 0x178 ---
+        // .text section header at offset 0x178
+        let text_hdr = 0x178;
+        content[text_hdr..text_hdr + 8].copy_from_slice(b".text\0\0\0");
+        content[text_hdr + 8..text_hdr + 12].copy_from_slice(&0x200u32.to_le_bytes()); // VirtualSize
+        content[text_hdr + 12..text_hdr + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // VirtualAddress
+        content[text_hdr + 16..text_hdr + 20].copy_from_slice(&0x200u32.to_le_bytes()); // SizeOfRawData
+        content[text_hdr + 20..text_hdr + 24].copy_from_slice(&0x200u32.to_le_bytes()); // PointerToRawData
+
+        // .rdata section header at offset 0x1A0
+        let rdata_hdr = 0x1A0;
+        content[rdata_hdr..rdata_hdr + 8].copy_from_slice(b".rdata\0\0");
+        content[rdata_hdr + 8..rdata_hdr + 12].copy_from_slice(&0x200u32.to_le_bytes()); // VirtualSize
+        content[rdata_hdr + 12..rdata_hdr + 16].copy_from_slice(&0x2000u32.to_le_bytes()); // VirtualAddress
+        content[rdata_hdr + 16..rdata_hdr + 20].copy_from_slice(&0x200u32.to_le_bytes()); // SizeOfRawData
+        content[rdata_hdr + 20..rdata_hdr + 24].copy_from_slice(&0x400u32.to_le_bytes()); // PointerToRawData
+
+        // --- Fill .text section (raw offset 0x200) with code ---
+        let text_base = 0x200;
+
+        // Prologue: push rbx; sub rsp, 0x40 (at file offset 0x200 = RVA 0x1000)
+        let prologue = [0x40, 0x53, 0x48, 0x83, 0xec, 0x40];
+        content[text_base..text_base + 6].copy_from_slice(&prologue);
+
+        // Padding with NOPs up to lea offset (0x210)
+        content[text_base + 6..0x210].fill(0x90);
+
+        // Target string at file offset 0x410 (inside .rdata raw range: 0x400..0x600)
+        let str_file_offset: u32 = 0x410;
+        let target_str = b"Apps class not found when calling: isDLCInstalled";
+
+        // lea rax, [rip + disp32] at file offset 0x210 (in .text section)
+        // RVA of lea = 0x1000 + (0x210 - 0x200) = 0x1010
+        // RIP after this 7-byte instruction = 0x1010 + 7 = 0x1017
+        // RVA of target string = 0x2000 + (0x410 - 0x400) = 0x2010
+        let disp32: i32 = (0x2010u32.wrapping_sub(0x1017)) as i32; // 0xFF9
+        let lea_bytes = [
+            0x48,
+            0x8d,
+            0x05, // lea rax, [rip + disp32]
+            (disp32 & 0xFF) as u8,
+            ((disp32 >> 8) & 0xFF) as u8,
+            ((disp32 >> 16) & 0xFF) as u8,
+            ((disp32 >> 24) & 0xFF) as u8,
+        ];
+        content[0x210..0x217].copy_from_slice(&lea_bytes);
+
+        // --- Place target string in .rdata section ---
+        content[str_file_offset as usize..str_file_offset as usize + target_str.len()]
+            .copy_from_slice(target_str);
+
+        let mut patched = content.clone();
+        assert!(patch_godotsteam_dll(&mut patched));
+
+        // Verify the function entry was replaced with mov eax, 1; ret
+        assert_eq!(patched[text_base], 0xb8); // mov eax, 1
+        assert_eq!(patched[text_base + 1], 0x01);
+        assert_eq!(patched[text_base + 2], 0x00);
+        assert_eq!(patched[text_base + 3], 0x00);
+        assert_eq!(patched[text_base + 4], 0x00);
+        assert_eq!(patched[text_base + 5], 0xc3); // ret
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn godotsteam_patch_fallback_xor_al_to_mov_al_1() {
+        let dir = test_dir("godotsteam_fallback");
+        // Test fallback: when no lea prologue is found, fall back to xor al, al -> mov al, 1
+        let mut content = vec![0x90; 256];
+
+        // Place xor al, al (32 c0) at offset 0x10 followed by ret (c3)
+        content[0x10] = 0x32;
+        content[0x11] = 0xc0; // xor al, al
+        content[0x12] = 0xc3; // ret
+
+        let mut patched = content.clone();
+        assert!(patch_godotsteam_dll(&mut patched));
+
+        // Verify the fallback patch was applied
+        assert_eq!(patched[0x10], 0xb0); // mov al, 1
+        assert_eq!(patched[0x11], 0x01);
+        assert_eq!(patched[0x12], 0xc3); // ret
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn godotsteam_patch_no_match_returns_false() {
+        let dir = test_dir("godotsteam_nomatch");
+        let mut content = vec![0x90; 64];
+        assert!(!patch_godotsteam_dll(&mut content));
 
         let _ = fs::remove_dir_all(dir);
     }

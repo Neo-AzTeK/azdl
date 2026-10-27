@@ -252,8 +252,16 @@ pub fn remove_game_with_guard(
 
         let components_count = canon.components().count();
         if !is_root && !is_data_dir && !is_home && components_count >= 2 {
+            let _ = fixes::rollback_dlc_installed(&canon);
+            let _ = goldberg::rollback_goldberg_config(&canon);
             let _ = fs::remove_dir_all(&canon);
+        } else {
+            let _ = fixes::rollback_dlc_installed(&canon);
+            let _ = goldberg::rollback_goldberg_config(&canon);
         }
+    } else {
+        let _ = fixes::rollback_dlc_installed(install_dir);
+        let _ = goldberg::rollback_goldberg_config(install_dir);
     }
 
     // Remove dedicated Wine/Proton prefix if present
@@ -765,6 +773,24 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
     }
     let _ = fixes::heal_ea_activation(&effective_game.install_dir);
     let _ = goldberg::prepare_goldberg_for_game(&effective_game, data_dir);
+    // Apply DLC installed patches when the game has entitlements or target DLLs are present
+    let installed_dlc = crate::dlc::list_installed(&effective_game, data_dir).unwrap_or_default();
+    let dlc_ids: Vec<u32> = installed_dlc
+        .iter()
+        .filter_map(|id| id.parse().ok())
+        .collect();
+    if (!dlc_ids.is_empty() || fixes::has_dlc_installed_target(&effective_game.install_dir))
+        && let Ok(true) = fixes::patch_dlc_installed_ids(&effective_game.install_dir, &dlc_ids)
+    {
+        if dlc_ids.is_empty() {
+            eprintln!("Applied generic DLC installed patches for base game");
+        } else {
+            eprintln!(
+                "Applied DLC installed patches for {} entitlement(s)",
+                dlc_ids.len()
+            );
+        }
+    }
     if let Ok(installed_deps) =
         dependencies::ensure_game_dependencies(&effective_game, &runner, data_dir)
     {

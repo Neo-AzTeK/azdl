@@ -413,24 +413,41 @@
   // Sub-tabs for installed game management
   let activeDetailTab = $state('overview'); // 'overview' | 'patches' | 'config' | 'diagnostics'
 
-  // Optimistic / reactive SteamStub DRM state
+  // Optimistic / reactive patch states
   let localSteamStub = $state(null);
+  let localDlcPatchApplied = $state(null);
+  let localGoldbergHasSettings = $state(null);
   let pendingAction = $state(null);
   let effectiveSteamStub = $derived(localSteamStub || installedRecord?.steamstub);
+  let effectiveDlcPatchApplied = $derived(
+    localDlcPatchApplied !== null ? localDlcPatchApplied : !!installedRecord?.dlc_patch_applied
+  );
+  let effectiveGoldbergHasSettings = $derived(
+    localGoldbergHasSettings !== null ? localGoldbergHasSettings : !!installedRecord?.goldberg_has_settings
+  );
 
   $effect(() => {
     // Reset local optimistic override when switching games
     const _ = game?.id;
     localSteamStub = null;
+    localDlcPatchApplied = null;
+    localGoldbergHasSettings = null;
   });
 
   $effect(() => {
-    if (installedRecord?.steamstub && localSteamStub) {
+    if (installedRecord) {
       if (
-        installedRecord.steamstub.applied === localSteamStub.applied &&
-        installedRecord.steamstub.stub_present === localSteamStub.stub_present
+        localSteamStub &&
+        installedRecord.steamstub?.applied === localSteamStub.applied &&
+        installedRecord.steamstub?.stub_present === localSteamStub.stub_present
       ) {
         localSteamStub = null;
+      }
+      if (localDlcPatchApplied !== null && installedRecord.dlc_patch_applied === localDlcPatchApplied) {
+        localDlcPatchApplied = null;
+      }
+      if (localGoldbergHasSettings !== null && installedRecord.goldberg_has_settings === localGoldbergHasSettings) {
+        localGoldbergHasSettings = null;
       }
     }
   });
@@ -755,6 +772,12 @@
       const res = await runAction({ id: installedRecord.id, ...actionPayload });
       if (res?.steamstub) {
         localSteamStub = res.steamstub;
+      }
+      if (res?.dlc_patch_applied !== undefined) {
+        localDlcPatchApplied = res.dlc_patch_applied;
+      }
+      if (res?.goldberg_has_settings !== undefined) {
+        localGoldbergHasSettings = res.goldberg_has_settings;
       }
       setBanner('success', successMsg);
       if (onRefresh) await onRefresh();
@@ -1344,7 +1367,7 @@
               {/if}
 
               <!-- DLC License Bypass Patch (if target dll is present or patch applied) -->
-              {#if installedRecord.dlc_patch_available || installedRecord.dlc_patch_applied}
+              {#if installedRecord.dlc_patch_available || effectiveDlcPatchApplied}
                 <div class="tool-card">
                   <div class="tool-header">
                     <div class="tool-header-left">
@@ -1353,14 +1376,14 @@
                       </svg>
                       <h4>DLC License Bypass</h4>
                     </div>
-                    <span class="tool-pill" class:active={installedRecord.dlc_patch_applied} class:inactive={!installedRecord.dlc_patch_applied}>
-                      {installedRecord.dlc_patch_applied ? 'Patched' : 'Original'}
+                    <span class="tool-pill" class:active={effectiveDlcPatchApplied} class:inactive={!effectiveDlcPatchApplied}>
+                      {effectiveDlcPatchApplied ? 'Patched' : 'Original'}
                     </span>
                   </div>
                   <p class="tool-desc">
                     Bypasses Steamworks <code>BIsDlcInstalled</code> entitlement checks in <code>steam_api64.dll</code> so Unity and Godot load offline DLCs under Wine/Proton.
                   </p>
-                  {#if installedRecord.dlc_patch_applied}
+                  {#if effectiveDlcPatchApplied}
                     <button
                       class="md3-btn tonal"
                       disabled={pendingAction === 'dlc-license-rollback'}
@@ -1381,7 +1404,7 @@
               {/if}
 
               <!-- Goldberg Steam Emulator Hook (if compatible or has settings) -->
-              {#if installedRecord.goldberg_compatible || installedRecord.goldberg_has_settings}
+              {#if installedRecord.goldberg_compatible || effectiveGoldbergHasSettings}
                 <div class="tool-card">
                   <div class="tool-header">
                     <div class="tool-header-left">
@@ -1390,14 +1413,14 @@
                       </svg>
                       <h4>Goldberg Emulator Settings</h4>
                     </div>
-                    <span class="tool-pill" class:active={installedRecord.goldberg_has_settings} class:inactive={!installedRecord.goldberg_has_settings}>
-                      {installedRecord.goldberg_has_settings ? 'Configured' : 'Available'}
+                    <span class="tool-pill" class:active={effectiveGoldbergHasSettings} class:inactive={!effectiveGoldbergHasSettings}>
+                      {effectiveGoldbergHasSettings ? 'Configured' : 'Available'}
                     </span>
                   </div>
                   <p class="tool-desc">
                     Auto-provisions <code>steam_settings/DLC.txt</code> and offline AppID entitlements for games using the Goldberg Steam emulator.
                   </p>
-                  {#if installedRecord.goldberg_has_settings}
+                  {#if effectiveGoldbergHasSettings}
                     <button
                       class="md3-btn tonal"
                       disabled={pendingAction === 'goldberg-rollback'}

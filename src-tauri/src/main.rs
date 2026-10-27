@@ -2524,10 +2524,21 @@ mod commands {
                     .games
                     .get(&id)
                     .ok_or_else(|| format!("Game {id} not found"))?;
-                let target_ids = dlc_ids.unwrap_or_default();
+                let target_ids = match dlc_ids {
+                    Some(ids) => ids,
+                    None => {
+                        let installed =
+                            azdl::dlc::list_installed(game, data_dir).unwrap_or_default();
+                        installed.iter().filter_map(|s| s.parse().ok()).collect()
+                    }
+                };
                 let patched = azdl::fixes::patch_dlc_installed_ids(&game.install_dir, &target_ids)
                     .map_err(|e| e.to_string())?;
-                Ok(json!({ "success": true, "patched": patched }))
+                Ok(json!({
+                    "success": true,
+                    "patched": patched,
+                    "dlc_patch_applied": azdl::fixes::has_dlc_installed_patch(&game.install_dir),
+                }))
             }
             Action::DlcLicenseRollback { id } => {
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
@@ -2537,7 +2548,11 @@ mod commands {
                     .ok_or_else(|| format!("Game {id} not found"))?;
                 let restored = azdl::fixes::rollback_dlc_installed(&game.install_dir)
                     .map_err(|e| e.to_string())?;
-                Ok(json!({ "success": true, "restored": restored }))
+                Ok(json!({
+                    "success": true,
+                    "restored": restored,
+                    "dlc_patch_applied": azdl::fixes::has_dlc_installed_patch(&game.install_dir),
+                }))
             }
             Action::GoldbergSync { id } => {
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
@@ -2547,7 +2562,11 @@ mod commands {
                     .ok_or_else(|| format!("Game {id} not found"))?;
                 let updated = azdl::goldberg::prepare_goldberg_for_game(game, data_dir)
                     .map_err(|e| e.to_string())?;
-                Ok(json!({ "success": true, "updated": updated }))
+                Ok(json!({
+                    "success": true,
+                    "updated": updated,
+                    "goldberg_has_settings": azdl::goldberg::has_goldberg_settings(&game.install_dir),
+                }))
             }
             Action::GoldbergRollback { id } => {
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
@@ -2557,7 +2576,11 @@ mod commands {
                     .ok_or_else(|| format!("Game {id} not found"))?;
                 let restored = azdl::goldberg::rollback_goldberg_config(&game.install_dir)
                     .map_err(|e| e.to_string())?;
-                Ok(json!({ "success": true, "restored": restored }))
+                Ok(json!({
+                    "success": true,
+                    "restored": restored,
+                    "goldberg_has_settings": azdl::goldberg::has_goldberg_settings(&game.install_dir),
+                }))
             }
             Action::InstallVcredist { id } => {
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;

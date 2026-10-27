@@ -343,7 +343,7 @@ fn run() -> Result<()> {
                 _ => return Err(usage().into()),
             }
         }
-        Some("fixes") if args.len() == 3 => {
+        Some("fixes") if args.len() >= 3 => {
             let game = library.games.get(&args[2]).ok_or("unknown game ID")?;
             match args[1].as_str() {
                 "ea-heal" => {
