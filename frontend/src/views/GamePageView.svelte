@@ -90,7 +90,7 @@
   let previousDlcTasks = new Set();
   let dlcContext = '';
   let displayedSelection = '';
-  let detailContext = '';
+  let detailGameId = '';
   let detailTabTouched = $state(false);
 
   async function refreshDlc(id) {
@@ -146,9 +146,9 @@
   });
 
   $effect(() => {
-    const context = `${game?.id || ''}:${game?.selected_dlc_id || ''}`;
-    if (context !== detailContext) {
-      detailContext = context;
+    const currentGameId = game?.id || '';
+    if (currentGameId !== detailGameId) {
+      detailGameId = currentGameId;
       detailTabTouched = false;
       displayedSelection = '';
       activeDetailTab = 'overview';
@@ -164,7 +164,7 @@
       activeDetailTab = 'dlc';
       const selectedDlcId = game.selected_dlc_id;
       tick().then(() => {
-        if (activeDetailTab !== 'dlc' || detailContext !== context) return;
+        if (activeDetailTab !== 'dlc' || detailGameId !== currentGameId) return;
         (document.getElementById(`dlc-${selectedDlcId}`)
           || document.getElementById('section-dlc'))?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       });
