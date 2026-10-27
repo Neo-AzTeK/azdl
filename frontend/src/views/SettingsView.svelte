@@ -49,6 +49,10 @@
     max_concurrent_downloads: 3,
     auto_steamless_unpack: true,
     auto_online_fix_overlay: true,
+    auto_goldberg_sync: true,
+    auto_dlc_patch: true,
+    auto_ea_heal: true,
+    auto_game_patch: true,
     seed_color: seedColor,
     theme_mode: themeMode,
   });
@@ -76,14 +80,14 @@
   let installingPluginId = $state(null);
   let lastRefreshedCategory = $state(null);
 
-  const settingsCategories = [
+  let settingsCategories = $derived([
     { id: 'storage', label: 'Storage & Drives', icon: 'M2 20h20v-4H2v4zm2-3h2v2H4v-2zM2 4v4h20V4H2zm4 3H4V5h2v2zm-4 7h20v-4H2v4zm2-3h2v2H4v-2z', keywords: ['storage', 'drive', 'disk', 'folder', 'migrate', 'path', 'games'] },
-    { id: 'launch', label: 'Launch & Runners', icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z', keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'arguments', 'dxvk', 'prefix'] },
-    { id: 'plugins', label: 'Plugins & Sources', icon: 'M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7 1.49 0 2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5s-1.12-2.5-2.5-2.5z', keywords: ['plugin', 'store', 'source', 'catalog', 'feed', 'json', 'url', 'store'] },
+    { id: 'launch', label: platform === 'windows' ? 'Launch Options' : 'Launch & Runners', icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z', keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'arguments', 'dxvk', 'prefix'] },
+    { id: 'plugins', label: 'Plugins & Sources', icon: 'M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7 1.49 0 2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5s-1.12-2.5-2.5-2.5z', keywords: ['plugin', 'store', 'source', 'catalog', 'feed', 'json', 'url', 'store', 'default'] },
     { id: 'appearance', label: 'Material You Theming', icon: 'M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.23 19.64 10.57 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z', keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light'] },
-    { id: 'patches', label: 'Patches', icon: 'M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z', keywords: ['patch', 'patches', 'steamless', 'onlinefix', 'overlay', 'drm', 'steamstub', 'fix'] },
+    { id: 'patches', label: 'Patches', icon: 'M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z', keywords: ['patch', 'patches', 'steamless', 'onlinefix', 'overlay', 'drm', 'steamstub', 'fix', 'goldberg', 'dlc', 'ea'] },
     { id: 'about', label: 'About & Diagnostics', icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z', keywords: ['about', 'diagnostics', 'doctor', 'version', 'system', 'bwrap', 'unrar', 'bsdtar'] },
-  ];
+  ]);
 
   function doesCategoryMatch(cat, query) {
     if (!query || !query.trim()) return false;
@@ -356,9 +360,9 @@
     try {
       await setFavoritePlugin(id);
       if (onRefresh) await onRefresh();
-      notify.success(id ? 'Favorite download plugin updated.' : 'Favorite download plugin cleared.');
+      notify.success(id ? 'Default download plugin updated.' : 'Default download plugin cleared.');
     } catch (e) {
-      notify.error(`Could not update favorite plugin: ${e}`);
+      notify.error(`Could not update default plugin: ${e}`);
     }
   }
 
@@ -567,8 +571,12 @@
       <div class="panel-header">
         <div class="panel-header-row">
           <div>
-            <h2>Launch & Compatibility Runners</h2>
-            <span class="subtext">Orchestrate runtime compatibility for Windows executables and game prefixes.</span>
+            <h2>{platform === 'windows' ? 'Launch Options' : 'Launch & Compatibility Runners'}</h2>
+            <span class="subtext">
+              {platform === 'windows'
+                ? 'Configure global launch parameters and execution options.'
+                : 'Orchestrate runtime compatibility for Windows executables and game prefixes.'}
+            </span>
           </div>
           <div class="platform-chip" title="Detected Host: {platform}">
             {#if platform === 'linux'}
@@ -586,44 +594,41 @@
         </div>
       </div>
 
-      <!-- CARD 1: WINDOWS COMPATIBILITY RUNNER WITH INTEGRATED PREFIX ISOLATION -->
-      <SectionCard
-        title="Windows Compatibility Runner (Wine / Proton)"
-        icon="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"
-        description="Select which runner executes Windows PE binaries (.exe) and Steam manifests on your system:"
-      >
-        <div class="form-row">
-          <select
-            class="md3-select flex-2"
-            bind:value={localSettings.default_runner}
-            onchange={saveLocalSettings}
-          >
-            <option value="auto">Proton Auto (Discovers latest Proton-GE or Valve Proton — Recommended)</option>
-            {#if platform === 'linux'}
+      {#if platform === 'linux'}
+        <!-- CARD 1: WINDOWS COMPATIBILITY RUNNER WITH INTEGRATED PREFIX ISOLATION (LINUX ONLY) -->
+        <SectionCard
+          title="Windows Compatibility Runner (Wine / Proton)"
+          icon="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"
+          description="Select which runner executes Windows PE binaries (.exe) and Steam manifests on your system:"
+        >
+          <div class="form-row">
+            <select
+              class="md3-select flex-2"
+              bind:value={localSettings.default_runner}
+              onchange={saveLocalSettings}
+            >
+              <option value="auto">Proton Auto (Discovers latest Proton-GE or Valve Proton — Recommended)</option>
               {#each runners.filter(r => r.runner_type === 'proton') as p}
                 <option value={p.id}>{p.name}</option>
               {/each}
               <option value="wine">System Wine</option>
-            {/if}
-          </select>
+            </select>
 
-          {#if platform === 'linux'}
             <button class="md3-btn primary" onclick={handleDownloadProton} disabled={isDownloadingProton}>
-              <svg class="btn-icon" viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
               <span>{isDownloadingProton ? 'Downloading...' : 'Download Latest Proton-GE'}</span>
             </button>
-          {/if}
-        </div>
+          </div>
 
-        <div class="prefix-inline-note">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-            <path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v2h-2zm0 0"/>
-          </svg>
-          <span>
-            <strong>Dedicated Prefix Isolation:</strong> Windows games run inside isolated prefixes (<code>~/.local/share/azdl/prefixes/&lt;game_id&gt;</code>) to avoid library collisions, isolate saves, and allow per-game <code>WINEDLLOVERRIDES</code> staging for multiplayer fix DLLs with automated rollback.
-          </span>
-        </div>
-      </SectionCard>
+          <div class="prefix-inline-note">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+              <path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v2h-2zm0 0"/>
+            </svg>
+            <span>
+              <strong>Dedicated Prefix Isolation:</strong> Windows games run inside isolated prefixes (<code>~/.local/share/azdl/prefixes/&lt;game_id&gt;</code>) to avoid library collisions, isolate saves, and allow per-game <code>WINEDLLOVERRIDES</code> staging for multiplayer fix DLLs with automated rollback.
+            </span>
+          </div>
+        </SectionCard>
+      {/if}
 
       <!-- CARD 2: GLOBAL LAUNCH ARGUMENTS -->
       <SectionCard
@@ -686,7 +691,7 @@
                   {#if isInstalled}
                     <span class="badge installed-badge">Installed</span>
                     {#if settings?.favorite_plugin_id === p.id}
-                      <span class="badge recommended-badge">Favorite</span>
+                      <span class="badge recommended-badge">Default</span>
                     {/if}
                   {/if}
                   {#if p.recommended}
@@ -706,7 +711,7 @@
                       onclick={() => handleFavoritePlugin(settings?.favorite_plugin_id === p.id ? null : p.id)}
                       aria-pressed={settings?.favorite_plugin_id === p.id}
                     >
-                      {settings?.favorite_plugin_id === p.id ? 'Unfavorite' : 'Favorite'}
+                      {settings?.favorite_plugin_id === p.id ? 'Clear default' : 'Set default'}
                     </button>
                     <button
                       class="md3-btn danger small"
@@ -823,13 +828,13 @@
     {:else if activeCategory === 'patches'}
       <div class="panel-header">
         <h2>Patches</h2>
-        <span class="subtext">SteamStub DRM stripping and Online-Fix multiplayer runtime overlays.</span>
+        <span class="subtext">Configure global automated patching, DRM stripping, and runtime hooks.</span>
       </div>
 
       <SectionCard
-        title="DRM Stripping & Multiplayer Overlays"
+        title="Automated Runtime Patches & DRM Stripping"
         icon="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"
-        description="Automated Steamless unpacker staging and WINEDLLOVERRIDES multiplayer hooks."
+        description="Global automated patching rules executed during game import and launch lifecycle:"
       >
         <div class="switch-row">
           <div>
@@ -846,12 +851,64 @@
 
         <div class="switch-row">
           <div>
-            <strong>Auto-Enable Online-Fix Overlays</strong>
+            <strong>Auto-Enable Online-Fix / SteamFix Overlays</strong>
             <p class="desc">Set Wine DLL overrides (<code>WINEDLLOVERRIDES="OnlineFix64=n,b"</code>) and preserve clean unpatched states via <code>.arachnel-off</code> renames.</p>
           </div>
           <label class="switch-container" aria-label="Auto-Enable Online-Fix Overlays">
             <Switch
               bind:checked={localSettings.auto_online_fix_overlay}
+              onchange={saveLocalSettings}
+            />
+          </label>
+        </div>
+
+        <div class="switch-row">
+          <div>
+            <strong>Goldberg Steam Emulator Auto-Sync</strong>
+            <p class="desc">Automatically generate <code>steam_settings/</code> configurations (<code>DLC.txt</code>, <code>configs.app.ini</code> with <code>unlock_all=1</code>) and deploy modern emulator binaries for compatible games.</p>
+          </div>
+          <label class="switch-container" aria-label="Goldberg Steam Emulator Auto-Sync">
+            <Switch
+              bind:checked={localSettings.auto_goldberg_sync}
+              onchange={saveLocalSettings}
+            />
+          </label>
+        </div>
+
+        <div class="switch-row">
+          <div>
+            <strong>Steamworks DLC Entitlement Auto-Bypass</strong>
+            <p class="desc">Automatically patch Steamworks <code>BIsDlcInstalled</code> entitlement checks in <code>steam_api64.dll</code> and GodotSteam DLLs on launch.</p>
+          </div>
+          <label class="switch-container" aria-label="Steamworks DLC Entitlement Auto-Bypass">
+            <Switch
+              bind:checked={localSettings.auto_dlc_patch}
+              onchange={saveLocalSettings}
+            />
+          </label>
+        </div>
+
+        <div class="switch-row">
+          <div>
+            <strong>EA Desktop / Origin Activation Repair</strong>
+            <p class="desc">Automatically bypass EA Desktop / Origin activation checks in Frostbite and EA game binaries (<code>Activation64.dll</code>) on launch.</p>
+          </div>
+          <label class="switch-container" aria-label="EA Desktop / Origin Activation Repair">
+            <Switch
+              bind:checked={localSettings.auto_ea_heal}
+              onchange={saveLocalSettings}
+            />
+          </label>
+        </div>
+
+        <div class="switch-row">
+          <div>
+            <strong>Standalone Game Patch Auto-Mount</strong>
+            <p class="desc">Automatically enable and mount staged standalone game patches and community modifications on launch.</p>
+          </div>
+          <label class="switch-container" aria-label="Standalone Game Patch Auto-Mount">
+            <Switch
+              bind:checked={localSettings.auto_game_patch}
               onchange={saveLocalSettings}
             />
           </label>

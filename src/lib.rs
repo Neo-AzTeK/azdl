@@ -771,25 +771,37 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
     {
         eprintln!("{msg}");
     }
-    let _ = fixes::heal_ea_activation(&effective_game.install_dir);
-    let _ = goldberg::prepare_goldberg_for_game(&effective_game, data_dir);
+    let launcher_settings = settings::load_settings(data_dir)
+        .unwrap_or_else(|_| settings::LauncherSettings::default_for(data_dir));
+    if launcher_settings.auto_ea_heal {
+        let _ = fixes::heal_ea_activation(&effective_game.install_dir);
+    }
+    if launcher_settings.auto_goldberg_sync {
+        let _ = goldberg::prepare_goldberg_for_game(&effective_game, data_dir);
+    }
     // Apply DLC installed patches when the game has entitlements or target DLLs are present
-    let installed_dlc = crate::dlc::list_installed(&effective_game, data_dir).unwrap_or_default();
-    let dlc_ids: Vec<u32> = installed_dlc
-        .iter()
-        .filter_map(|id| id.parse().ok())
-        .collect();
-    if (!dlc_ids.is_empty() || fixes::has_dlc_installed_target(&effective_game.install_dir))
-        && let Ok(true) = fixes::patch_dlc_installed_ids(&effective_game.install_dir, &dlc_ids)
-    {
-        if dlc_ids.is_empty() {
-            eprintln!("Applied generic DLC installed patches for base game");
-        } else {
-            eprintln!(
-                "Applied DLC installed patches for {} entitlement(s)",
-                dlc_ids.len()
-            );
+    if launcher_settings.auto_dlc_patch {
+        let installed_dlc =
+            crate::dlc::list_installed(&effective_game, data_dir).unwrap_or_default();
+        let dlc_ids: Vec<u32> = installed_dlc
+            .iter()
+            .filter_map(|id| id.parse().ok())
+            .collect();
+        if (!dlc_ids.is_empty() || fixes::has_dlc_installed_target(&effective_game.install_dir))
+            && let Ok(true) = fixes::patch_dlc_installed_ids(&effective_game.install_dir, &dlc_ids)
+        {
+            if dlc_ids.is_empty() {
+                eprintln!("Applied generic DLC installed patches for base game");
+            } else {
+                eprintln!(
+                    "Applied DLC installed patches for {} entitlement(s)",
+                    dlc_ids.len()
+                );
+            }
         }
+    }
+    if launcher_settings.auto_game_patch {
+        let _ = patch::enable_patch(&effective_game, data_dir);
     }
     if let Ok(installed_deps) =
         dependencies::ensure_game_dependencies(&effective_game, &runner, data_dir)
@@ -798,7 +810,9 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
             eprintln!("Dependency provisioning: {action}");
         }
     }
-    if steamless::scan_game_steamstub(&effective_game).stub_present {
+    if launcher_settings.auto_steamless_unpack
+        && steamless::scan_game_steamstub(&effective_game).stub_present
+    {
         match steamless::unpack_game(&effective_game, data_dir) {
             Ok(count) if count > 0 => eprintln!("Steamless unpacked {count} executable(s)"),
             Ok(_) => {}

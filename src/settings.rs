@@ -45,6 +45,14 @@ pub struct LauncherSettings {
     pub auto_steamless_unpack: bool,
     #[serde(default = "default_true")]
     pub auto_online_fix_overlay: bool,
+    #[serde(default = "default_true")]
+    pub auto_goldberg_sync: bool,
+    #[serde(default = "default_true")]
+    pub auto_dlc_patch: bool,
+    #[serde(default = "default_true")]
+    pub auto_ea_heal: bool,
+    #[serde(default = "default_true")]
+    pub auto_game_patch: bool,
 
     #[serde(default = "default_seed_color")]
     pub seed_color: String,
@@ -99,6 +107,10 @@ impl LauncherSettings {
             auto_steam_grid_artwork: true,
             auto_steamless_unpack: true,
             auto_online_fix_overlay: true,
+            auto_goldberg_sync: true,
+            auto_dlc_patch: true,
+            auto_ea_heal: true,
+            auto_game_patch: true,
             seed_color: "#10B981".into(),
             theme_mode: "dark".into(),
             plugin_store_urls: Vec::new(),
@@ -462,6 +474,12 @@ mod tests {
         assert_eq!(s1.storage_drives[0].id, "default");
         assert_eq!(s1.default_runner, "auto");
         assert_eq!(s1.seed_color, "#10B981");
+        assert!(s1.auto_steamless_unpack);
+        assert!(s1.auto_online_fix_overlay);
+        assert!(s1.auto_goldberg_sync);
+        assert!(s1.auto_dlc_patch);
+        assert!(s1.auto_ea_heal);
+        assert!(s1.auto_game_patch);
 
         let mut s2 = s1.clone();
         s2.seed_color = "#3B82F6".into();
