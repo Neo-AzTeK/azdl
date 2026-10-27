@@ -158,6 +158,13 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test -p azdl --lib 'dlc::tests::'
 
+      - name: Verify Windows DLC retry staging
+        if: runner.os == 'Windows'
+        run: cargo test -p azdl --lib 'steam_depot::tests::'
+
+      - name: Verify desktop size persistence and lightweight progress
+        run: cargo test -p azdl-desktop
+
       - name: Build and bundle Desktop application (Tauri)
         uses: tauri-apps/tauri-action@v1
         with:

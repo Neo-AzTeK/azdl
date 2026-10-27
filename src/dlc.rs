@@ -102,19 +102,19 @@ fn write_manifest_file(path: &Path, manifest: &DlcManifest) -> Result<()> {
     Ok(())
 }
 
-/// Sync backups through the writable handle rather than a read-only Windows handle.
-fn copy_backup(source: &Path, backup: &Path) -> Result<()> {
-    let mut input = dlc_io("read backup source at", source, File::open(source))?;
+/// Sync copied bytes through a writable handle, including on Windows.
+fn copy_synced_file(source: &Path, backup: &Path) -> Result<()> {
+    let mut input = dlc_io("read copy source at", source, File::open(source))?;
     let mut output = dlc_io(
-        "create backup at",
+        "create copy at",
         backup,
         fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(backup),
     )?;
-    dlc_io("write backup at", backup, io::copy(&mut input, &mut output))?;
-    dlc_io("sync backup at", backup, output.sync_all())?;
+    dlc_io("write copy at", backup, io::copy(&mut input, &mut output))?;
+    dlc_io("sync copy at", backup, output.sync_all())?;
     Ok(())
 }
 
@@ -355,6 +355,28 @@ pub(crate) fn install_staged_with_guard(
     source_dir: &Path,
     guard: impl FnOnce() -> Result<()>,
 ) -> Result<usize> {
+    install_staged_payload(game, data_dir, dlc_id, source_dir, false, guard)
+}
+
+/// Consume launcher-owned, verified download staging while preserving the DLC journal.
+pub(crate) fn install_downloaded_staged_with_guard(
+    game: &Game,
+    data_dir: &Path,
+    dlc_id: &str,
+    source_dir: &Path,
+    guard: impl FnOnce() -> Result<()>,
+) -> Result<usize> {
+    install_staged_payload(game, data_dir, dlc_id, source_dir, true, guard)
+}
+
+fn install_staged_payload(
+    game: &Game,
+    data_dir: &Path,
+    dlc_id: &str,
+    source_dir: &Path,
+    consume: bool,
+    guard: impl FnOnce() -> Result<()>,
+) -> Result<usize> {
     validate_id(&game.id)?;
     validate_id(dlc_id)?;
     let _lock = lock_game(data_dir, &game.id)?;
@@ -370,10 +392,52 @@ pub(crate) fn install_staged_with_guard(
             let from = source_dir.join(&relative);
             let to = payload.join(&relative);
             fs::create_dir_all(to.parent().ok_or("invalid DLC path")?)?;
-            fs::copy(from, to)?;
+            if consume {
+                move_staged_file(&from, &to)?;
+            } else {
+                copy_synced_file(&from, &to)?;
+            }
         }
         Ok(())
     })
+}
+
+/// Move an owned staging file, copying durably only across filesystems.
+fn move_staged_file(source: &Path, target: &Path) -> Result<()> {
+    move_staged_file_with(source, target, |from, to| fs::rename(from, to))
+}
+
+fn move_staged_file_with(
+    source: &Path,
+    target: &Path,
+    rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> Result<()> {
+    if fs::symlink_metadata(target).is_ok() {
+        return Err(format!(
+            "DLC staging destination already exists: {}",
+            target.display()
+        )
+        .into());
+    }
+    match rename(source, target) {
+        Ok(()) => {
+            let output = dlc_io(
+                "open moved file at",
+                target,
+                fs::OpenOptions::new().write(true).open(target),
+            )?;
+            dlc_io("sync moved file at", target, output.sync_all())
+        }
+        Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+            copy_synced_file(source, target)?;
+            dlc_io(
+                "remove copied staging source at",
+                source,
+                fs::remove_file(source),
+            )
+        }
+        Err(error) => dlc_io("move staged file to", target, Err(error)),
+    }
 }
 
 fn install_payload_unlocked(
@@ -455,7 +519,7 @@ fn install_payload_unlocked(
                         }
                         let backup = staging.join("backup").join(&relative);
                         fs::create_dir_all(backup.parent().ok_or("invalid DLC backup path")?)?;
-                        copy_backup(&target, &backup)?;
+                        copy_synced_file(&target, &backup)?;
                         if file_sha256(&backup)? != existing_hash
                             || file_sha256(&target)? != existing_hash
                         {
@@ -484,7 +548,7 @@ fn install_payload_unlocked(
                         }
                         let backup = staging.join("backup").join(&relative);
                         fs::create_dir_all(backup.parent().ok_or("invalid DLC backup path")?)?;
-                        copy_backup(&from, &backup)?;
+                        copy_synced_file(&from, &backup)?;
                         if file_sha256(&backup)? != *backup_hash {
                             return Err("Shared DLC overlay backup copy does not match".into());
                         }
@@ -570,21 +634,8 @@ fn install_payload_unlocked(
                 parent,
                 fs::create_dir_all(parent),
             )?;
-            let mut source = File::open(state.join("payload").join(&entry.path))?;
-            let mut output = dlc_io(
-                "create staged file at",
-                &staged_target,
-                fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&staged_target),
-            )?;
-            if let Err(error) = io::copy(&mut source, &mut output).and_then(|_| output.sync_all()) {
-                drop(output);
-                let _ = fs::remove_file(&staged_target);
-                return dlc_io("write staged file at", &staged_target, Err(error));
-            }
-            drop(output);
+            let source = state.join("payload").join(&entry.path);
+            move_staged_file(&source, &staged_target)?;
             if let Some(backup_hash) = &entry.backup_sha256 {
                 if file_sha256(&target)? != *backup_hash {
                     return Err("Base file changed during DLC installation".into());
@@ -1162,6 +1213,39 @@ mod tests {
     use std::process::Command;
 
     #[test]
+    fn owned_staging_moves_with_a_safe_cross_device_copy_fallback() {
+        let root = std::env::temp_dir().join(format!("azdl-dlc-move-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::write(&source, b"verified bytes").unwrap();
+        move_staged_file(&source, &target).unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read(&target).unwrap(), b"verified bytes");
+        fs::write(&source, b"other bytes").unwrap();
+        assert!(move_staged_file(&source, &target).is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"other bytes");
+        assert_eq!(fs::read(&target).unwrap(), b"verified bytes");
+        fs::remove_file(&target).unwrap();
+        move_staged_file_with(&source, &target, |_, _| {
+            Err(io::ErrorKind::CrossesDevices.into())
+        })
+        .unwrap();
+        assert!(!source.exists());
+        assert_eq!(fs::read(&target).unwrap(), b"other bytes");
+        fs::write(&source, b"keep on failure").unwrap();
+        let error = move_staged_file_with(&source, &root.join("denied"), |_, _| {
+            Err(io::ErrorKind::PermissionDenied.into())
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("denied"));
+        assert_eq!(fs::read(&source).unwrap(), b"keep on failure");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn staged_dlc_finalizes_moves_and_removes_without_open_file_handles() {
         let root = std::env::temp_dir().join(format!("azdl-dlc-finalize-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -1218,11 +1302,11 @@ mod tests {
         let mut readonly = permissions.clone();
         readonly.set_readonly(true);
         fs::set_permissions(&source, readonly).unwrap();
-        copy_backup(&source, &backup).unwrap();
+        copy_synced_file(&source, &backup).unwrap();
         assert_eq!(fs::read(&backup).unwrap(), b"base");
         assert!(!fs::metadata(&backup).unwrap().permissions().readonly());
-        let error = copy_backup(&source, &backup).unwrap_err().to_string();
-        assert!(error.contains("create backup"));
+        let error = copy_synced_file(&source, &backup).unwrap_err().to_string();
+        assert!(error.contains("create copy"));
         assert!(error.contains(backup.to_string_lossy().as_ref()));
         assert_eq!(fs::read(&backup).unwrap(), b"base");
         fs::set_permissions(source, permissions).unwrap();

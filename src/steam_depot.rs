@@ -985,7 +985,16 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             )
         })()
     })();
-    let cleanup = remove_staging_dir(&root);
+    let cancelled = load_job(data_dir, &job_id).is_ok_and(|job| job.status == JobStatus::Cancelled)
+        || data_dir
+            .join("jobs")
+            .join(format!("{job_id}.cancel"))
+            .exists();
+    let cleanup = if run.is_ok() || cancelled {
+        remove_staging_dir(&root)
+    } else {
+        Ok(())
+    };
     let cleanup_failed = cleanup.is_err();
     let run = match (run, cleanup) {
         (Ok(count), Ok(())) => Ok(count),
@@ -1035,7 +1044,17 @@ fn prepare_dlc_retry(data_dir: &Path, payload: &Path, job_id: &str) -> Result<()
             .and_then(|name| name.strip_prefix("group-"))
             .and_then(|id| id.parse::<u32>().ok())
             .is_some_and(|id| id > 0);
+        let preserve_revision = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.strip_prefix("group-"))
+            .and_then(|name| name.strip_suffix(".resume.json"))
+            .and_then(|id| id.parse::<u32>().ok())
+            .is_some_and(|id| id > 0);
         if preserve_group && metadata.is_dir() {
+            continue;
+        }
+        if preserve_revision && metadata.is_file() {
             continue;
         }
         if metadata.is_dir() {
@@ -1075,7 +1094,7 @@ pub fn prune_unlisted_staged_files(
     crate::steam_manifest::collect_staged_files(&root, Path::new(""), &mut staged)?;
     for extra in staged.difference(&allowed) {
         let path = root.join(extra);
-        let _ = fs::remove_file(&path);
+        fs::remove_file(&path)?;
     }
     Ok(())
 }
@@ -1096,6 +1115,26 @@ fn stage_verified_dlc_groups_with(
     for (content_app_id, group) in &downloads.groups {
         crate::jobs::check_dlc_cancelled(data_dir, job_id)?;
         let group_dir = root.join(format!("group-{content_app_id}"));
+        let revision_path = root.join(format!("group-{content_app_id}.resume.json"));
+        let mut revision = group
+            .iter()
+            .map(|depot| {
+                Ok((
+                    depot.depot_id,
+                    depot.manifest_id,
+                    crate::sha256::file_sha256(&depot.manifest_path)?,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        revision.sort();
+        let previous_revision = fs::read(&revision_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Vec<(u32, u64, String)>>(&bytes).ok());
+        if previous_revision.as_ref() != Some(&revision) {
+            remove_staging_dir(&group_dir)?;
+            fs::create_dir_all(&group_dir)?;
+            fs::write(&revision_path, serde_json::to_vec(&revision)?)?;
+        }
         let group_manifests = group
             .iter()
             .map(|depot| {
@@ -1112,6 +1151,7 @@ fn stage_verified_dlc_groups_with(
             && crate::steam_manifest::verify_staged_exact(&group_manifests, &group_dir).is_ok();
         if !reusable {
             fs::create_dir_all(&group_dir)?;
+            prune_unlisted_staged_files(&group_manifests, &group_dir)?;
             download(
                 &group_dir,
                 *content_app_id,
@@ -1122,7 +1162,7 @@ fn stage_verified_dlc_groups_with(
                 },
             )?;
             normalize_windows_paths(&group_dir)?;
-            let _ = prune_unlisted_staged_files(&group_manifests, &group_dir);
+            prune_unlisted_staged_files(&group_manifests, &group_dir)?;
         }
         crate::steam_manifest::verify_staged_exact(&group_manifests, &group_dir)?;
         let group_bytes = group_manifests
@@ -1153,17 +1193,23 @@ fn commit_steam_dlc(
     base_manifests: &[(DepotInfo, crate::steam_manifest::DepotManifest)],
     job_id: &str,
 ) -> Result<usize> {
-    crate::dlc::install_staged_with_guard(game, data_dir, &dlc_id.to_string(), payload, || {
-        let current = crate::steam_content::load_base_receipt(data_dir, &game.id)?;
-        if current.as_ref() != Some(expected_base) {
-            return Err(
+    crate::dlc::install_downloaded_staged_with_guard(
+        game,
+        data_dir,
+        &dlc_id.to_string(),
+        payload,
+        || {
+            let current = crate::steam_content::load_base_receipt(data_dir, &game.id)?;
+            if current.as_ref() != Some(expected_base) {
+                return Err(
                 "Base game revision changed during the DLC download; retry against the current base"
                     .into(),
             );
-        }
-        verify_base_manifest_files(game, base_manifests)?;
-        crate::jobs::begin_dlc_commit(data_dir, job_id)
-    })
+            }
+            verify_base_manifest_files(game, base_manifests)?;
+            crate::jobs::begin_dlc_commit(data_dir, job_id)
+        },
+    )
 }
 
 fn merge_verified_payload(source: &Path, target: &Path) -> Result<()> {
@@ -2374,6 +2420,21 @@ mod tests {
         remove_staging_dir(&payload).unwrap();
         fs::create_dir_all(&payload).unwrap();
         fs::write(root.join("group-200/data/second.bin"), b"changed").unwrap();
+        let interrupted = stage_verified_dlc_groups_with(
+            &data_dir,
+            &job_id,
+            &payload,
+            &downloads,
+            &manifests,
+            11,
+            |group_dir, app_id, _, _| {
+                assert_eq!(app_id, 200);
+                fs::write(group_dir.join("data/second.bin"), b"sec")?;
+                Err("simulated connection failure".into())
+            },
+        );
+        assert!(interrupted.is_err());
+        prepare_dlc_retry(&data_dir, &payload, &job_id).unwrap();
         let mut retried = Vec::new();
         stage_verified_dlc_groups_with(
             &data_dir,
@@ -2384,6 +2445,7 @@ mod tests {
             11,
             |group_dir, app_id, depots, span| {
                 retried.push((app_id, depots[0].depot_id, span.completed_bytes));
+                assert_eq!(fs::read(group_dir.join("data/second.bin"))?, b"sec");
                 fs::create_dir_all(group_dir.join("data"))?;
                 fs::write(group_dir.join("data/second.bin"), b"second")?;
                 Ok(())

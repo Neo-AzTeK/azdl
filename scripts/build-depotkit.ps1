@@ -11,13 +11,15 @@ if (-not (Test-Path "$source/.git")) {
 }
 git -C $source checkout --detach 976f3b8fa50d09bea6e2c1c871827752e32cbb91
 if ($LASTEXITCODE -ne 0) { throw 'Cannot check out pinned depotkit revision' }
-$patch = Join-Path $PSScriptRoot 'depotkit-utf8.patch'
-git -C $source apply --reverse --check $patch 2>$null
-if ($LASTEXITCODE -ne 0) {
+# This checkout is generated under target; rebuild patches from the pinned source.
+git -C $source reset --hard 976f3b8fa50d09bea6e2c1c871827752e32cbb91
+if ($LASTEXITCODE -ne 0) { throw 'Cannot reset generated depotkit source' }
+foreach ($patchName in @('depotkit-utf8.patch', 'depotkit-resume.patch')) {
+    $patch = Join-Path $PSScriptRoot $patchName
     git -C $source apply --check $patch
-    if ($LASTEXITCODE -ne 0) { throw 'Cannot verify depotkit UTF-8 patch' }
+    if ($LASTEXITCODE -ne 0) { throw "Cannot verify $patchName" }
     git -C $source apply $patch
-    if ($LASTEXITCODE -ne 0) { throw 'Cannot apply depotkit UTF-8 patch' }
+    if ($LASTEXITCODE -ne 0) { throw "Cannot apply $patchName" }
 }
 
 $options = @('-A', 'x64', '-DZSTD_BUILD_SHARED=OFF', '-DZSTD_BUILD_STATIC=ON', '-DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON', '-DCMAKE_DISABLE_FIND_PACKAGE_zstd=ON', '-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded')

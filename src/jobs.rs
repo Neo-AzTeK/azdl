@@ -1195,6 +1195,9 @@ pub fn clear_job(data_dir: &Path, id: &str) -> Result<()> {
     if job.kind != JobKind::Dlc && job.effective_status() == JobStatus::Running {
         return Err("cannot delete an actively running job".into());
     }
+    if job.kind == JobKind::Dlc {
+        clear_retained_dlc_staging(data_dir, &job)?;
+    }
     let job_file = job_path(data_dir, id)?;
     if job_file.exists() {
         fs::remove_file(job_file)?;
@@ -1203,6 +1206,47 @@ pub fn clear_job(data_dir: &Path, id: &str) -> Result<()> {
     let _ = fs::remove_file(cancel_path(data_dir, id)?);
     let _ = fs::remove_file(job_path(data_dir, id)?.with_extension("phase-lock"));
     let _ = fs::remove_file(dlc_active_lock_path(data_dir, id)?);
+    Ok(())
+}
+
+fn clear_retained_dlc_staging(data_dir: &Path, job: &DownloadJob) -> Result<()> {
+    let base = data_dir.join("dlc-downloads");
+    let Ok(relative) = job.target.strip_prefix(&base) else {
+        return Ok(());
+    };
+    let parts = relative.components().collect::<Vec<_>>();
+    if parts.len() != 3
+        || parts
+            .iter()
+            .any(|part| !matches!(part, Component::Normal(_)))
+        || parts[2].as_os_str() != "payload"
+    {
+        return Ok(());
+    }
+    let game_id = parts[0].as_os_str().to_string_lossy();
+    let dlc_id = parts[1].as_os_str().to_string_lossy();
+    validate_id(&game_id)?;
+    validate_id(&dlc_id)?;
+    if job
+        .install
+        .as_ref()
+        .is_none_or(|plan| plan.game_id != game_id.as_ref())
+    {
+        return Ok(());
+    }
+    let mut path = base;
+    for part in &parts[..2] {
+        if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err("Retained DLC staging contains a symbolic link".into());
+        }
+        path.push(part.as_os_str());
+    }
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => fs::remove_dir_all(path)?,
+        Ok(_) => return Err("Retained DLC staging is not a regular directory".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     Ok(())
 }
 
@@ -1231,6 +1275,49 @@ pub fn clear_completed_jobs(data_dir: &Path) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_failed_dlc_job_discards_only_owned_resume_data() {
+        let root = std::env::temp_dir().join(format!("azdl-dlc-retained-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let staging = root.join("dlc-downloads/base/200");
+        fs::create_dir_all(staging.join("group-100")).unwrap();
+        fs::write(staging.join("group-100/partial.bin"), b"partial").unwrap();
+        let base = root.join("base.bin");
+        fs::write(&base, b"base").unwrap();
+        let target = staging.join("payload");
+        let mut job = DownloadJob {
+            id: job_id_for_target(&target),
+            kind: JobKind::Dlc,
+            url: "steam://100/dlc/200".into(),
+            target,
+            status: JobStatus::Failed,
+            pid: None,
+            error: Some("network failure".into()),
+            updated_unix: now().unwrap(),
+            expected_sha256: None,
+            install: Some(InstallPlan {
+                game_id: "base".into(),
+                title: "DLC".into(),
+                kind: InstallKind::Archive,
+            }),
+            install_state: Some(InstallState::Failed),
+            install_error: None,
+            progress_bytes: Some(7),
+            total_bytes: Some(10),
+        };
+        save_job(&root, &job).unwrap();
+        clear_job(&root, &job.id).unwrap();
+        assert!(!staging.exists());
+        assert_eq!(fs::read(&base).unwrap(), b"base");
+        job.target = root.join("payload");
+        fs::create_dir_all(&job.target).unwrap();
+        fs::write(job.target.join("unowned.bin"), b"keep").unwrap();
+        save_job(&root, &job).unwrap();
+        clear_job(&root, &job.id).unwrap();
+        assert_eq!(fs::read(job.target.join("unowned.bin")).unwrap(), b"keep");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn user_stopped_downloads_keep_typed_outcomes_and_job_status() {
