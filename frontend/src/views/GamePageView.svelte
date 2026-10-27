@@ -90,7 +90,7 @@
   let previousDlcTasks = new Set();
   let dlcContext = '';
   let displayedSelection = '';
-  let detailGameId = '';
+  let detailGameIdentity = '';
   let detailTabTouched = $state(false);
 
   async function refreshDlc(id) {
@@ -146,9 +146,11 @@
   });
 
   $effect(() => {
-    const currentGameId = game?.id || '';
-    if (currentGameId !== detailGameId) {
-      detailGameId = currentGameId;
+    const currentGameIdentity = game?.steam_app_id
+      ? `steam:${game.steam_app_id}`
+      : game?.qualified_id || `${game?.source_id || ''}:${game?.id || ''}`;
+    if (currentGameIdentity !== detailGameIdentity) {
+      detailGameIdentity = currentGameIdentity;
       detailTabTouched = false;
       displayedSelection = '';
       activeDetailTab = 'overview';
@@ -164,7 +166,7 @@
       activeDetailTab = 'dlc';
       const selectedDlcId = game.selected_dlc_id;
       tick().then(() => {
-        if (activeDetailTab !== 'dlc' || detailGameId !== currentGameId) return;
+        if (activeDetailTab !== 'dlc' || detailGameIdentity !== currentGameIdentity) return;
         (document.getElementById(`dlc-${selectedDlcId}`)
           || document.getElementById('section-dlc'))?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       });
@@ -932,7 +934,7 @@
   }
 
   function handleDetailTabChange(event) {
-    const nextTab = event.currentTarget?.value;
+    const nextTab = event.target?.value;
     if (!['overview', 'dlc', 'patches', 'config'].includes(nextTab)) return;
     detailTabTouched = true;
     activeDetailTab = nextTab;
@@ -1187,10 +1189,13 @@
 
         <!-- Navigation Tabs for Detailed Settings (when installed) -->
         {#if isInstalled}
-          <div id="game-detail-tabs" class="game-tabs-container">
+          <div
+            id="game-detail-tabs"
+            class="game-tabs-container"
+            onchange={handleDetailTabChange}
+          >
             <Tabs
               bind:tab={activeDetailTab}
-              onchange={handleDetailTabChange}
               items={[
                 { name: 'Overview', value: 'overview' },
                 { name: `DLC${dlcInfo.available.length ? ` (${dlcInfo.available.length})` : ''}`, value: 'dlc' },
