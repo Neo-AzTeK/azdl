@@ -417,7 +417,10 @@
         />
       {:else if activeTab === 'catalog'}
         {#await loadView('catalog')}
-          <p role="status">Loading Discover…</p>
+          <div class="view-loading" role="status" aria-live="polite">
+            <span class="view-loading-spinner" aria-hidden="true"></span>
+            <span>Opening Discover…</span>
+          </div>
         {:then module}
         {@const CatalogView = module.default}
         <CatalogView
@@ -436,7 +439,10 @@
         {/await}
       {:else if activeTab === 'settings'}
         {#await loadView('settings')}
-          <p role="status">Loading Settings…</p>
+          <div class="view-loading" role="status" aria-live="polite">
+            <span class="view-loading-spinner" aria-hidden="true"></span>
+            <span>Opening Settings…</span>
+          </div>
         {:then module}
         {@const SettingsView = module.default}
         <SettingsView
@@ -461,7 +467,10 @@
         {/await}
       {:else if activeTab === 'game' && viewedGame}
         {#await loadView('game')}
-          <p role="status">Loading game…</p>
+          <div class="view-loading" role="status" aria-live="polite">
+            <span class="view-loading-spinner" aria-hidden="true"></span>
+            <span>Opening game…</span>
+          </div>
         {:then module}
         {@const GamePageView = module.default}
         <GamePageView
@@ -637,6 +646,39 @@
     display: flex;
     flex-direction: column;
     background: var(--md-sys-color-surface);
+  }
+
+  .view-loading {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    color: var(--md-sys-color-on-surface-variant);
+    font-size: 14px;
+    font-weight: 500;
+    text-align: center;
+  }
+
+  .view-loading-spinner {
+    width: 28px;
+    height: 28px;
+    border: 3px solid var(--md-sys-color-outline-variant);
+    border-top-color: var(--md-sys-color-primary);
+    border-radius: var(--md-sys-shape-full);
+    animation: view-loading-spin 800ms linear infinite;
+  }
+
+  @keyframes view-loading-spin {
+    to { transform: rotate(360deg); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .view-loading-spinner {
+      animation-duration: 1800ms;
+    }
   }
 
   .toast-stack-container {
