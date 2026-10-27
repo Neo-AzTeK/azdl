@@ -7,7 +7,6 @@
   import { notify } from '../notifications.js';
   import {
     runAction,
-    setWindowTranslucency,
     updateSettings,
     addStorageDrive,
     removeStorageDrive,
@@ -24,7 +23,6 @@
   let {
     seedColor = $bindable('#10B981'),
     themeMode = $bindable('dark'), // 'system' | 'dark' | 'light' | 'amoled'
-    translucency = $bindable('none'), // 'none' | 'mica' | 'acrylic' | 'compositor'
     activeCategory = $bindable('storage'), // 'storage' | 'launch' | 'plugins' | 'appearance' | 'patches' | 'about'
     runners = [],
     dataDir = '',
@@ -52,7 +50,6 @@
     auto_online_fix_overlay: true,
     seed_color: seedColor,
     theme_mode: themeMode,
-    translucency: translucency,
   });
 
   $effect(() => {
@@ -82,7 +79,7 @@
     { id: 'storage', label: 'Storage & Drives', icon: 'M2 20h20v-4H2v4zm2-3h2v2H4v-2zM2 4v4h20V4H2zm4 3H4V5h2v2zm-4 7h20v-4H2v4zm2-3h2v2H4v-2z', keywords: ['storage', 'drive', 'disk', 'folder', 'migrate', 'path', 'games'] },
     { id: 'launch', label: 'Launch & Runners', icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z', keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'arguments', 'dxvk', 'prefix'] },
     { id: 'plugins', label: 'Plugins & Sources', icon: 'M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7 1.49 0 2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5s-1.12-2.5-2.5-2.5z', keywords: ['plugin', 'store', 'source', 'catalog', 'feed', 'json', 'url', 'store'] },
-    { id: 'appearance', label: 'Material You Theming', icon: 'M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.23 19.64 10.57 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z', keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light', 'mica', 'acrylic', 'translucency'] },
+    { id: 'appearance', label: 'Material You Theming', icon: 'M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.23 19.64 10.57 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z', keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light'] },
     { id: 'patches', label: 'Patches', icon: 'M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z', keywords: ['patch', 'patches', 'steamless', 'onlinefix', 'overlay', 'drm', 'steamstub', 'fix'] },
     { id: 'about', label: 'About & Diagnostics', icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z', keywords: ['about', 'diagnostics', 'doctor', 'version', 'system', 'bwrap', 'unrar', 'bsdtar'] },
   ];
@@ -200,18 +197,6 @@
     themeMode = mode;
     localSettings.theme_mode = mode;
     saveLocalSettings();
-    if (onThemeChange) onThemeChange();
-  }
-
-  async function handleSelectTranslucency(effect) {
-    translucency = effect;
-    localSettings.translucency = effect;
-    saveLocalSettings();
-    try {
-      await setWindowTranslucency(effect);
-    } catch (e) {
-      console.error('Failed to set window translucency:', e);
-    }
     if (onThemeChange) onThemeChange();
   }
 
@@ -749,7 +734,7 @@
     {:else if activeCategory === 'appearance'}
       <div class="panel-header">
         <h2>Material You Personalization</h2>
-        <span class="subtext">Dynamic algorithmic palette generation, theme modes, and window glass translucency.</span>
+        <span class="subtext">Dynamic algorithmic palette generation and theme modes.</span>
       </div>
 
       <SectionCard
@@ -828,46 +813,6 @@
           >
             <span>Light</span>
           </button>
-        </div>
-      </SectionCard>
-
-      <SectionCard
-        title="Window Translucency & Vibrancy"
-        icon="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z"
-        description="Desktop background blur and window glass effects matching your compositor."
-      >
-        <div class="mode-toggles">
-          <button
-            class="mode-btn"
-            class:active={translucency === 'none'}
-            onclick={() => handleSelectTranslucency('none')}
-          >
-            Opaque
-          </button>
-          {#if platform === 'windows'}
-            <button
-              class="mode-btn"
-              class:active={translucency === 'mica'}
-              onclick={() => handleSelectTranslucency('mica')}
-            >
-              Mica
-            </button>
-            <button
-              class="mode-btn"
-              class:active={translucency === 'acrylic'}
-              onclick={() => handleSelectTranslucency('acrylic')}
-            >
-              Acrylic
-            </button>
-          {:else}
-            <button
-              class="mode-btn"
-              class:active={translucency === 'compositor'}
-              onclick={() => handleSelectTranslucency('compositor')}
-            >
-              Compositor Translucency
-            </button>
-          {/if}
         </div>
       </SectionCard>
 

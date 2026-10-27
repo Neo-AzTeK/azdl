@@ -164,9 +164,6 @@ describe('API - Desktop Mode IPC Bridge', () => {
   });
 
   it('invokes window controls', async () => {
-    await api.setWindowTranslucency('acrylic');
-    expect(mockInvoke).toHaveBeenCalledWith('set_window_translucency', { effect: 'acrylic' });
-
     await api.windowMinimize();
     expect(mockInvoke).toHaveBeenCalledWith('window_minimize');
 

@@ -122,7 +122,6 @@
   let seedColor = $state(safeStorageGet('azdl_seed_color', '#10B981'));
 
   let themeMode = $state(safeStorageGet('azdl_theme_mode', 'dark'));
-  let translucency = $state(safeStorageGet('azdl_translucency', 'none'));
 
   function showToast(message, type = 'info') {
     notify(message, type);
@@ -213,8 +212,7 @@
   function updateTheme() {
     safeStorageSet('azdl_seed_color', seedColor);
     safeStorageSet('azdl_theme_mode', themeMode);
-    safeStorageSet('azdl_translucency', translucency);
-    applyTheme(seedColor, themeMode, translucency);
+    applyTheme(seedColor, themeMode);
   }
 
   let isRefreshingState = false;
@@ -395,7 +393,6 @@
         <SettingsView
           bind:seedColor
           bind:themeMode
-          bind:translucency
           bind:activeCategory={settingsCategory}
           {runners}
           dataDir={appState.data_dir}

@@ -1,0 +1,121 @@
+diff --git a/src/engine/engine.cpp b/src/engine/engine.cpp
+index a1ad0c4..7350600 100644
+--- a/src/engine/engine.cpp
++++ b/src/engine/engine.cpp
+@@ -57,9 +57,10 @@ bool fileLooksComplete(const std::string &path, uint64_t size, const std::vector
+ {
+     namespace fs = std::filesystem;
+     std::error_code ec;
+-    if (!fs::exists(path, ec))
++    const auto nativePath = fs::u8path(path);
++    if (!fs::exists(nativePath, ec))
+         return false;
+-    if (fs::file_size(path, ec) != size || ec)
++    if (fs::file_size(nativePath, ec) != size || ec)
+         return false;
+     // Size-only skip is wrong: we SetEndOfFile/preallocate before chunks land, so a
+     // killed download leaves full-sized stubs that would look "done" and skip forever.
+diff --git a/src/engine/file_slot.cpp b/src/engine/file_slot.cpp
+index 9a1f323..c814ad0 100644
+--- a/src/engine/file_slot.cpp
++++ b/src/engine/file_slot.cpp
+@@ -42,7 +42,7 @@ bool FileSlot::write(const std::string &path, uint64_t fileSize, uint64_t offset
+ 
+     std::wstring widePath;
+     try {
+-        widePath = std::filesystem::path(path).wstring();
++        widePath = std::filesystem::u8path(path).wstring();
+     } catch (const std::exception &ex) {
+         error = "cannot use path " + path + ": " + ex.what();
+         return false;
+diff --git a/src/util/util.cpp b/src/util/util.cpp
+index 6593696..5f27b24 100644
+--- a/src/util/util.cpp
++++ b/src/util/util.cpp
+@@ -214,7 +214,7 @@ std::string readFileBytesAsString(const std::string &path)
+ 
+ bool ensureParentDir(const std::string &path)
+ {
+-    std::filesystem::path p(path);
++    const auto p = std::filesystem::u8path(path);
+     if (!p.has_parent_path())
+         return true;
+     std::error_code ec;
+@@ -228,7 +228,7 @@ bool writeFileAtomic(const std::string &path, const uint8_t *data, size_t len)
+         return false;
+     const std::string tmp = path + ".partial";
+     {
+-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
++        std::ofstream out(std::filesystem::u8path(tmp), std::ios::binary | std::ios::trunc);
+         if (!out)
+             return false;
+         out.write(reinterpret_cast<const char *>(data), static_cast<std::streamsize>(len));
+@@ -236,10 +236,10 @@ bool writeFileAtomic(const std::string &path, const uint8_t *data, size_t len)
+             return false;
+     }
+     std::error_code ec;
+-    std::filesystem::rename(tmp, path, ec);
++    std::filesystem::rename(std::filesystem::u8path(tmp), std::filesystem::u8path(path), ec);
+     if (ec) {
+-        std::filesystem::remove(path, ec);
+-        std::filesystem::rename(tmp, path, ec);
++        std::filesystem::remove(std::filesystem::u8path(path), ec);
++        std::filesystem::rename(std::filesystem::u8path(tmp), std::filesystem::u8path(path), ec);
+     }
+     return !ec;
+ }
+diff --git a/tests/test_file_slot.cpp b/tests/test_file_slot.cpp
+index a082bbe..9ed7d9c 100644
+--- a/tests/test_file_slot.cpp
++++ b/tests/test_file_slot.cpp
+@@ -51,6 +51,12 @@ std::string readFile(const std::filesystem::path &path)
+     return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+ }
+ 
++std::string utf8Path(const std::filesystem::path &path)
++{
++    const auto encoded = path.u8string();
++    return std::string(encoded.begin(), encoded.end());
++}
++
+ } // namespace
+ 
+ int main()
+@@ -65,10 +71,17 @@ int main()
+     const auto out = root / "out.bin";
+     const uint8_t tail[] = {'E', 'F', 'G', 'H'};
+     const uint8_t head[] = {'A', 'B', 'C', 'D'};
+-    require(slot.write(out.string(), 8, 4, tail, sizeof(tail), error), error);
+-    require(slot.write(out.string(), 8, 0, head, sizeof(head), error), error);
++    require(slot.write(utf8Path(out), 8, 4, tail, sizeof(tail), error), error);
++    require(slot.write(utf8Path(out), 8, 0, head, sizeof(head), error), error);
+     require(readFile(out) == "ABCDEFGH", "reopening a file corrupted an earlier chunk");
+ 
++    depotkit::FileSlot unicode;
++    const auto unicodePath = root / std::filesystem::u8path("\xe6\xb8\xb8\xe6\x88\x8f")
++        / std::filesystem::u8path("\xc3\xa9.bin");
++    require(unicode.write(utf8Path(unicodePath), 8, 4, tail, sizeof(tail), error), error);
++    require(unicode.write(utf8Path(unicodePath), 8, 0, head, sizeof(head), error), error);
++    require(readFile(unicodePath) == "ABCDEFGH", "UTF-8 paths did not preserve downloaded chunks");
++
+     const auto baseline = openHandleCount();
+     std::vector<std::unique_ptr<depotkit::FileSlot>> slots;
+     slots.reserve(1200);
+@@ -76,7 +89,7 @@ int main()
+     for (size_t i = 0; i < 1200; ++i) {
+         auto next = std::make_unique<depotkit::FileSlot>();
+         const auto path = root / ("file-" + std::to_string(i));
+-        require(next->write(path.string(), 1, 0, &byte, 1, error), error);
++        require(next->write(utf8Path(path), 1, 0, &byte, 1, error), error);
+         slots.push_back(std::move(next));
+         if (baseline && i % 100 == 0) {
+             const auto current = openHandleCount();
+@@ -92,7 +105,7 @@ int main()
+         writers.emplace_back([&, i] {
+             const uint8_t value = static_cast<uint8_t>('0' + i);
+             std::string localError;
+-            if (!concurrent.write(concurrentPath.string(), 8, i, &value, 1, localError)) {
++            if (!concurrent.write(utf8Path(concurrentPath), 8, i, &value, 1, localError)) {
+                 std::cerr << localError << '\n';
+                 std::exit(1);
+             }

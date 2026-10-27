@@ -142,6 +142,18 @@ jobs:
       - name: Build CLI executable (azdl)
         run: cargo build --release -p azdl --target ${{ matrix.target }}
 
+      - name: Build Qt-free Windows depot engine
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/build-depotkit.ps1
+      - name: Verify Windows depot engine without Qt
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:AZDL_TEST_DEPOTKIT = Join-Path $pwd 'target/depotkit-runtime/depotkit.dll'
+          cargo test -p azdl --lib bundled_windows_engine_loads_without_qt_and_validates_requests -- --ignored
+          if ($LASTEXITCODE -ne 0) { throw 'Windows depot engine ABI check failed' }
+
       - name: Build and bundle Desktop application (Tauri)
         uses: tauri-apps/tauri-action@v1
         with:
@@ -209,6 +221,13 @@ jobs:
             Copy-Item "$msiPath\*.msi" -Destination dist-release\ -ErrorAction SilentlyContinue
           }
 
+          if (-not (Get-ChildItem dist-release -Filter '*.exe')) {
+            throw 'The Windows build did not produce an NSIS installer'
+          }
+          if (-not (Get-ChildItem dist-release -Filter '*.msi')) {
+            throw 'The Windows build did not produce an MSI installer'
+          }
+
           # Package portable zip bundle
           New-Item -ItemType Directory -Force -Path staging\azdl
           $cliBin = "target\${{ matrix.target }}\release\azdl.exe"
@@ -218,6 +237,8 @@ jobs:
           $guiBin = "target\${{ matrix.target }}\release\azdl-desktop.exe"
           if (-not (Test-Path $guiBin)) { $guiBin = "target\release\azdl-desktop.exe" }
           Copy-Item $guiBin staging\azdl\
+
+          Copy-Item target\depotkit-runtime\* staging\azdl\
 
           Compress-Archive -Path "staging\azdl\*" -DestinationPath "dist-release\azdl-$tag-windows-x64-portable.zip"
 

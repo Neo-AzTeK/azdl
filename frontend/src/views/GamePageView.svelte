@@ -1,7 +1,9 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
   import Hls from 'hls.js';
-  import { Button, Tabs, FAB } from 'm3-svelte';
+  import { Button, Tabs, FAB, LinearProgress, LinearProgressEstimate } from 'm3-svelte';
+  import SectionCard from '../components/SectionCard.svelte';
+  import { dlcTransfer, dlcTransferActive, dlcTransferStatus, dlcTransferInstalling, isDlcTransferJob, dlcProgress, filterDlc } from '../dlc.js';
   import iconPlay from '@ktibow/iconset-material-symbols/play-arrow';
   import iconStop from '@ktibow/iconset-material-symbols/stop';
   import iconDownload from '@ktibow/iconset-material-symbols/download';
@@ -70,8 +72,16 @@
   });
 
   let isInstalled = $derived(!!installedRecord);
+  let installedGameId = $derived(installedRecord?.id);
+  let isRunning = $derived(!!installedRecord?.is_running);
   let dlcInfo = $state({ available: [], installed: [] });
   let dlcPending = $state('');
+  let dlcLoading = $state(false);
+  let dlcLoadFailed = $state(false);
+  let dlcQuery = $state('');
+  let dlcFilter = $state('all');
+  let dlcRequest = 0;
+  let visibleDlc = $derived(filterDlc(dlcInfo.available, dlcQuery, dlcFilter));
   let dlcToRemove = $state(null);
   let dlcToRecover = $state(null);
   let hasInterruptedDlc = $derived((dlcInfo.interrupted || []).length > 0);
@@ -79,26 +89,50 @@
     .filter((task) => task.status === 'running' && task.id?.startsWith(`dlc-${installedRecord?.id}-`))
     .map((task) => task.id.slice(`dlc-${installedRecord.id}-`.length))));
   let previousDlcTasks = new Set();
+  let dlcContext = '';
+  let displayedSelection = '';
 
   async function refreshDlc(id) {
+    const request = ++dlcRequest;
+    dlcLoading = true;
+    dlcLoadFailed = false;
     const selectedId = game?.selected_dlc_id;
     try {
       const candidate = Number(selectedId);
       const info = await getGameDlc(id, Number.isInteger(candidate) && candidate > 0 ? candidate : null);
-      if (installedRecord?.id === id && game?.selected_dlc_id === selectedId) dlcInfo = info;
+      if (request === dlcRequest && installedRecord?.id === id && game?.selected_dlc_id === selectedId) {
+        dlcInfo = info;
+        if (info.metadata_error) notify.warning(info.metadata_error);
+      }
     } catch (error) {
-      if (installedRecord?.id === id && game?.selected_dlc_id === selectedId) {
+      if (request === dlcRequest && installedRecord?.id === id && game?.selected_dlc_id === selectedId) {
+        dlcLoadFailed = true;
         notifyError(error);
       }
+    } finally {
+      if (request === dlcRequest) dlcLoading = false;
     }
   }
 
   $effect(() => {
-    const id = installedRecord?.id;
+    void installedGameId;
+    dlcQuery = '';
+    dlcFilter = 'all';
+  });
+
+  $effect(() => {
+    const id = installedGameId;
     void dlcRevision;
-    void game?.selected_dlc_id;
+    const context = `${id || ''}:${game?.selected_dlc_id || ''}`;
+    if (context !== dlcContext) {
+      dlcContext = context;
+      dlcInfo = { available: [], installed: [] };
+    }
     if (id) refreshDlc(id);
-    else dlcInfo = { available: [], installed: [] };
+    else {
+      dlcRequest++;
+      dlcLoading = false;
+    }
   });
 
   $effect(() => {
@@ -111,21 +145,37 @@
   });
 
   $effect(() => {
-    if (game?.selected_dlc_id && isInstalled && dlcInfo.available.length > 0) {
-      activeDetailTab = 'overview';
+    const selection = game?.selected_dlc_id ? `${installedGameId}:${game.selected_dlc_id}` : '';
+    if (!selection) displayedSelection = '';
+    if (selection && selection !== displayedSelection && isInstalled && dlcInfo.available.length > 0) {
+      displayedSelection = selection;
+      activeDetailTab = 'dlc';
       tick().then(() => (document.getElementById(`dlc-${game.selected_dlc_id}`)
         || document.getElementById('section-dlc'))?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
     }
   });
 
-  async function installDlc(addon) {
+  async function installDlc(addon, resumeJobId = null) {
     if (!installedRecord || dlcPending) return;
     dlcPending = addon.id;
     try {
-      const result = await runAction({ action: 'dlc-install', id: installedRecord.id, dlc_id: addon.id });
+      const result = await runAction({ action: 'dlc-install', id: installedRecord.id, dlc_id: addon.id, ...(resumeJobId ? { resume_job_id: resumeJobId } : {}) });
       if (!result?.started && !result?.already_working) {
         await refreshDlc(installedRecord.id);
       }
+      onRefresh?.();
+    } catch (error) {
+      notifyError(error);
+    } finally {
+      dlcPending = '';
+    }
+  }
+
+  async function cancelDlc(transfer) {
+    dlcPending = transfer.id;
+    try {
+      await runAction({ action: 'job-cancel', id: transfer.id });
+      notify.info('Cancellation requested. Waiting for the DLC worker to stop.');
       onRefresh?.();
     } catch (error) {
       notifyError(error);
@@ -177,6 +227,7 @@
 
     if (jobs && Array.isArray(jobs) && jobs.length > 0) {
       const match = jobs.find((j) => {
+        if (isDlcTransferJob(j)) return false;
         const s = (j.status || '').toLowerCase();
         const instS = (j.install_state || '').toLowerCase();
         const isActive =
@@ -206,6 +257,7 @@
 
     if (tasks && Array.isArray(tasks) && tasks.length > 0) {
       const activeTask = tasks.find((t) => {
+        if (t.id?.startsWith('dlc-')) return false;
         const s = (t.status || '').toLowerCase();
         if (s !== 'running' && s !== 'working') return false;
         const tgId = (t.game_id || '').toLowerCase();
@@ -902,6 +954,8 @@
                     color="primary"
                     icon={iconPlay}
                     text="PLAY"
+                    disabled={activeDlcIds.size > 0 || !!dlcPending}
+                    title={activeDlcIds.size > 0 ? 'Wait for DLC changes to finish before playing' : undefined}
                     onclick={handlePlay}
                   />
                 </div>
@@ -1070,6 +1124,7 @@
               bind:tab={activeDetailTab}
               items={[
                 { name: 'Overview', value: 'overview' },
+                { name: `DLC${dlcInfo.available.length ? ` (${dlcInfo.available.length})` : ''}`, value: 'dlc' },
                 { name: 'Patches', value: 'patches' },
                 { name: 'Launch & Runner', value: 'config' },
               ]}
@@ -1093,31 +1148,62 @@
               {/if}
             </div>
           </section>
-          {#if isInstalled && dlcInfo.available.length > 0}
-            <section id="section-dlc" class="steam-section-card">
-              <h3 class="section-heading">Downloadable Content</h3>
-              {#each dlcInfo.available as addon (addon.id)}
-                <div id={`dlc-${addon.id}`} class="dlc-row" class:selected={game?.selected_dlc_id === addon.id}>
+        {/if}
+          {#if isInstalled && activeDetailTab === 'dlc'}
+            <div id="section-dlc" aria-busy={dlcLoading}>
+            <SectionCard title="Downloadable Content" badge={`${dlcInfo.installed.length} installed`} description="Check existing files or download additional content without reinstalling the base game.">
+              {#snippet headerActions()}
+                <button class="md3-btn text" disabled={dlcLoading} onclick={() => refreshDlc(installedRecord.id)}>{dlcLoading ? 'Refreshing…' : 'Refresh'}</button>
+              {/snippet}
+              <div class="dlc-toolbar">
+                <input class="md3-input" type="search" aria-label="Search DLC" placeholder="Search downloadable content" bind:value={dlcQuery} />
+                <select class="md3-select" aria-label="Filter DLC" bind:value={dlcFilter}>
+                  <option value="all">All content</option>
+                  <option value="available">Available to install</option>
+                  <option value="installed">Installed</option>
+                  <option value="recovery">Needs recovery</option>
+                </select>
+              </div>
+              {#if hasInterruptedDlc}<p class="section-subtext">Recover interrupted content before installing or removing DLC.</p>{/if}
+              {#if isRunning}<p class="section-subtext">Stop the game before changing downloadable content.</p>{/if}
+              {#if activeDlcIds.size > 0}<p class="section-subtext">Wait for the current DLC operation to finish before changing other content.</p>{/if}
+              {#each visibleDlc as addon (addon.id)}
+                {@const transfer = dlcTransfer(jobs, installedRecord.id, addon.id)}
+                {@const transferStatus = dlcTransferStatus(transfer)}
+                {@const progress = dlcProgress(transfer)}
+                {@const installing = dlcTransferInstalling(transfer)}
+                {@const working = activeDlcIds.has(String(addon.id)) || dlcTransferActive(transfer)}
+                {@const otherDlcWorking = activeDlcIds.size > 0 && !activeDlcIds.has(String(addon.id))}
+                <div id={`dlc-${addon.id}`} class="dlc-row" class:selected={String(game?.selected_dlc_id) === String(addon.id)}>
                   <span class="dlc-details">
-                    <span>{game?.selected_dlc_id === addon.id ? game.selected_dlc_title || addon.title : addon.title}</span>
+                    <span>{String(game?.selected_dlc_id) === String(addon.id) ? game.selected_dlc_title || addon.title : addon.title}</span>
+                    <small aria-live="polite">{working ? installing ? 'Installing files…' : progress !== null ? `Downloading · ${progress}% · ${formatBytes(transfer.bytes ?? transfer.progress_bytes)} / ${formatBytes(transfer.total_bytes)}` : 'Checking files and preparing download…' : addon.interrupted ? 'Recovery required' : addon.installed ? 'Installed' : addon.present_unmanaged ? 'Existing files · not managed by azdl' : transferStatus === 'failed' ? 'Download failed · retry available' : transferStatus === 'interrupted' ? 'Download interrupted · retry available' : ['cancelled', 'canceled'].includes(transferStatus) ? 'Download cancelled' : transferStatus === 'paused' ? 'Download paused' : 'Not installed'}</small>
+                    {#if working && progress !== null}<LinearProgress percent={progress} aria-label={`Downloading ${addon.title}`} aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100} />{/if}
+                    {#if working && progress === null}<LinearProgressEstimate aria-label={`Preparing ${addon.title}`} />{/if}
                     {#if !addon.installed && !addon.interrupted && addon.reason}
                       <small>{addon.reason}</small>
                     {/if}
                   </span>
-                  {#if addon.interrupted}
-                    <button class="md3-btn danger" disabled={!!dlcPending || activeDlcIds.has(addon.id)} onclick={() => dlcToRecover = addon}>Recover</button>
+                  {#if working && transfer && !installing}
+                    <button class="md3-btn text" disabled={!!dlcPending} onclick={() => cancelDlc(transfer)}>Cancel</button>
+                  {:else if transferStatus === 'paused'}
+                    <button class="md3-btn tonal" disabled={isRunning || hasInterruptedDlc || otherDlcWorking || !!dlcPending || !addon.content_available} onclick={() => installDlc(addon, transfer.id)}>Resume</button>
+                  {:else if addon.interrupted}
+                    <button class="md3-btn danger" disabled={isRunning || otherDlcWorking || !!dlcPending || working} onclick={() => dlcToRecover = addon}>Recover</button>
                   {:else if addon.installed}
-                    <button class="md3-btn danger" disabled={hasInterruptedDlc || !!dlcPending || activeDlcIds.has(addon.id)} title={hasInterruptedDlc ? 'Recover interrupted DLC first' : undefined} onclick={() => dlcToRemove = addon}>Remove</button>
+                    <button class="md3-btn danger" disabled={isRunning || hasInterruptedDlc || otherDlcWorking || !!dlcPending || working} title={hasInterruptedDlc ? 'Recover interrupted DLC first' : undefined} onclick={() => dlcToRemove = addon}>Remove</button>
                   {:else}
-                    <button class="md3-btn" disabled={hasInterruptedDlc || !addon.content_available || !!dlcPending || activeDlcIds.has(addon.id)} title={hasInterruptedDlc ? 'Recover interrupted DLC first' : undefined} onclick={() => installDlc(addon)}>
-                      {activeDlcIds.has(addon.id) || dlcPending === addon.id ? 'Checking...' : addon.present_unmanaged ? 'Recheck' : addon.needs_existing_check ? 'Check Files' : addon.needs_provider_check ? 'Check & Install' : addon.content_available ? 'Install' : 'Unavailable'}
+                    <button class="md3-btn tonal" disabled={isRunning || hasInterruptedDlc || otherDlcWorking || !addon.content_available || !!dlcPending || working} title={hasInterruptedDlc ? 'Recover interrupted DLC first' : undefined} onclick={() => installDlc(addon)}>
+                      {working ? 'In progress…' : dlcPending === addon.id ? 'Starting…' : ['failed', 'interrupted'].includes(transferStatus) ? 'Retry' : addon.present_unmanaged ? 'Recheck' : addon.needs_existing_check ? 'Check Files' : addon.needs_provider_check ? 'Check & Install' : addon.content_available ? 'Install' : 'Unavailable'}
                     </button>
                   {/if}
                 </div>
+              {:else}
+                <p class="section-subtext">{dlcLoading ? 'Loading downloadable content…' : dlcLoadFailed ? 'Could not load downloadable content. Use Refresh to try again.' : dlcInfo.available.length ? 'No content matches your search or filter.' : 'No downloadable content is offered for this game.'}</p>
               {/each}
-            </section>
+            </SectionCard>
+            </div>
           {/if}
-        {/if}
 
         <!-- TAB: PATCHES (INSTALLED) -->
         {#if isInstalled && activeDetailTab === 'patches'}
@@ -1690,6 +1776,13 @@
 </div>
 
 <style>
+  .dlc-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .dlc-toolbar input { flex: 1; min-width: 180px; }
   .dlc-row {
     display: flex;
     align-items: center;
@@ -1708,6 +1801,9 @@
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   .dlc-details small {
     color: var(--md-sys-color-on-surface-variant);

@@ -273,7 +273,7 @@ export function generateMaterialPalette(seedHex, mode = 'dark') {
   };
 }
 
-export function applyTheme(seedHex, mode = 'dark', translucency = 'none') {
+export function applyTheme(seedHex, mode = 'dark') {
   const effectiveMode = resolveThemeMode(mode);
   const p = generateMaterialPalette(seedHex, effectiveMode);
   const root = document.documentElement;
@@ -395,23 +395,11 @@ export function applyTheme(seedHex, mode = 'dark', translucency = 'none') {
   root.style.setProperty('--md3-color-error-container', '#93000a');
   root.style.setProperty('--md3-color-on-error-container', '#ffdad6');
 
-  // Window background and translucency handling
-  if (translucency !== 'none') {
-    const alpha = effectiveMode === 'amoled' ? 0.88 : 0.78;
-    root.style.setProperty(
-      '--app-window-bg',
-      `rgba(${p.surfaceRgb.r}, ${p.surfaceRgb.g}, ${p.surfaceRgb.b}, ${alpha})`
-    );
-    root.style.setProperty('--app-backdrop-blur', 'blur(28px) saturate(180%)');
-  } else {
-    root.style.setProperty('--app-window-bg', p.surface);
-    root.style.setProperty('--app-backdrop-blur', 'none');
-  }
+  root.style.setProperty('--app-window-bg', p.surface);
 
   // Set theme attributes on html
   root.setAttribute('data-theme', effectiveMode);
   root.setAttribute('data-theme-preference', mode);
-  root.setAttribute('data-translucency', translucency);
 }
 
 // Dynamic Cover Accent Color Extractor (offscreen canvas pixel sampling)

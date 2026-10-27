@@ -50,8 +50,6 @@ pub struct LauncherSettings {
     pub seed_color: String,
     #[serde(default = "default_theme_mode")]
     pub theme_mode: String,
-    #[serde(default = "default_translucency")]
-    pub translucency: String,
     #[serde(default)]
     pub plugin_store_urls: Vec<String>,
     /// Preferred installed provider for one-click game downloads.
@@ -79,10 +77,6 @@ fn default_theme_mode() -> String {
     "dark".into()
 }
 
-fn default_translucency() -> String {
-    "none".into()
-}
-
 impl LauncherSettings {
     pub fn default_for(data_dir: &Path) -> Self {
         let default_games = data_dir.join("games");
@@ -107,7 +101,6 @@ impl LauncherSettings {
             auto_online_fix_overlay: true,
             seed_color: "#10B981".into(),
             theme_mode: "dark".into(),
-            translucency: "none".into(),
             plugin_store_urls: Vec::new(),
             favorite_plugin_id: None,
         }
@@ -383,6 +376,16 @@ pub fn move_game_to_drive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_translucency_is_ignored_and_not_saved() {
+        let mut value =
+            serde_json::to_value(LauncherSettings::default_for(Path::new("data"))).unwrap();
+        value["translucency"] = serde_json::json!("mica");
+        let settings: LauncherSettings = serde_json::from_value(value).unwrap();
+        let saved = serde_json::to_value(settings).unwrap();
+        assert!(saved.get("translucency").is_none());
+    }
 
     #[test]
     fn moving_game_waits_for_active_dlc_download() {

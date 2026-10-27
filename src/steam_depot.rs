@@ -37,6 +37,18 @@ pub struct DepotkitRequest {
     pub cell_id: u32,
 }
 
+/// Public C request layout for the separately bundled, pinned depotkit engine.
+#[repr(C)]
+struct StandaloneDepotkitRequest {
+    app_id: u32,
+    depots: *const DepotkitDepot,
+    depot_count: usize,
+    target_dir: *const c_char,
+    max_workers: u32,
+    verify_checksums: c_int,
+    cell_id: u32,
+}
+
 #[repr(C)]
 pub struct DepotkitProgress {
     pub bytes_downloaded: u64,
@@ -300,23 +312,24 @@ fn base_install_addons(addons: &[CatalogAddon]) -> impl Iterator<Item = &Catalog
     addons.iter().filter(|addon| addon.kind != AddonKind::Dlc)
 }
 
-fn has_depotkit_symbol(path: &Path) -> bool {
+fn check_depotkit_library(path: &Path) -> Result<()> {
     unsafe {
-        if let Ok(lib) = libloading::Library::new(path) {
-            lib.get::<unsafe extern "C" fn()>(b"depotkit_download")
-                .is_ok()
-        } else {
-            false
-        }
+        let library = libloading::Library::new(path)
+            .map_err(|error| format!("Cannot load {}: {error}", path.display()))?;
+        library
+            .get::<unsafe extern "C" fn()>(b"depotkit_download")
+            .map_err(|error| format!("Missing depotkit_download in {}: {error}", path.display()))?;
     }
+    Ok(())
 }
 
-/// Find the native Steam depot engine declared by the installed provider plugin.
+/// Find the depot engine for the installed default provider.
 pub fn find_depotkit_library(data_dir: &Path) -> Result<PathBuf> {
     find_depotkit_library_for(data_dir, "steamidra")
 }
 
-/// Find the native Steam depot engine declared by an installed plugin with depot download capability.
+/// Validate the installed provider and resolve its depot engine.
+/// Windows uses the bundled Qt-free engine; other hosts retain the plugin engine.
 pub fn find_depotkit_library_for(data_dir: &Path, plugin_id: &str) -> Result<PathBuf> {
     let path = crate::plugins::installed_library_file(data_dir, plugin_id).map_err(|_| {
         format!("Steam depot downloader engine not found in the installed {plugin_id} plugin")
@@ -329,12 +342,20 @@ pub fn find_depotkit_library_for(data_dir: &Path, plugin_id: &str) -> Result<Pat
         )
         .into());
     }
-    if !has_depotkit_symbol(&path) {
-        return Err(format!(
-            "The installed {plugin_id} plugin does not provide a depot downloader"
-        )
-        .into());
+    #[cfg(windows)]
+    {
+        let executable = std::env::current_exe()?;
+        if let Some(directory) = executable.parent() {
+            let engine = directory.join("depotkit.dll");
+            if engine.is_file() {
+                check_depotkit_library(&engine)?;
+                return Ok(engine);
+            }
+        }
     }
+    check_depotkit_library(&path).map_err(|error| {
+        format!("Depot downloader unavailable for {plugin_id}: {error}. On Windows, use the full azdl installer or portable bundle containing depotkit.dll; the plugin's Qt DLL alone is not a depot downloader.")
+    })?;
     Ok(path)
 }
 
@@ -452,13 +473,30 @@ fn download_steam_depots_with_progress(
         app_id,
         cell_id: 0, // auto detect
     };
+    let standalone_req = StandaloneDepotkitRequest {
+        app_id,
+        depots: c_depots.as_ptr(),
+        depot_count: c_depots.len(),
+        target_dir: target_dir_c.as_ptr(),
+        max_workers: 16,
+        verify_checksums: 1,
+        cell_id: 0,
+    };
+    let request = if lib_path
+        .file_name()
+        .is_some_and(|name| name == "depotkit.dll")
+    {
+        (&standalone_req as *const StandaloneDepotkitRequest).cast::<c_void>()
+    } else {
+        (&req as *const DepotkitRequest).cast::<c_void>()
+    };
 
     let lib = unsafe { libloading::Library::new(lib_path) }?;
     type CreateControlFn = unsafe extern "C" fn() -> *mut c_void;
     type DestroyControlFn = unsafe extern "C" fn(*mut c_void);
     type CancelControlFn = unsafe extern "C" fn(*mut c_void);
     type DownloadFn = unsafe extern "C" fn(
-        *const DepotkitRequest,
+        *const c_void,
         Option<extern "C" fn(*const DepotkitProgress, *mut c_void)>,
         *mut c_void,
         *mut c_void,
@@ -486,7 +524,9 @@ fn download_steam_depots_with_progress(
         data_dir,
         job_id,
         ctrl: ctrl as usize,
-        last_update: Instant::now(),
+        last_update: Instant::now()
+            .checked_sub(Duration::from_millis(400))
+            .unwrap_or_else(Instant::now),
         cancel_fn: cancel_fn_ptr,
         completed_bytes: span.completed_bytes,
         overall_bytes: span.overall_bytes,
@@ -494,7 +534,7 @@ fn download_steam_depots_with_progress(
 
     let res = unsafe {
         download(
-            &req,
+            request,
             Some(depotkit_progress_cb),
             (&ctx as *const Mutex<ProgressContext>).cast_mut().cast(),
             ctrl,
@@ -611,10 +651,11 @@ fn resolve_base_manifests_with(
     let manifests = depots
         .iter()
         .map(|depot| {
-            crate::steam_manifest::read_manifest(
+            crate::steam_manifest::read_manifest_with_key(
                 &depot.manifest_path,
                 depot.depot_id,
                 depot.manifest_id,
+                &depot.depot_key,
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -833,10 +874,11 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             .depots
             .iter()
             .map(|depot| {
-                crate::steam_manifest::read_manifest(
+                crate::steam_manifest::read_manifest_with_key(
                     &depot.manifest_path,
                     depot.depot_id,
                     depot.manifest_id,
+                    &depot.depot_key,
                 )
             })
             .collect::<Result<Vec<_>>>()?;
@@ -906,9 +948,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         )?;
         crate::steam_manifest::check_additive_install(&manifests, &game.install_dir)?;
         crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
-        let lib_path = find_depotkit_library_for(data_dir, source).map_err(
-            |_| "The selected download plugin does not provide a usable depot downloader",
-        )?;
+        let lib_path = find_depotkit_library_for(data_dir, source)?;
         let mut job = load_job(data_dir, &job_id)?;
         job.total_bytes = (total_bytes > 0).then_some(total_bytes);
         save_job(data_dir, &job)?;
@@ -946,6 +986,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         })()
     })();
     let cleanup = remove_staging_dir(&root);
+    let cleanup_failed = cleanup.is_err();
     let run = match (run, cleanup) {
         (Ok(count), Ok(())) => Ok(count),
         (Err(error), Ok(())) => Err(error),
@@ -958,8 +999,12 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
     };
     let error = run.as_ref().err().map(ToString::to_string);
     let cancelled = crate::jobs::finish_dlc_job(data_dir, &job_id, error.as_deref())?;
-    if cancelled {
-        return Err("Download cancelled by user".into());
+    finish_stopped_dlc(run, cancelled, cleanup_failed)
+}
+
+fn finish_stopped_dlc(run: Result<usize>, cancelled: bool, cleanup_failed: bool) -> Result<usize> {
+    if cancelled && !cleanup_failed {
+        return Err(crate::jobs::TransferStopped::Cancelled(None).into());
     }
     run
 }
@@ -1054,10 +1099,11 @@ fn stage_verified_dlc_groups_with(
         let group_manifests = group
             .iter()
             .map(|depot| {
-                crate::steam_manifest::read_manifest(
+                crate::steam_manifest::read_manifest_with_key(
                     &depot.manifest_path,
                     depot.depot_id,
                     depot.manifest_id,
+                    &depot.depot_key,
                 )
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1250,8 +1296,7 @@ pub fn install_steam_manifest_game_in(
     } else {
         &game.source_id
     };
-    let lib_path = find_depotkit_library_for(data_dir, plugin_id)
-        .map_err(|_| "The selected download plugin does not provide a usable depot downloader")?;
+    let lib_path = find_depotkit_library_for(data_dir, plugin_id)?;
 
     // 2. Prepare downloads directory
     let download_dir = data_dir
@@ -1412,10 +1457,11 @@ fn install_steam_manifest_game_in_inner(
         .depots
         .iter()
         .map(|depot| {
-            crate::steam_manifest::read_manifest(
+            crate::steam_manifest::read_manifest_with_key(
                 &depot.manifest_path,
                 depot.depot_id,
                 depot.manifest_id,
+                &depot.depot_key,
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1485,10 +1531,11 @@ fn install_steam_manifest_game_in_inner(
             let group_manifests = group
                 .iter()
                 .map(|depot| {
-                    crate::steam_manifest::read_manifest(
+                    crate::steam_manifest::read_manifest_with_key(
                         &depot.manifest_path,
                         depot.depot_id,
                         depot.manifest_id,
+                        &depot.depot_key,
                     )
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -1623,6 +1670,236 @@ fn install_steam_manifest_game_in_inner(
 mod tests {
     use super::*;
     use sha1::{Digest, Sha1};
+
+    #[test]
+    #[ignore = "requires a saved appinfo response and extracted provider bundle"]
+    fn live_base_provider_matches_windows_manifest() -> Result<()> {
+        let app_id: u32 = std::env::var("AZDL_LIVE_BASE_APP_ID")?.parse()?;
+        let appinfo_path = PathBuf::from(std::env::var("AZDL_LIVE_BASE_APPINFO")?);
+        let manifest_dir = PathBuf::from(std::env::var("AZDL_LIVE_BASE_MANIFEST_DIR")?);
+        let metadata = crate::steam_metadata::parse_appinfo(&fs::read(appinfo_path)?, app_id)?;
+        let manifests = resolve_base_manifests_with(
+            &manifest_dir,
+            &metadata,
+            |_| Err("Additional appinfo snapshot required".into()),
+            |_, requested| {
+                if requested == app_id {
+                    Ok(manifest_dir.clone())
+                } else {
+                    Err("Additional provider bundle required".into())
+                }
+            },
+        )?;
+        assert!(!manifests.is_empty());
+        let files = manifests
+            .iter()
+            .flat_map(|(_, manifest)| &manifest.files)
+            .collect::<Vec<_>>();
+        let bytes = files.iter().try_fold(0_u64, |total, file| {
+            total
+                .checked_add(file.size)
+                .ok_or("Manifest size exceeds u64")
+        })?;
+        println!(
+            "Validated {} depots, {} files, {bytes} bytes",
+            manifests.len(),
+            files.len()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_dlc_reports_cleanup_failures() {
+        let stopped = finish_stopped_dlc(Err("cancelled".into()), true, false).unwrap_err();
+        assert!(
+            stopped
+                .downcast_ref::<crate::jobs::TransferStopped>()
+                .is_some()
+        );
+        let cleanup =
+            finish_stopped_dlc(Err("staging cleanup failed".into()), true, true).unwrap_err();
+        assert_eq!(cleanup.to_string(), "staging cleanup failed");
+        assert!(
+            cleanup
+                .downcast_ref::<crate::jobs::TransferStopped>()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn standalone_request_matches_public_depotkit_layout() {
+        assert_eq!(std::mem::offset_of!(StandaloneDepotkitRequest, app_id), 0);
+        if cfg!(target_pointer_width = "64") {
+            assert_eq!(std::mem::offset_of!(StandaloneDepotkitRequest, depots), 8);
+            assert_eq!(std::mem::offset_of!(StandaloneDepotkitRequest, cell_id), 40);
+            assert_eq!(std::mem::size_of::<StandaloneDepotkitRequest>(), 48);
+        }
+    }
+
+    #[test]
+    fn depot_loader_errors_retain_library_path_and_loader_diagnostics() {
+        let path = std::env::temp_dir().join("azdl-nonexistent-depot-engine");
+        let error = check_depotkit_library(&path).unwrap_err().to_string();
+        assert!(error.contains(&path.display().to_string()));
+        assert!(error.starts_with("Cannot load "));
+        assert!(error.len() > format!("Cannot load {}: ", path.display()).len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundled_engine_receives_public_request_fields() {
+        use std::process::Command;
+
+        if Command::new("cc").arg("--version").output().is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "azdl-depot-abi-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let engine = root.join("depotkit.dll");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/depotkit_abi.c");
+        assert!(
+            Command::new("cc")
+                .args(["-shared", "-fPIC", "-o"])
+                .arg(&engine)
+                .arg(fixture)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let depot = DepotInfo {
+            depot_id: 381,
+            manifest_id: 42,
+            manifest_path: root.join("manifest-\u{e9}.bin"),
+            depot_key: "test-key".into(),
+        };
+        let job_id = "0000000000000000";
+        save_job(
+            &root,
+            &DownloadJob {
+                id: job_id.into(),
+                kind: JobKind::Dlc,
+                url: "steam://480/dlc/381".into(),
+                target: root.join("payload"),
+                status: JobStatus::Running,
+                pid: Some(std::process::id()),
+                error: None,
+                updated_unix: now().unwrap(),
+                expected_sha256: None,
+                install: None,
+                install_state: Some(InstallState::Pending),
+                install_error: None,
+                progress_bytes: Some(0),
+                total_bytes: None,
+            },
+        )
+        .unwrap();
+        let inspector = unsafe { libloading::Library::new(&engine) }.unwrap();
+        download_steam_depots(
+            &engine,
+            &root,
+            480,
+            std::slice::from_ref(&depot),
+            &root,
+            job_id,
+        )
+        .unwrap();
+        let job = load_job(&root, job_id).unwrap();
+        assert_eq!(job.progress_bytes, Some(256));
+        assert_eq!(job.total_bytes, Some(1024));
+        fs::write(
+            root.join("jobs").join(format!("{job_id}.cancel")),
+            b"cancel",
+        )
+        .unwrap();
+        let error =
+            download_steam_depots(&engine, &root, 480, &[depot], &root, job_id).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(
+            load_job(&root, job_id).unwrap().status,
+            JobStatus::Cancelled
+        );
+        let cancel_count = unsafe {
+            inspector.get::<unsafe extern "C" fn() -> u32>(b"depotkit_fixture_cancel_count")
+        }
+        .unwrap();
+        assert_eq!(unsafe { cancel_count() }, 1);
+        drop(inspector);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires scripts/build-depotkit.ps1 and AZDL_TEST_DEPOTKIT"]
+    fn bundled_windows_engine_loads_without_qt_and_validates_requests() {
+        let engine = PathBuf::from(std::env::var_os("AZDL_TEST_DEPOTKIT").unwrap());
+        let executable = std::env::current_exe().unwrap();
+        let bundled = executable.parent().unwrap().join("depotkit.dll");
+        fs::copy(engine, &bundled).unwrap();
+        let root = std::env::temp_dir().join(format!("azdl-windows-engine-{}", std::process::id()));
+        let plugin = root.join("plugins/steamidra");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(plugin.join("plugin.json"), br#"{"id":"steamidra","name":"Steam","version":"1","apiVersion":4,"library":"steamidra_plugin"}"#).unwrap();
+        fs::write(
+            plugin.join("steamidra_plugin.dll"),
+            b"unloadable Qt wrapper",
+        )
+        .unwrap();
+        assert_eq!(
+            find_depotkit_library_for(&root, "steamidra").unwrap(),
+            bundled
+        );
+        assert!(find_depotkit_library_for(&root, "missing").is_err());
+        unsafe {
+            let library = libloading::Library::new(&bundled).unwrap();
+            let download = library
+                .get::<unsafe extern "C" fn(
+                    *const StandaloneDepotkitRequest,
+                    *const c_void,
+                    *mut c_void,
+                    *mut c_void,
+                ) -> c_int>(b"depotkit_download")
+                .unwrap();
+            let request = StandaloneDepotkitRequest {
+                app_id: 480,
+                depots: std::ptr::null(),
+                depot_count: 0,
+                target_dir: std::ptr::null(),
+                max_workers: 16,
+                verify_checksums: 1,
+                cell_id: 0,
+            };
+            assert_eq!(
+                download(
+                    &request,
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut()
+                ),
+                1
+            );
+            for symbol in [
+                b"depotkit_control_create".as_slice(),
+                b"depotkit_control_destroy",
+                b"depotkit_cancel",
+                b"depotkit_strerror",
+            ] {
+                library.get::<unsafe extern "C" fn()>(symbol).unwrap();
+            }
+        }
+        let error = download_steam_depots(&bundled, &root, 480, &[], &root, "0000000000000000")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid argument"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_file(bundled).unwrap();
+    }
 
     fn binary_manifest_fixture(
         depot_id: u32,
@@ -2029,10 +2306,11 @@ mod tests {
             .depots
             .iter()
             .map(|depot| {
-                crate::steam_manifest::read_manifest(
+                crate::steam_manifest::read_manifest_with_key(
                     &depot.manifest_path,
                     depot.depot_id,
                     depot.manifest_id,
+                    &depot.depot_key,
                 )
                 .unwrap()
             })

@@ -1,6 +1,7 @@
 <script>
   import { onDestroy } from 'svelte';
   import { runAction } from '../api.js';
+  import { dlcArchiveIdentity } from '../dlc.js';
   import { notify } from '../notifications.js';
   import {
     getJobThumbnail as resolveJobThumb,
@@ -135,7 +136,11 @@
 
   async function handleJobAction(action, id) {
     try {
-      const result = await runAction({ action: `job-${action}`, id });
+      const identity = action === 'resume' ? dlcArchiveIdentity(jobs.find((job) => job.id === id)) : null;
+      const payload = identity
+        ? { action: 'dlc-install', id: identity.gameId, dlc_id: identity.addonId, resume_job_id: id }
+        : { action: `job-${action}`, id };
+      const result = await runAction(payload);
       if (action === 'resume' && result?.dlc_installed_files != null) {
         notify.success('DLC installation complete');
       }
@@ -349,18 +354,18 @@
 
               <div class="job-actions">
                 {#if isJobActive(job.status)}
-                  {#if job.kind !== 'dlc'}
+                  {#if job.kind?.toLowerCase() !== 'dlc'}
                     <button class="action-btn" onclick={() => handleJobAction('pause', job.id)}>
                       Pause
                     </button>
                   {/if}
-                  {#if job.kind !== 'dlc' || job.install_state !== 'installing'}
+                  {#if job.kind?.toLowerCase() !== 'dlc' || job.install_state?.toLowerCase() !== 'installing'}
                     <button class="action-btn danger" onclick={() => handleJobAction('cancel', job.id)}>
                       Cancel
                     </button>
                   {/if}
                 {:else if isJobPaused(job.status)}
-                  {#if job.kind !== 'dlc'}
+                  {#if job.kind?.toLowerCase() !== 'dlc'}
                     <button class="action-btn primary" onclick={() => handleJobAction('resume', job.id)}>
                       Resume
                     </button>

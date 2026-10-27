@@ -17,7 +17,7 @@
         "minHeight": 620,
         "zoomHotkeysEnabled": false,
         "decorations": false,
-        "transparent": true,
+        "transparent": false,
         "shadow": true
       }
     ],

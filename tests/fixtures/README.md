@@ -13,3 +13,6 @@ are in one directory.
 fixture from libarchive. Its password is `12345678`; the
 [test source](https://github.com/libarchive/libarchive/blob/master/libarchive/test/test_read_format_rar_encryption_header.c)
 documents its encrypted headers and BSD license.
+
+`depotkit_abi.c` is an offline test engine that checks the public depotkit request
+fields, progress callback, and cancellation control without making network requests.

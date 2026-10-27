@@ -34,6 +34,29 @@ pub enum JobStatus {
     Cancelled,
 }
 
+/// A transfer stopped by an explicit user request, rather than an error.
+#[derive(Debug)]
+pub enum TransferStopped {
+    /// The transfer was paused and its partial file remains available.
+    Paused(String),
+    /// The transfer was cancelled, optionally identifying its job.
+    Cancelled(Option<String>),
+}
+
+impl std::fmt::Display for TransferStopped {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Paused(id) => {
+                write!(formatter, "download job {id} paused; partial file retained")
+            }
+            Self::Cancelled(Some(id)) => write!(formatter, "download job {id} cancelled"),
+            Self::Cancelled(None) => formatter.write_str("Download cancelled by user"),
+        }
+    }
+}
+
+impl std::error::Error for TransferStopped {}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum InstallKind {
@@ -760,13 +783,13 @@ pub fn recorded_download_with_sha256(
         Ok(TransferOutcome::Paused) => {
             job.status = JobStatus::Paused;
             save_job(data_dir, &job)?;
-            Err(format!("download job {} paused; partial file retained", job.id).into())
+            Err(TransferStopped::Paused(job.id).into())
         }
         Ok(TransferOutcome::Cancelled) => {
             job.status = JobStatus::Cancelled;
             save_job(data_dir, &job)?;
             clear_cancel(data_dir, &job.id)?;
-            Err(format!("download job {} cancelled", job.id).into())
+            Err(TransferStopped::Cancelled(Some(job.id)).into())
         }
         Err(error) => {
             job.status = JobStatus::Failed;
@@ -1208,6 +1231,68 @@ pub fn clear_completed_jobs(data_dir: &Path) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_stopped_downloads_keep_typed_outcomes_and_job_status() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-stopped-transfer-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let install_dir = root.join("game");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::create_dir_all(root.join("jobs")).unwrap();
+        let game = Game {
+            id: "base".into(),
+            title: "Base".into(),
+            install_dir: fs::canonicalize(&install_dir).unwrap(),
+            executable: PathBuf::new(),
+            runner: crate::Runner::Auto,
+            arguments: Vec::new(),
+            environment: Default::default(),
+            last_played_unix: None,
+            origin: None,
+            steam_app_id: None,
+            launch_options: Vec::new(),
+            selected_launch_option_id: None,
+            cover_url: None,
+            banner_url: None,
+        };
+        for (name, status) in [
+            ("paused.zip", JobStatus::Paused),
+            ("cancelled.zip", JobStatus::Cancelled),
+        ] {
+            let id = job_id_for_target(&game.install_dir.join(name));
+            let marker = if status == JobStatus::Paused {
+                pause_path(&root, &id)
+            } else {
+                cancel_path(&root, &id)
+            }
+            .unwrap();
+            fs::write(marker, b"stop").unwrap();
+            let error = recorded_download(
+                &root,
+                &game,
+                "https://example.invalid/archive",
+                Path::new(name),
+                JobKind::Archive,
+            )
+            .unwrap_err();
+            assert!(matches!(
+                (status, error.downcast_ref::<TransferStopped>()),
+                (JobStatus::Paused, Some(TransferStopped::Paused(_)))
+                    | (
+                        JobStatus::Cancelled,
+                        Some(TransferStopped::Cancelled(Some(_)))
+                    )
+            ));
+            assert_eq!(load_job(&root, &id).unwrap().status, status);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(target_os = "windows")]
     #[test]

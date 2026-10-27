@@ -21,7 +21,7 @@ azdl includes a native desktop application in `src-tauri` built with Tauri v2, S
 - **Visual Shimmer Effects:** Dynamic CSS shimmer animation on library cards during background tasks (downloading, unpacking, patching, launching).
 - **Material You Dynamic Theming:** Custom seed color picker and Dark/Light/AMOLED modes. The selected seed stays consistent when opening and leaving game pages.
 - **Direct Engine Integration:** Game launching with process-tree monitoring, prefix scanning, SteamStub unpacker and rollback, Online-Fix / SteamFix overlay toggle, patch manager, Steam shortcut injection, and Proton/Wine runner discovery.
-- **Translucency & Cross-Platform:** Mica / Acrylic support on Windows, compositor translucency on Linux.
+- **Cross-Platform:** Opaque Material You windows on Linux and Windows, without desktop glass effects.
 
 ### Run & Build
 
@@ -215,6 +215,14 @@ Use `option add` to save another executable inside a game's install folder. The 
 When importing an existing Arachnel install, azdl reads `.arachnel-steamidra` if present. A valid local launch path can resolve an otherwise ambiguous executable scan, and valid launch options appear in game settings. Paths outside the install are ignored. For Wine or Proton games with a detected Online Fix or Steam Fix, azdl adds overrides for local fix DLLs and reads a numeric `FakeAppId` from the fix INI for the game process. Explicit per-game environment values remain in control. Before Wine or Proton launch, azdl also creates missing `steam_appid.txt` files beside the selected executable, its working folder, and detected fix files. It selects `SteamFix32.dll` or `SteamFix64.dll` in a simple `winmm.txt` according to the executable architecture. Files it creates are included in the local overlay toggle. If an existing App ID file disagrees or `winmm.txt` has custom content, azdl keeps it and prints a launch warning. This prepares launch settings only; actual online play still depends on the game, patch, and service.
 
 The library is stored in `~/.local/share/azdl/library.json` on Linux or `%APPDATA%/azdl/library.json` on Windows. `XDG_DATA_HOME` and `AZDL_DATA_DIR` can change the location.
+
+## Windows depot engine
+
+Windows installers and portable bundles include a Qt-free `depotkit.dll` beside the launcher executables. Keep it with both portable executables. Download sources still require their installed plugin; the engine does not replace provider selection or manifest checks.
+
+To produce a Windows test installer, run **Build and Release** in GitHub Actions on the branch containing the changes, set the version, and uncheck **Publish as GitHub Release**. The Windows runner builds and tests the pinned engine before packaging the application. Download `artifacts-windows-x64` from the workflow run for the NSIS `.exe`, MSI installer, and portable ZIP. The workflow fails if either installer is missing.
+
+For Windows development, run `./scripts/build-depotkit.ps1` in PowerShell with Git, CMake, and the Visual Studio C++ x64 toolchain available. The script applies the bundled UTF-8 path patch to the pinned engine, runs native tests, and generates the Windows Tauri resource configuration. For `cargo run`, copy `target/depotkit-runtime/depotkit.dll` beside the executable in `target/debug/` (or `target/release/`). The plugin's Qt wrapper DLL is not a substitute.
 
 ## Port status
 

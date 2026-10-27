@@ -50,9 +50,7 @@ fn steam_dlc_provider_status(
         .map_err(|error| error.to_string())?;
     azdl::steam_depot::find_depotkit_library_for(data_dir, source_id)
         .map(|_| ())
-        .map_err(|_| {
-            "The selected download plugin is missing or has no usable depot downloader".to_string()
-        })
+        .map_err(|error| error.to_string())
 }
 
 fn dlc_ids_for_display(
@@ -467,6 +465,8 @@ pub enum Action {
     DlcInstall {
         id: String,
         dlc_id: String,
+        #[serde(default)]
+        resume_job_id: Option<String>,
     },
     DlcRemove {
         id: String,
@@ -794,6 +794,24 @@ mod commands {
             }
         }
         state.notify_state_changed();
+    }
+
+    pub(super) fn finish_dlc_install_task(
+        state: &AppState,
+        task_id: &str,
+        result: AzdlResult<usize>,
+    ) {
+        let failure = result.err().and_then(|error| {
+            if error
+                .downcast_ref::<azdl::jobs::TransferStopped>()
+                .is_some()
+            {
+                None
+            } else {
+                Some(error.to_string())
+            }
+        });
+        finish_install_task(state, task_id, failure);
     }
 
     fn runner_str(runner: &Runner) -> String {
@@ -2099,7 +2117,11 @@ mod commands {
                 }
                 Ok(json!({ "success": true, "removed": id }))
             }
-            Action::DlcInstall { id, dlc_id } => {
+            Action::DlcInstall {
+                id,
+                dlc_id,
+                resume_job_id,
+            } => {
                 let content_lock =
                     azdl::dlc::lock_game(data_dir, &id).map_err(|error| error.to_string())?;
                 let library = load_library(data_dir).map_err(|e| e.to_string())?;
@@ -2121,6 +2143,14 @@ mod commands {
                 let steam_dlc_id = dlc_id.parse::<u32>().ok();
                 if addon.is_none() && steam_dlc_id.is_none() {
                     return Err("DLC is not offered by this game's source plugin".into());
+                }
+                if let Some(job_id) = &resume_job_id {
+                    if addon.is_none() {
+                        return Err(
+                            "Only an offered archive DLC can resume a paused transfer".into()
+                        );
+                    }
+                    azdl::dlc::validate_catalog_dlc_resume(data_dir, job_id, &id, &dlc_id)?;
                 }
                 let task_id = format!("dlc-{}-{dlc_id}", game.id);
                 {
@@ -2157,7 +2187,20 @@ mod commands {
                 std::thread::Builder::new()
                     .name(thread_name)
                     .spawn(move || {
-                        let result = if let Some(addon) = addon {
+                        let result = if let Some(job_id) = resume_job_id {
+                            azdl::dlc::validate_catalog_dlc_resume(
+                                &state_clone.data_dir,
+                                &job_id,
+                                &game.id,
+                                &dlc_id,
+                            )
+                            .and_then(|()| {
+                                azdl::dlc::resume_catalog_dlc_job(&state_clone.data_dir, &job_id)
+                            })
+                            .and_then(|result| {
+                                result.ok_or_else(|| "Paused DLC transfer is unavailable".into())
+                            })
+                        } else if let Some(addon) = addon {
                             azdl::dlc::install_catalog_dlc(&game, &state_clone.data_dir, &addon)
                         } else {
                             azdl::steam_depot::install_steam_dlc(
@@ -2166,11 +2209,7 @@ mod commands {
                                 steam_dlc_id.unwrap_or_default(),
                             )
                         };
-                        finish_install_task(
-                            &state_clone,
-                            &task_id_clone,
-                            result.err().map(|error| error.to_string()),
-                        );
+                        finish_dlc_install_task(&state_clone, &task_id_clone, result);
                     })
                     .map_err(|error| {
                         finish_install_task(state, &task_id, Some(error.to_string()));
@@ -3239,31 +3278,6 @@ mod commands {
     }
 
     #[tauri::command]
-    pub fn set_window_translucency(window: Window, effect: String) -> Result<(), String> {
-        #[cfg(target_os = "windows")]
-        {
-            use tauri::window::{Effect, EffectState, EffectsBuilder};
-            let eff = match effect.as_str() {
-                "mica" => Some(Effect::Mica),
-                "acrylic" => Some(Effect::Acrylic),
-                "tabbed" => Some(Effect::Tabbed),
-                _ => None,
-            };
-            if let Some(e) = eff {
-                let effects = EffectsBuilder::new()
-                    .effect(e)
-                    .state(EffectState::Active)
-                    .build();
-                let _ = window.set_effects(effects);
-            } else {
-                let _ = window.set_effects(None);
-            }
-        }
-        let _ = (window, effect);
-        Ok(())
-    }
-
-    #[tauri::command]
     pub fn window_minimize(window: Window) -> Result<(), String> {
         window.minimize().map_err(|e| e.to_string())
     }
@@ -4052,7 +4066,6 @@ fn main() {
             commands::launch_game,
             commands::stop_game,
             commands::run_action,
-            commands::set_window_translucency,
             commands::window_minimize,
             commands::window_toggle_maximize,
             commands::window_close,
@@ -4189,6 +4202,41 @@ mod tests {
             metadata_pending: Arc::new(Mutex::new(HashSet::new())),
             app_handle: Arc::new(Mutex::new(None)),
         }
+    }
+
+    #[test]
+    fn stopped_dlc_tasks_do_not_report_user_actions_as_failures() {
+        let root = scratch();
+        let state = test_state(&root);
+        for stopped in [
+            azdl::jobs::TransferStopped::Paused("0123456789abcdef".into()),
+            azdl::jobs::TransferStopped::Cancelled(None),
+        ] {
+            state.tasks.lock().unwrap().push(TaskInfo {
+                id: "dlc-base-bonus".into(),
+                label: "Installing DLC".into(),
+                status: "running".into(),
+                pid: None,
+                game_id: Some("base".into()),
+                log_tail: String::new(),
+            });
+            finish_dlc_install_task(&state, "dlc-base-bonus", Err(stopped.into()));
+            assert!(state.tasks.lock().unwrap().is_empty());
+        }
+        state.tasks.lock().unwrap().push(TaskInfo {
+            id: "dlc-base-bonus".into(),
+            label: "Installing DLC".into(),
+            status: "running".into(),
+            pid: None,
+            game_id: Some("base".into()),
+            log_tail: String::new(),
+        });
+        finish_dlc_install_task(&state, "dlc-base-bonus", Err("network failure".into()));
+        let tasks = state.tasks.lock().unwrap();
+        assert_eq!(tasks[0].status, "failed");
+        assert_eq!(tasks[0].log_tail, "network failure");
+        drop(tasks);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4443,6 +4491,23 @@ mod tests {
         // Test missing required field fails deserialization
         let json_missing = r#"{"action":"runner-set","id":"game-1"}"#;
         assert!(serde_json::from_str::<ActionRequest>(json_missing).is_err());
+
+        let install: ActionRequest =
+            serde_json::from_str(r#"{"action":"dlc-install","id":"base","dlc_id":"bonus"}"#)
+                .unwrap();
+        assert!(matches!(
+            install,
+            Action::DlcInstall {
+                resume_job_id: None,
+                ..
+            }
+        ));
+        let resume: ActionRequest = serde_json::from_str(
+            r#"{"action":"dlc-install","id":"base","dlc_id":"bonus","resume_job_id":"0123456789abcdef"}"#,
+        ).unwrap();
+        assert!(
+            matches!(resume, Action::DlcInstall { resume_job_id: Some(id), .. } if id == "0123456789abcdef")
+        );
     }
 
     #[test]

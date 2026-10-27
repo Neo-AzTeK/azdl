@@ -45,6 +45,17 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Test Rust workspace
         run: cargo test --workspace
+      - name: Build Qt-free Windows depot engine
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/build-depotkit.ps1
+      - name: Verify Windows depot engine without Qt
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:AZDL_TEST_DEPOTKIT = Join-Path $pwd 'target/depotkit-runtime/depotkit.dll'
+          cargo test -p azdl --lib bundled_windows_engine_loads_without_qt_and_validates_requests -- --ignored
+          if ($LASTEXITCODE -ne 0) { throw 'Windows depot engine ABI check failed' }
       - name: Lint Rust workspace
         run: cargo clippy --all-targets -- -D warnings
       - name: Build desktop binary

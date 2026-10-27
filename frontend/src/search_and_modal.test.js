@@ -129,7 +129,7 @@ describe('Settings Category Search Matching', () => {
     { id: 'storage', label: 'Storage & Drives', keywords: ['storage', 'drive', 'disk', 'folder', 'migrate', 'path', 'games'] },
     { id: 'launch', label: 'Launch & Runners', keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'arguments', 'dxvk', 'prefix'] },
     { id: 'plugins', label: 'Plugins & Sources', keywords: ['plugin', 'store', 'source', 'catalog', 'feed', 'json', 'url', 'generator', 'make'] },
-    { id: 'appearance', label: 'Material You Theming', keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light', 'mica', 'acrylic', 'translucency'] },
+    { id: 'appearance', label: 'Material You Theming', keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light'] },
     { id: 'patches', label: 'Patches', keywords: ['patch', 'patches', 'steamless', 'onlinefix', 'overlay', 'drm', 'steamstub', 'fix'] },
     { id: 'about', label: 'About & Diagnostics', keywords: ['about', 'diagnostics', 'doctor', 'version', 'system', 'bwrap', 'unrar', 'bsdtar'] },
   ];

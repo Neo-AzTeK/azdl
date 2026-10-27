@@ -1,6 +1,12 @@
 //! Bounded reading and verification of Steam protobuf depot manifests.
 
 use crate::Result;
+use aes::Aes256;
+use aes::cipher::{BlockDecrypt, KeyInit, generic_array::GenericArray};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+};
 use sha1::{Digest, Sha1};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -145,17 +151,75 @@ fn safe_path(name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn parse_file(bytes: &[u8]) -> Result<Option<ManifestFile>> {
+fn decrypt_name(encoded: &[u8], cipher: &Aes256) -> Result<String> {
+    let compact = encoded
+        .iter()
+        .copied()
+        .filter(|byte| !matches!(byte, b'\r' | b'\n' | b' '))
+        .collect::<Vec<_>>();
+    let encrypted = STANDARD
+        .decode(&compact)
+        .or_else(|_| STANDARD_NO_PAD.decode(&compact))
+        .map_err(|_| "Invalid encrypted depot filename encoding")?;
+    if encrypted.len() < 32 || encrypted.len() % 16 != 0 {
+        return Err("Invalid encrypted depot filename length".into());
+    }
+    let mut initial = GenericArray::clone_from_slice(&encrypted[..16]);
+    cipher.decrypt_block(&mut initial);
+    let mut previous: [u8; 16] = initial.into();
+    let mut plaintext = Vec::with_capacity(encrypted.len() - 16);
+    for chunk in encrypted[16..].chunks_exact(16) {
+        let mut block = GenericArray::clone_from_slice(chunk);
+        cipher.decrypt_block(&mut block);
+        plaintext.extend(
+            block
+                .iter()
+                .zip(previous)
+                .map(|(byte, prior)| *byte ^ prior),
+        );
+        previous.copy_from_slice(chunk);
+    }
+    let padding = usize::from(*plaintext.last().ok_or("Empty encrypted depot filename")?);
+    if padding == 0
+        || padding > 16
+        || padding > plaintext.len()
+        || plaintext[plaintext.len() - padding..]
+            .iter()
+            .any(|byte| usize::from(*byte) != padding)
+    {
+        return Err("Invalid encrypted depot filename padding".into());
+    }
+    plaintext.truncate(plaintext.len() - padding);
+    while plaintext.last() == Some(&0) {
+        plaintext.pop();
+    }
+    Ok(String::from_utf8(plaintext)?)
+}
+
+fn depot_cipher(key: &str) -> Result<Aes256> {
+    if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Depot key must contain 64 hexadecimal characters".into());
+    }
+    let mut bytes = [0u8; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&key[index * 2..index * 2 + 2], 16)?;
+    }
+    Aes256::new_from_slice(&bytes).map_err(|_| "Invalid depot key".into())
+}
+
+fn parse_file(bytes: &[u8], cipher: Option<&Aes256>) -> Result<Option<ManifestFile>> {
     let mut name = None;
     let mut size = None;
     let mut flags = 0;
     let mut hash = None;
+    let mut name_hash = None;
     let mut link = false;
     for (number, value) in fields(bytes)? {
         match (number, value) {
-            (1, Field::Bytes(value)) => name = Some(std::str::from_utf8(value)?),
+            (1, Field::Bytes(value)) => name = Some(value),
             (2, Field::Number(value)) => size = Some(value),
             (3, Field::Number(value)) => flags = value,
+            (4, Field::Bytes(value)) => name_hash = Some(value),
             (5, Field::Bytes(value)) => hash = Some(<[u8; 20]>::try_from(value)?),
             (7, Field::Bytes(value)) => link = !value.is_empty(),
             _ => {}
@@ -164,7 +228,20 @@ fn parse_file(bytes: &[u8]) -> Result<Option<ManifestFile>> {
     if flags & SYMLINK_FLAG != 0 || link {
         return Err("Depot manifest contains a symbolic link".into());
     }
-    let path = safe_path(name.ok_or("Depot manifest file has no name")?)?;
+    let name = name.ok_or("Depot manifest file has no name")?;
+    let name = match cipher {
+        Some(cipher) => decrypt_name(name, cipher)?,
+        None => std::str::from_utf8(name)?.to_owned(),
+    };
+    if cipher.is_some()
+        && let Some(expected) = name_hash
+    {
+        let actual = Sha1::digest(name.to_lowercase().as_bytes());
+        if expected.len() != actual.len() || &actual[..] != expected {
+            return Err("Decrypted depot filename does not match its hash".into());
+        }
+    }
+    let path = safe_path(&name)?;
     if flags & DIRECTORY_FLAG != 0 {
         return Ok(None);
     }
@@ -180,6 +257,25 @@ pub fn read_manifest(
     path: &Path,
     expected_depot: u32,
     expected_revision: u64,
+) -> Result<DepotManifest> {
+    read_manifest_inner(path, expected_depot, expected_revision, None)
+}
+
+/// Parse a manifest, decrypting encrypted filenames with the provider's depot key.
+pub fn read_manifest_with_key(
+    path: &Path,
+    expected_depot: u32,
+    expected_revision: u64,
+    depot_key: &str,
+) -> Result<DepotManifest> {
+    read_manifest_inner(path, expected_depot, expected_revision, Some(depot_key))
+}
+
+fn read_manifest_inner(
+    path: &Path,
+    expected_depot: u32,
+    expected_revision: u64,
+    depot_key: Option<&str>,
 ) -> Result<DepotManifest> {
     let meta = fs::symlink_metadata(path)?;
     if !meta.is_file() || meta.file_type().is_symlink() || meta.len() > MAX_MANIFEST_BYTES {
@@ -200,11 +296,13 @@ pub fn read_manifest(
     let mut manifest_id = None;
     let mut encrypted = false;
     let mut clear_crc = None;
+    let mut encrypted_crc = None;
     for (number, value) in fields(metadata)? {
         match (number, value) {
             (1, Field::Number(value)) => depot_id = Some(u32::try_from(value)?),
             (2, Field::Number(value)) => manifest_id = Some(value),
             (4, Field::Number(value)) => encrypted = value != 0,
+            (8, Field::Number(value)) => encrypted_crc = Some(u32::try_from(value)?),
             (9, Field::Number(value)) => clear_crc = Some(u32::try_from(value)?),
             _ => {}
         }
@@ -212,10 +310,15 @@ pub fn read_manifest(
     if depot_id != Some(expected_depot) || manifest_id != Some(expected_revision) {
         return Err("Depot manifest metadata does not match the selected revision".into());
     }
-    if encrypted {
-        return Err("Depot manifest filenames are encrypted".into());
-    }
-    if let Some(expected_crc) = clear_crc {
+    let cipher = if encrypted {
+        Some(depot_cipher(
+            depot_key.ok_or("Depot manifest filenames are encrypted")?,
+        )?)
+    } else {
+        None
+    };
+    let selected_crc = if encrypted { encrypted_crc } else { clear_crc };
+    if let Some(expected_crc) = selected_crc {
         let payload_len = u32::try_from(payload.len())?;
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(&payload_len.to_le_bytes());
@@ -227,7 +330,7 @@ pub fn read_manifest(
     let mut files = Vec::new();
     for (number, value) in fields(payload)? {
         if let (1, Field::Bytes(value)) = (number, value)
-            && let Some(file) = parse_file(value)?
+            && let Some(file) = parse_file(value, cipher.as_ref())?
         {
             files.push(file);
         }
@@ -467,6 +570,7 @@ pub fn verify_staged_exact(manifests: &[DepotManifest], staged_dir: &Path) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aes::cipher::BlockEncrypt;
 
     #[test]
     fn selected_manifests_reject_file_directory_and_case_conflicts() {
@@ -572,6 +676,122 @@ mod tests {
         result.extend(section(SIGNATURE_MAGIC, &[]));
         result.extend(END_MAGIC.to_le_bytes());
         result
+    }
+
+    fn encrypted_fixture(path: &str, flags: u64, key: &[u8; 32], padded: bool) -> Vec<u8> {
+        let cipher = Aes256::new_from_slice(key).unwrap();
+        let mut previous = [7u8; 16];
+        let mut encrypted_iv = GenericArray::clone_from_slice(&previous);
+        cipher.encrypt_block(&mut encrypted_iv);
+        let mut encrypted = encrypted_iv.to_vec();
+        let mut plain = path.as_bytes().to_vec();
+        plain.extend([0, 0]);
+        let padding = 16 - plain.len() % 16;
+        plain.extend(std::iter::repeat_n(padding as u8, padding));
+        for chunk in plain.chunks_exact(16) {
+            let mut block = GenericArray::clone_from_slice(chunk);
+            for (byte, prior) in block.iter_mut().zip(previous) {
+                *byte ^= prior;
+            }
+            cipher.encrypt_block(&mut block);
+            encrypted.extend_from_slice(&block);
+            previous.copy_from_slice(&block);
+        }
+        let mut encoded = if padded {
+            STANDARD.encode(encrypted)
+        } else {
+            STANDARD_NO_PAD.encode(encrypted)
+        };
+        encoded.insert_str(8, " \r\n");
+        let mut file = bytes(1, encoded.as_bytes());
+        file.extend(number(2, 7));
+        file.extend(number(3, flags));
+        file.extend(bytes(4, &Sha1::digest(path.to_lowercase().as_bytes())));
+        file.extend(bytes(5, &Sha1::digest(b"content")));
+        let payload = bytes(1, &file);
+        let mut metadata = number(1, 200);
+        metadata.extend(number(2, 300));
+        metadata.extend(number(4, 1));
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&(payload.len() as u32).to_le_bytes());
+        hasher.update(&payload);
+        metadata.extend(number(8, u64::from(hasher.finalize())));
+        metadata.extend(number(9, 0));
+        let mut result = section(PAYLOAD_MAGIC, &payload);
+        result.extend(section(METADATA_MAGIC, &metadata));
+        result.extend(section(SIGNATURE_MAGIC, &[]));
+        result.extend(END_MAGIC.to_le_bytes());
+        result
+    }
+
+    #[test]
+    fn encrypted_manifest_decryption_preserves_security_checks() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-encrypted-manifest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("depot.manifest");
+        let key = [0x11; 32];
+        let key_hex = "11".repeat(32);
+        for padded in [true, false] {
+            fs::write(
+                &source,
+                encrypted_fixture("data\\addon.bin", 0, &key, padded),
+            )
+            .unwrap();
+            assert!(read_manifest(&source, 200, 300).is_err());
+            assert!(read_manifest_with_key(&source, 200, 300, "invalid").is_err());
+            assert!(read_manifest_with_key(&source, 200, 300, &"22".repeat(32)).is_err());
+            let manifest = read_manifest_with_key(&source, 200, 300, &key_hex).unwrap();
+            assert_eq!(manifest.files[0].path, Path::new("data/addon.bin"));
+            let expected_hash: [u8; 20] = Sha1::digest(b"content").into();
+            assert_eq!(manifest.files[0].sha1, expected_hash);
+        }
+        fs::write(&source, fixture("data/addon.bin", b"content")).unwrap();
+        assert!(read_manifest_with_key(&source, 200, 300, "unused").is_ok());
+        let original = encrypted_fixture("data/addon.bin", 0, &key, true);
+        let mut cursor = 0;
+        let payload = super::section(&original, &mut cursor, PAYLOAD_MAGIC).unwrap();
+        let mut file = match fields(payload).unwrap()[0].1 {
+            Field::Bytes(value) => value.to_vec(),
+            _ => panic!("Expected a file mapping"),
+        };
+        let name_hash = Sha1::digest(b"data/addon.bin");
+        let offset = file
+            .windows(name_hash.len())
+            .position(|window| window == &name_hash[..])
+            .unwrap();
+        file[offset] ^= 1;
+        assert!(
+            parse_file(&file, Some(&Aes256::new_from_slice(&key).unwrap()))
+                .unwrap_err()
+                .to_string()
+                .contains("filename does not match")
+        );
+        fs::write(&source, encrypted_fixture("../escape", 0, &key, true)).unwrap();
+        assert!(read_manifest_with_key(&source, 200, 300, &key_hex).is_err());
+        fs::write(
+            &source,
+            encrypted_fixture("data/addon.bin", SYMLINK_FLAG, &key, true),
+        )
+        .unwrap();
+        assert!(read_manifest_with_key(&source, 200, 300, &key_hex).is_err());
+        let mut corrupted = encrypted_fixture("data/addon.bin", 0, &key, true);
+        corrupted[12] ^= 1;
+        fs::write(&source, corrupted).unwrap();
+        assert!(
+            read_manifest_with_key(&source, 200, 300, &key_hex)
+                .unwrap_err()
+                .to_string()
+                .contains("CRC")
+        );
+        assert!(decrypt_name(b"%%%", &Aes256::new_from_slice(&key).unwrap()).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -585,6 +585,41 @@ pub fn install_catalog_dlc(game: &Game, data_dir: &Path, addon: &CatalogAddon) -
     })
 }
 
+/// Verify that a paused archive belongs to the requested game's DLC staging directory.
+pub fn validate_catalog_dlc_resume(
+    data_dir: &Path,
+    job_id: &str,
+    game_id: &str,
+    dlc_id: &str,
+) -> Result<()> {
+    validate_id(game_id)?;
+    validate_id(dlc_id)?;
+    let job = crate::jobs::load_job(data_dir, job_id)?;
+    if job.kind != JobKind::Archive
+        || job.effective_status() != JobStatus::Paused
+        || job
+            .install
+            .as_ref()
+            .is_none_or(|plan| plan.game_id != game_id)
+    {
+        return Err("Paused DLC transfer does not belong to this game".into());
+    }
+    let root = data_dir.join("dlc-downloads");
+    let game_dir = root.join(game_id);
+    let expected = game_dir.join(dlc_id);
+    for path in [&root, &game_dir, &expected] {
+        let metadata = fs::symlink_metadata(path)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("DLC download path is not a regular directory".into());
+        }
+    }
+    let parent = job.target.parent().ok_or("invalid download target")?;
+    if fs::canonicalize(parent)? != fs::canonicalize(expected)? {
+        return Err("Paused transfer does not belong to this DLC".into());
+    }
+    Ok(())
+}
+
 /// Resume a paused provider archive and complete its DLC installation.
 /// Returns `None` for ordinary download jobs outside DLC staging.
 pub fn resume_catalog_dlc_job(data_dir: &Path, job_id: &str) -> Result<Option<usize>> {
@@ -1288,33 +1323,35 @@ mod tests {
             .is_err()
         );
         assert!(!staging.exists());
-        assert!(
-            install_catalog_dlc_with(&game, &root, &addon, |placeholder, _, name, _| {
-                let path = placeholder.install_dir.join(name);
-                fs::write(path.with_file_name("bonus.zip.part"), b"partial")?;
-                crate::jobs::save_job(
-                    &root,
-                    &crate::jobs::DownloadJob {
-                        id: job_id_for_target(&path),
-                        kind: JobKind::Archive,
-                        url: "https://example.invalid/bonus.zip".into(),
-                        target: path,
-                        status: JobStatus::Paused,
-                        pid: None,
-                        error: None,
-                        updated_unix: crate::jobs::now()?,
-                        expected_sha256: None,
-                        install: None,
-                        install_state: None,
-                        install_error: None,
-                        progress_bytes: None,
-                        total_bytes: None,
-                    },
-                )?;
-                Err("paused".into())
-            })
-            .is_err()
-        );
+        let stopped = install_catalog_dlc_with(&game, &root, &addon, |placeholder, _, name, _| {
+            let path = placeholder.install_dir.join(name);
+            fs::write(path.with_file_name("bonus.zip.part"), b"partial")?;
+            crate::jobs::save_job(
+                &root,
+                &crate::jobs::DownloadJob {
+                    id: job_id_for_target(&path),
+                    kind: JobKind::Archive,
+                    url: "https://example.invalid/bonus.zip".into(),
+                    target: path.clone(),
+                    status: JobStatus::Paused,
+                    pid: None,
+                    error: None,
+                    updated_unix: crate::jobs::now()?,
+                    expected_sha256: None,
+                    install: None,
+                    install_state: None,
+                    install_error: None,
+                    progress_bytes: None,
+                    total_bytes: None,
+                },
+            )?;
+            Err(crate::jobs::TransferStopped::Paused(job_id_for_target(&path)).into())
+        })
+        .unwrap_err();
+        assert!(matches!(
+            stopped.downcast_ref::<crate::jobs::TransferStopped>(),
+            Some(crate::jobs::TransferStopped::Paused(_))
+        ));
         assert!(staging.join("bonus.zip.part").exists());
         assert_eq!(
             crate::jobs::load_job(&root, &job_id_for_target(&staging.join("bonus.zip")))
@@ -1323,6 +1360,32 @@ mod tests {
             JobStatus::Paused
         );
         clear_job_if_present(&root, &job_id_for_target(&staging.join("bonus.zip"))).unwrap();
+        fs::remove_dir_all(&staging).unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        fs::create_dir_all(root.join("jobs")).unwrap();
+        let target = fs::canonicalize(&staging).unwrap().join("bonus.zip");
+        let id = job_id_for_target(&target);
+        fs::write(staging.join("bonus.zip.part"), b"partial").unwrap();
+        fs::write(root.join("jobs").join(format!("{id}.pause")), b"pause").unwrap();
+        let stopped = install_catalog_dlc(&game, &root, &addon).unwrap_err();
+        assert!(matches!(
+            stopped.downcast_ref::<crate::jobs::TransferStopped>(),
+            Some(crate::jobs::TransferStopped::Paused(job_id)) if job_id == &id
+        ));
+        assert_eq!(
+            fs::read(staging.join("bonus.zip.part")).unwrap(),
+            b"partial"
+        );
+        validate_catalog_dlc_resume(&root, &id, "base", "bonus").unwrap();
+        clear_job_if_present(&root, &id).unwrap();
+        fs::write(root.join("jobs").join(format!("{id}.cancel")), b"cancel").unwrap();
+        let stopped = install_catalog_dlc(&game, &root, &addon).unwrap_err();
+        assert!(matches!(
+            stopped.downcast_ref::<crate::jobs::TransferStopped>(),
+            Some(crate::jobs::TransferStopped::Cancelled(Some(job_id))) if job_id == &id
+        ));
+        assert!(!staging.exists());
+        assert!(crate::jobs::load_job(&root, &id).is_err());
         assert_eq!(fs::read(game_dir.join("base.exe")).unwrap(), b"base");
         fs::remove_dir_all(root).unwrap();
     }
@@ -1422,6 +1485,25 @@ mod tests {
             },
         )
         .unwrap();
+        validate_catalog_dlc_resume(&root, &id, "base", "bonus").unwrap();
+        fs::create_dir_all(staging.parent().unwrap().join("other")).unwrap();
+        assert!(validate_catalog_dlc_resume(&root, &id, "base", "other").is_err());
+        assert!(validate_catalog_dlc_resume(&root, &id, "../base", "bonus").is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&staging, staging.parent().unwrap().join("alias")).unwrap();
+            assert!(validate_catalog_dlc_resume(&root, &id, "base", "alias").is_err());
+        }
+        let mut mismatched = crate::jobs::load_job(&root, &id).unwrap();
+        mismatched.install.as_mut().unwrap().game_id = "other".into();
+        crate::jobs::save_job(&root, &mismatched).unwrap();
+        assert!(validate_catalog_dlc_resume(&root, &id, "base", "bonus").is_err());
+        mismatched.install.as_mut().unwrap().game_id = "base".into();
+        mismatched.status = JobStatus::Interrupted;
+        crate::jobs::save_job(&root, &mismatched).unwrap();
+        assert!(validate_catalog_dlc_resume(&root, &id, "base", "bonus").is_err());
+        mismatched.status = JobStatus::Paused;
+        crate::jobs::save_job(&root, &mismatched).unwrap();
         let count = resume_catalog_dlc_job_with(
             &root,
             &id,

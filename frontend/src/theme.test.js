@@ -148,15 +148,14 @@ describe('DOM Theme Application', () => {
   });
 
   it('sets CSS variables and theme attributes on root element', () => {
-    applyTheme('#10B981', 'dark', 'mica');
+    applyTheme('#10B981', 'dark');
     const root = document.documentElement;
 
     expect(root.getAttribute('data-theme')).toBe('dark');
-    expect(root.getAttribute('data-translucency')).toBe('mica');
     expect(root.style.getPropertyValue('--md-sys-color-primary'))
       .toBe(generateMaterialPalette('#10B981', 'dark').primary);
     expect(root.style.getPropertyValue('--m3c-primary')).toBeDefined();
-    expect(root.style.getPropertyValue('--app-window-bg')).toContain('rgba');
+    expect(root.style.getPropertyValue('--app-window-bg')).toBe(generateMaterialPalette('#10B981', 'dark').surface);
   });
 
   it('extractCoverAccent returns null on empty image URL', async () => {
@@ -164,6 +163,13 @@ describe('DOM Theme Application', () => {
     expect(accent).toBeNull();
     const emptyAccent = await extractCoverAccent('');
     expect(emptyAccent).toBeNull();
+  });
+
+  it.each(['system', 'dark', 'light', 'amoled'])('keeps %s window backgrounds opaque even with a legacy effect argument', (mode) => {
+    applyTheme('#10B981', mode, 'acrylic');
+    const root = document.documentElement;
+    expect(root.style.getPropertyValue('--app-window-bg')).not.toMatch(/rgba|transparent/);
+    expect(root.getAttribute('data-translucency')).toBeUndefined();
   });
 
   it('shares and caches cover accent extraction for repeated image URLs', async () => {

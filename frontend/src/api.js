@@ -222,12 +222,6 @@ export async function runAction(payload) {
   });
 }
 
-export async function setWindowTranslucency(effect) {
-  if (isDesktop()) {
-    return await invoke('set_window_translucency', { effect });
-  }
-}
-
 export async function windowMinimize() {
   if (isDesktop()) {
     return await invoke('window_minimize');
