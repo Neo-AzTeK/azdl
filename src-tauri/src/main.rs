@@ -1980,15 +1980,52 @@ mod commands {
     }
 
     #[cfg(windows)]
+    fn windows_process_has_exited(pid: u32) -> bool {
+        use std::ffi::c_void;
+
+        if pid == 0 {
+            return false;
+        }
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn OpenProcess(access: u32, inherit_handle: i32, process_id: u32) -> *mut c_void;
+            fn WaitForSingleObject(handle: *mut c_void, milliseconds: u32) -> u32;
+            fn CloseHandle(handle: *mut c_void) -> i32;
+            fn GetLastError() -> u32;
+        }
+
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const ERROR_INVALID_PARAMETER: u32 = 87;
+        const WAIT_OBJECT_0: u32 = 0;
+        let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+        if handle.is_null() {
+            return unsafe { GetLastError() == ERROR_INVALID_PARAMETER };
+        }
+        let exited = unsafe { WaitForSingleObject(handle, 0) == WAIT_OBJECT_0 };
+        unsafe { CloseHandle(handle) };
+        exited
+    }
+
+    #[cfg(windows)]
     fn signal_process_group(pid: u32) -> Result<(), String> {
         let status = azdl::clean_command("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status()
             .map_err(|e| e.to_string())?;
-        if !status.success() {
+        if !status.success() && !windows_process_has_exited(pid) {
             return Err(format!("could not stop process group {pid}: {status}"));
         }
         Ok(())
+    }
+
+    #[cfg(all(test, windows))]
+    #[test]
+    fn windows_stop_accepts_an_exited_process_without_treating_live_processes_as_exited() {
+        assert!(!windows_process_has_exited(0));
+        assert!(!windows_process_has_exited(std::process::id()));
+        assert!(windows_process_has_exited(u32::MAX));
+        signal_process_group(u32::MAX).unwrap();
     }
 
     #[cfg(not(any(unix, windows)))]
