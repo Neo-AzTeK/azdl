@@ -24,7 +24,7 @@ fn temp_workspace(name: &str) -> PathBuf {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("azdl-integration-{name}-{nanos}"));
     fs::create_dir_all(&dir).unwrap();
-    dir
+    fs::canonicalize(dir).unwrap()
 }
 
 #[test]

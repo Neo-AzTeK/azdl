@@ -4269,7 +4269,7 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&path).unwrap();
-        path
+        fs::canonicalize(path).unwrap()
     }
 
     fn test_state(root: &Path) -> AppState {
