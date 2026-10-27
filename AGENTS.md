@@ -203,6 +203,8 @@ The `azdl` frontend is built with **Svelte 5** and strict adherence to **Materia
 
 Windows DLC finalization follow-up (2026-10-27): manifest writers now close before transaction-directory publication or manifest relocation; base backups sync through a writable handle rather than a read-only handle. Finalization write errors include the operation and path. New archive-free lifecycle and backup tests are included in the Windows release gate. Execution of these tests and acceptance of the reported Anomalous Coffee Machine 2 DLC failure remain pending; compilation is delegated to GitHub Actions.
 
+Storage UI follow-up (2026-10-27): drive paths, installed-game paths, tooltips, and move destinations hide the Windows extended-length path prefix, including canonical UNC paths. File actions retain the original paths. Frontend regression tests cover drive roots, network paths, Unicode folder names, ordinary Windows paths, and Linux paths; native visual acceptance remains pending.
+
 Reference: `../arachnel/src/core`, `../arachnel/qml`, and `../arachnel/docs/ARCHITECTURE.md`. The objective is the full user facing launcher, including download, install, launch, and supported multiplayer flows. A passing Rust build proves only the implemented rows below.
 
 | Arachnel domain | Current azdl state | Next completion evidence |

@@ -1,5 +1,6 @@
 <script>
   import { PRESET_SEEDS } from '../theme.js';
+  import { displayPath } from '../paths.js';
   import { Switch } from 'm3-svelte';
   import Modal from '../components/Modal.svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
@@ -457,7 +458,7 @@
                     </span>
                   {/if}
                 </div>
-                <code class="drive-path">{drive.path}</code>
+                <code class="drive-path" title={displayPath(drive.path)}>{displayPath(drive.path)}</code>
               </div>
 
               <div class="drive-actions">
@@ -515,7 +516,7 @@
               <div class="game-management-row">
                 <div class="game-main-info">
                   <span class="game-row-title">{game.title}</span>
-                  <code class="game-row-path" title={game.install_dir}>{game.install_dir}</code>
+                  <code class="game-row-path" title={displayPath(game.install_dir)}>{displayPath(game.install_dir)}</code>
                 </div>
 
                 <div class="game-move-controls">
@@ -525,7 +526,7 @@
                   >
                     <option value="" disabled selected>Select destination drive...</option>
                     {#each localSettings.storage_drives as d}
-                      <option value={d.id}>{d.label} ({d.path})</option>
+                      <option value={d.id}>{d.label} ({displayPath(d.path)})</option>
                     {/each}
                   </select>
 
