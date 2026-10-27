@@ -5228,7 +5228,7 @@ mod tests {
             }
         }
         #[cfg(windows)]
-        fs::write(&exe_path, b"@echo off\ntimeout /t 30\n").unwrap();
+        fs::write(&exe_path, b"@echo off\r\nping -n 31 127.0.0.1 >nul\r\n").unwrap();
 
         handle_run_action(
             &state,
