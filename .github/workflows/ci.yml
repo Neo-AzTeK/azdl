@@ -61,7 +61,12 @@ jobs:
           cargo test -p azdl --lib bundled_windows_engine_loads_without_qt_and_validates_requests -- --ignored
           if ($LASTEXITCODE -ne 0) { throw 'Windows depot engine ABI check failed' }
       - name: Test Rust workspace
+        if: runner.os != 'Windows'
         run: cargo test --workspace
+      - name: Test Rust workspace on Windows
+        if: runner.os == 'Windows'
+        # Isolate process-probe timing checks from concurrent subprocess tests.
+        run: cargo test --workspace -- --test-threads=1
       - name: Lint Rust workspace
         run: cargo clippy --all-targets -- -D warnings
       - name: Build desktop binary
