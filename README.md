@@ -27,6 +27,10 @@ azdl includes a native desktop application in `src-tauri` built with Tauri v2, S
 
 `cargo build --release` in the workspace automatically handles everything: it invokes the Svelte frontend build via `build.rs`, embeds the assets, and compiles the optimized native binary.
 
+Frontend build failures stop the Cargo build instead of reusing older assets. Close
+and relaunch the desktop application after rebuilding; an already running window
+continues using the frontend embedded in the executable it started from.
+
 ```sh
 # Build everything (CLI + Desktop + Frontend)
 cargo build --release

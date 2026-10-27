@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>Game page navigation regression</title></head>
+  <body>
+    <div id="app"></div>
+    <pre id="runtime-errors" aria-label="Runtime errors"></pre>
+    <script>
+      window.addEventListener('error', event => {
+        document.getElementById('runtime-errors').textContent += `${event.message}\n`;
+      });
+      window.addEventListener('unhandledrejection', event => {
+        document.getElementById('runtime-errors').textContent += `${event.reason}\n`;
+      });
+    </script>
+    <script type="module" src="./game-page-tabs.js"></script>
+  </body>
+</html>

@@ -480,6 +480,7 @@
           library={appState.library}
           plugins={appState.plugins}
           settings={appState.settings}
+          platform={appState.platform}
           {runners}
           jobs={appState.jobs}
           tasks={appState.tasks}

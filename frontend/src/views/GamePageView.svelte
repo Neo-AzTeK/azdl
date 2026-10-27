@@ -39,6 +39,7 @@
     library = [],
     plugins = [],
     settings = null,
+    platform = '',
     runners = [],
     jobs = [],
     tasks = [],
@@ -312,8 +313,9 @@
   $effect(() => {
     const titleOrId = game?.title || game?.id;
     if (titleOrId) {
-      resolvedArt = getResolvedArtwork(titleOrId);
-      if (!game.banner_url && !game.cover_url && !resolvedArt) {
+      const cachedArtwork = getResolvedArtwork(titleOrId);
+      resolvedArt = cachedArtwork;
+      if (!game.banner_url && !game.cover_url && !cachedArtwork) {
         fetchArtwork(titleOrId).then((art) => {
           if (art) resolvedArt = art;
         });
