@@ -930,6 +930,13 @@
     const el = document.getElementById(targetId) || document.getElementById('game-detail-tabs');
     el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
+
+  function handleDetailTabChange(event) {
+    const nextTab = event.currentTarget?.value;
+    if (!['overview', 'dlc', 'patches', 'config'].includes(nextTab)) return;
+    detailTabTouched = true;
+    activeDetailTab = nextTab;
+  }
 </script>
 
 <div class="game-page-view">
@@ -1183,7 +1190,7 @@
           <div id="game-detail-tabs" class="game-tabs-container">
             <Tabs
               bind:tab={activeDetailTab}
-              onchange={() => { detailTabTouched = true; }}
+              onchange={handleDetailTabChange}
               items={[
                 { name: 'Overview', value: 'overview' },
                 { name: `DLC${dlcInfo.available.length ? ` (${dlcInfo.available.length})` : ''}`, value: 'dlc' },
