@@ -4,15 +4,19 @@ $source = Join-Path $root 'target/depotkit-source'
 $build = Join-Path $root 'target/depotkit-build'
 $output = Join-Path $root 'target/depotkit-runtime'
 $testBuild = Join-Path $root 'target/depotkit-tests'
+$revision = '976f3b8fa50d09bea6e2c1c871827752e32cbb91'
 
 if (-not (Test-Path "$source/.git")) {
     git clone --no-checkout https://github.com/Neo-AzTeK/depotkit.git $source
     if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch depotkit' }
 }
-git -C $source checkout --detach 976f3b8fa50d09bea6e2c1c871827752e32cbb91
+# Rust's target cache can restore a checkout created before the pinned commit existed.
+git -C $source fetch --no-tags origin $revision
+if ($LASTEXITCODE -ne 0) { throw "Cannot fetch pinned depotkit revision $revision" }
+git -C $source checkout --detach --force $revision
 if ($LASTEXITCODE -ne 0) { throw 'Cannot check out pinned depotkit revision' }
 # This checkout is generated under target; rebuild patches from the pinned source.
-git -C $source reset --hard 976f3b8fa50d09bea6e2c1c871827752e32cbb91
+git -C $source reset --hard $revision
 if ($LASTEXITCODE -ne 0) { throw 'Cannot reset generated depotkit source' }
 foreach ($patchName in @('depotkit-utf8.patch', 'depotkit-resume.patch')) {
     $patch = Join-Path $PSScriptRoot $patchName
