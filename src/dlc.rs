@@ -419,6 +419,43 @@ fn move_staged_file_with(
         )
         .into());
     }
+    let metadata = dlc_io(
+        "inspect staging source at",
+        source,
+        fs::symlink_metadata(source),
+    )?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(format!(
+            "DLC staging source is not a regular file: {}",
+            source.display()
+        )
+        .into());
+    }
+    // Archive attributes apply only to this owned staging copy. Its final file
+    // must remain writable for sync and removable by the rollback journal.
+    let mut permissions = metadata.permissions();
+    #[cfg(unix)]
+    let needs_write = {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = permissions.mode();
+        permissions.set_mode(mode | 0o200);
+        mode & 0o200 == 0
+    };
+    #[cfg(windows)]
+    let needs_write = {
+        let readonly = permissions.readonly();
+        permissions.set_readonly(false);
+        readonly
+    };
+    #[cfg(not(any(unix, windows)))]
+    let needs_write = false;
+    if needs_write {
+        dlc_io(
+            "make staging file writable at",
+            source,
+            fs::set_permissions(source, permissions),
+        )?;
+    }
     match rename(source, target) {
         Ok(()) => {
             let output = dlc_io(
@@ -1220,14 +1257,21 @@ mod tests {
         let source = root.join("source");
         let target = root.join("target");
         fs::write(&source, b"verified bytes").unwrap();
+        let mut readonly = fs::metadata(&source).unwrap().permissions();
+        readonly.set_readonly(true);
+        fs::set_permissions(&source, readonly).unwrap();
         move_staged_file(&source, &target).unwrap();
         assert!(!source.exists());
         assert_eq!(fs::read(&target).unwrap(), b"verified bytes");
+        assert!(!fs::metadata(&target).unwrap().permissions().readonly());
         fs::write(&source, b"other bytes").unwrap();
         assert!(move_staged_file(&source, &target).is_err());
         assert_eq!(fs::read(&source).unwrap(), b"other bytes");
         assert_eq!(fs::read(&target).unwrap(), b"verified bytes");
         fs::remove_file(&target).unwrap();
+        let mut readonly = fs::metadata(&source).unwrap().permissions();
+        readonly.set_readonly(true);
+        fs::set_permissions(&source, readonly).unwrap();
         move_staged_file_with(&source, &target, |_, _| {
             Err(io::ErrorKind::CrossesDevices.into())
         })
