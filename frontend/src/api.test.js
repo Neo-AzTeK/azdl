@@ -90,6 +90,23 @@ describe('API - Desktop Mode IPC Bridge', () => {
     expect(state.library[0].id).toBe('portal-2');
   });
 
+  it('uses the lightweight progress command and cleans up its event listener', async () => {
+    const progress = { jobs: [], tasks: [], running_games: {} };
+    mockInvoke.mockResolvedValueOnce(progress);
+    expect(await api.getProgress()).toBe(progress);
+    expect(mockInvoke).toHaveBeenCalledWith('get_progress');
+    const unlisten = vi.fn();
+    mockListen.mockResolvedValueOnce(unlisten);
+    const callback = vi.fn();
+    const unsubscribe = api.onProgressChange(callback);
+    expect(mockListen).toHaveBeenCalledWith('progress-changed', expect.any(Function));
+    mockListen.mock.calls.at(-1)[1]({ payload: progress });
+    expect(callback).toHaveBeenCalledWith({ payload: progress });
+    await Promise.resolve();
+    unsubscribe();
+    expect(unlisten).toHaveBeenCalledOnce();
+  });
+
   it('invokes get_runners on getRunners', async () => {
     mockInvoke.mockResolvedValueOnce([{ id: 'proton:ge', name: 'GE-Proton' }]);
     const runners = await api.getRunners();

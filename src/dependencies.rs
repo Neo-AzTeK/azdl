@@ -15,6 +15,7 @@
 use crate::cmd::clean_command;
 use crate::{Game, Runner};
 use serde::{Deserialize, Serialize};
+#[cfg(not(windows))]
 use std::env;
 use std::fs;
 use std::io::{Error, ErrorKind, Result};

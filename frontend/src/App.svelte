@@ -4,23 +4,39 @@
   import NavRail from './components/NavRail.svelte';
   import TransferDrawer from './components/TransferDrawer.svelte';
   import LibraryView from './views/LibraryView.svelte';
-  import CatalogView from './views/CatalogView.svelte';
-  import SettingsView from './views/SettingsView.svelte';
-  import GamePageView from './views/GamePageView.svelte';
   import ConfirmModal from './components/ConfirmModal.svelte';
 
   import {
     getState,
+    getProgress,
     getRunners,
     launchGame,
     stopGame,
     onBusyChange,
     onStateChange,
+    onProgressChange,
     isSteamRunning,
   } from './api.js';
   import { applyTheme, onSystemThemeChange } from './theme.js';
   import { notifications, dismissNotification, notify, notifyError } from './notifications.js';
-  import { reconcileData } from './state.js';
+  import { reconcileData, createRefreshQueue, progressTopology, applyProgressSnapshot } from './state.js';
+
+  const viewModules = new Map();
+  const viewLoaders = {
+    catalog: () => import('./views/CatalogView.svelte'),
+    settings: () => import('./views/SettingsView.svelte'),
+    game: () => import('./views/GamePageView.svelte'),
+  };
+  function loadView(name) {
+    if (!viewModules.has(name)) {
+      viewModules.set(name, viewLoaders[name]().catch((error) => {
+        viewModules.delete(name);
+        notify.error(`Could not open this view: ${error.message}`);
+        throw error;
+      }));
+    }
+    return viewModules.get(name);
+  }
 
   // Navigation state
   let activeTab = $state('library'); // 'library' | 'catalog' | 'settings' | 'game'
@@ -129,6 +145,31 @@
 
   let isMounted = false;
   let pollTimeoutId = null;
+  let lastFullRefreshAt = 0;
+  let lastProgressAt = 0;
+  let fullRefreshGeneration = 0;
+  let progressRevision = 0;
+
+  function applyProgress(progress) {
+    if (!isMounted || !progress) return;
+    lastProgressAt = Date.now();
+    const next = applyProgressSnapshot(appState, progress);
+    if (next === appState) return;
+    const changed = progressTopology(appState) !== progressTopology(progress);
+    progressRevision++;
+    appState = next;
+    if (changed) void refreshState(false);
+  }
+
+  const refreshProgress = createRefreshQueue(async () => {
+    const generation = fullRefreshGeneration;
+    try {
+      const progress = await getProgress();
+      if (generation === fullRefreshGeneration) applyProgress(progress);
+    } catch (error) {
+      console.warn('Could not refresh transfer progress:', error);
+    }
+  });
 
   function scheduleAdaptivePoll() {
     if (!isMounted) return;
@@ -142,7 +183,8 @@
     pollTimeoutId = setTimeout(async () => {
       if (!isMounted) return;
       if (document.visibilityState === 'visible') {
-        await refreshState(false);
+        if (Date.now() - lastFullRefreshAt >= 30000) await refreshState(false);
+        else if ((hasActiveJobs || hasActiveTasks) && Date.now() - lastProgressAt >= 3000) await refreshProgress();
       }
       scheduleAdaptivePoll();
     }, delay);
@@ -180,6 +222,9 @@
         refreshState(false);
       }
     });
+    const unsubProgressChange = onProgressChange((event) => {
+      if (document.visibilityState === 'visible') applyProgress(event.payload);
+    });
 
     // Fetch initial backend state
     refreshState();
@@ -201,6 +246,7 @@
       unsubSystemTheme();
       unsubBusy();
       unsubStateChange();
+      unsubProgressChange();
       document.removeEventListener('visibilitychange', refreshWhenVisible);
       if (pollTimeoutId) {
         clearTimeout(pollTimeoutId);
@@ -215,20 +261,15 @@
     applyTheme(seedColor, themeMode);
   }
 
-  let isRefreshingState = false;
-  let refreshPending = false;
   const seenTaskFailures = new Map();
-  async function refreshState(showErrors = true) {
-    if (isRefreshingState) {
-      refreshPending = true;
-      return;
-    }
-    isRefreshingState = true;
+  const refreshState = createRefreshQueue(async (showErrors = true) => {
     try {
-      do {
-        refreshPending = false;
-        const state = await getState();
+        fullRefreshGeneration++;
+        const revision = progressRevision;
+        let state = await getState();
         if (state) {
+          lastFullRefreshAt = Date.now();
+          if (revision !== progressRevision) state = { ...state, jobs: appState.jobs, tasks: appState.tasks, running_games: appState.running_games };
           const failedIds = new Set();
           for (const task of state.tasks || []) {
             if (task.status !== 'failed') continue;
@@ -260,13 +301,10 @@
             }
           }
         }
-      } while (refreshPending);
     } catch (e) {
       if (showErrors) console.error('Failed to get state:', e);
-    } finally {
-      isRefreshingState = false;
     }
-  }
+  });
 
   async function refreshRunners() {
     try {
@@ -378,6 +416,10 @@
           onBrowseCatalog={() => (activeTab = 'catalog')}
         />
       {:else if activeTab === 'catalog'}
+        {#await loadView('catalog')}
+          <p role="status">Loading Discover…</p>
+        {:then module}
+        {@const CatalogView = module.default}
         <CatalogView
           jobs={appState.jobs}
           tasks={appState.tasks}
@@ -389,7 +431,14 @@
           onRefresh={refreshState}
           onGoToSettings={() => (activeTab = 'settings')}
         />
+        {:catch}
+          <button class="md3-btn text" onclick={() => activeTab = 'library'}>Back to Library</button>
+        {/await}
       {:else if activeTab === 'settings'}
+        {#await loadView('settings')}
+          <p role="status">Loading Settings…</p>
+        {:then module}
+        {@const SettingsView = module.default}
         <SettingsView
           bind:seedColor
           bind:themeMode
@@ -407,7 +456,14 @@
           onRefresh={refreshState}
           onShowToast={showToast}
         />
+        {:catch}
+          <button class="md3-btn text" onclick={() => activeTab = 'library'}>Back to Library</button>
+        {/await}
       {:else if activeTab === 'game' && viewedGame}
+        {#await loadView('game')}
+          <p role="status">Loading game…</p>
+        {:then module}
+        {@const GamePageView = module.default}
         <GamePageView
           game={viewedGame}
           library={appState.library}
@@ -424,6 +480,9 @@
           onRefresh={refreshState}
           onShowToast={showToast}
         />
+        {:catch}
+          <button class="md3-btn text" onclick={handleBackFromGame}>Back</button>
+        {/await}
       {/if}
     </main>
   </div>

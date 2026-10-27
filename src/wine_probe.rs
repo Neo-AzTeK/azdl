@@ -12,6 +12,7 @@
 //! - Verification of whether the actual game executable is still alive.
 //! - Clean termination of hanging prefix processes.
 
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::path::PathBuf;
 
@@ -142,6 +143,8 @@ fn read_proc_cwd(pid: u32) -> Option<PathBuf> {
 
 /// Discovers all running PIDs related to a launched game.
 pub fn find_related_pids(launch_pid: u32, hints: &WineProbeHints) -> Vec<u32> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = hints;
     let mut pids = Vec::new();
     if launch_pid > 0 {
         pids.push(launch_pid);

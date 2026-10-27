@@ -1,6 +1,5 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
-  import Hls from 'hls.js';
   import { Button, Tabs, FAB, LinearProgress, LinearProgressEstimate } from 'm3-svelte';
   import SectionCard from '../components/SectionCard.svelte';
   import { dlcTransfer, dlcTransferActive, dlcTransferStatus, dlcTransferInstalling, isDlcTransferJob, dlcProgress, filterDlc } from '../dlc.js';
@@ -555,8 +554,10 @@
   let currentMedia = $derived(mediaList[selectedMediaIndex] || mediaList[0] || null);
   let videoPlayerRef = $state(null);
   let hlsInstance = null;
+  let videoGeneration = 0;
 
-  function setupVideoPlayer(videoEl, media) {
+  async function setupVideoPlayer(videoEl, media) {
+    const generation = ++videoGeneration;
     if (!videoEl || !media || media.type !== 'video') return;
 
     if (hlsInstance) {
@@ -569,6 +570,16 @@
 
     const hlsUrl = media.hls;
     const mp4Url = media.mp4;
+
+    let Hls;
+    if (hlsUrl) {
+      try {
+        Hls = (await import('hls.js')).default;
+      } catch (error) {
+        console.warn('HLS player unavailable; trying direct video:', error);
+      }
+      if (generation !== videoGeneration) return;
+    }
 
     // 1. Try Hls.js when HLS stream is present and supported
     if (hlsUrl && Hls && typeof Hls.isSupported === 'function' && Hls.isSupported()) {
@@ -621,6 +632,7 @@
     if (media?.type === 'video' && videoEl) {
       setupVideoPlayer(videoEl, media);
     } else {
+      videoGeneration++;
       if (hlsInstance) {
         hlsInstance.destroy();
         hlsInstance = null;
@@ -634,6 +646,7 @@
   });
 
   onDestroy(() => {
+    videoGeneration++;
     if (hlsInstance) {
       hlsInstance.destroy();
       hlsInstance = null;

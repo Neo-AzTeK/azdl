@@ -17,13 +17,21 @@ export function isDesktop() {
 }
 
 export function onStateChange(callback) {
+  return onBackendEvent('state-changed', callback);
+}
+
+export function onProgressChange(callback) {
+  return onBackendEvent('progress-changed', callback);
+}
+
+function onBackendEvent(name, callback) {
   if (!isDesktop()) {
     return () => {};
   }
   let unlistenFn = null;
   let active = true;
 
-  listen('state-changed', (event) => {
+  listen(name, (event) => {
     try {
       callback(event);
     } catch (err) {
@@ -52,6 +60,11 @@ export function onStateChange(callback) {
       unlistenFn = null;
     }
   };
+}
+
+export async function getProgress() {
+  if (isDesktop()) return await invoke('get_progress');
+  return { jobs: [], tasks: [], running_games: {} };
 }
 
 // Busy state tracker for global UI indicator

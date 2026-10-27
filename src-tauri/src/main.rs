@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod sizes;
+
 use azdl::LauncherError;
 use azdl::Result as AzdlResult;
 use azdl::data_dir;
@@ -421,7 +423,7 @@ pub struct AppState {
     pub mutating: Arc<AtomicBool>,
     pub cached_diagnostics: Arc<Mutex<Option<Vec<azdl::doctor::SystemCheck>>>>,
     library_cache: Arc<Mutex<Option<CachedLibrary>>>,
-    pub dir_size_cache: Arc<Mutex<HashMap<PathBuf, (u64, Instant)>>>,
+    pub dir_size_cache: Arc<sizes::SizeCache>,
     pub steamstub_cache: Arc<Mutex<HashMap<String, (azdl::steamless::SteamStubStatus, Instant)>>>,
     pub fix_status_cache: Arc<Mutex<FixStatusCache>>,
     pub metadata_cache: Arc<Mutex<HashMap<String, MetadataCacheEntry>>>,
@@ -782,6 +784,18 @@ mod commands {
     }
 
     fn finish_install_task(state: &AppState, task_id: &str, error: Option<String>) {
+        let game_id = state.tasks.lock().ok().and_then(|tasks| {
+            tasks
+                .iter()
+                .find(|task| task.id == task_id)
+                .and_then(|task| task.game_id.clone())
+        });
+        if let Some(game_id) = game_id
+            && let Ok(library) = azdl::load_library(&state.data_dir)
+            && let Some(game) = library.games.get(&game_id)
+        {
+            state.dir_size_cache.invalidate(&game.install_dir);
+        }
         if let Ok(mut tasks) = state.tasks.lock() {
             if let Some(error) = error {
                 if let Some(task) = tasks.iter_mut().find(|task| task.id == task_id) {
@@ -835,37 +849,6 @@ mod commands {
         } else {
             format!("{bytes} B")
         }
-    }
-
-    fn calc_dir_size(path: &Path) -> u64 {
-        let mut total = 0;
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if let Ok(meta) = p.symlink_metadata() {
-                    if meta.is_file() {
-                        total += meta.len();
-                    } else if meta.is_dir() {
-                        total += calc_dir_size(&p);
-                    }
-                }
-            }
-        }
-        total
-    }
-
-    fn calc_dir_size_cached(state: &AppState, path: &Path) -> u64 {
-        if let Ok(cache) = state.dir_size_cache.lock()
-            && let Some(&(bytes, instant)) = cache.get(path)
-            && instant.elapsed() < Duration::from_secs(60)
-        {
-            return bytes;
-        }
-        let bytes = calc_dir_size(path);
-        if let Ok(mut cache) = state.dir_size_cache.lock() {
-            cache.insert(path.to_path_buf(), (bytes, Instant::now()));
-        }
-        bytes
     }
 
     fn scan_steamstub_cached(
@@ -970,6 +953,142 @@ mod commands {
         Ok(pending)
     }
 
+    fn progress_jobs(state: &AppState, download_jobs: Vec<azdl::jobs::DownloadJob>) -> Vec<Value> {
+        let mut jobs_list: Vec<Value> = download_jobs
+            .into_iter()
+            .filter_map(|j| {
+                if j.kind == azdl::jobs::JobKind::PluginPackage
+                    && matches!(
+                        j.effective_status(),
+                        azdl::jobs::JobStatus::Complete | azdl::jobs::JobStatus::Cancelled
+                    )
+                {
+                    let _ = azdl::jobs::clear_job(&state.data_dir, &j.id);
+                    return None;
+                }
+                Some(j)
+            })
+            .take(100)
+            .map(|j| {
+                let status_str = match j.effective_status() {
+                    azdl::jobs::JobStatus::Running => {
+                        if j.effective_install_state() == Some(azdl::jobs::InstallState::Installing) {
+                            "Installing".to_string()
+                        } else {
+                            "Downloading".to_string()
+                        }
+                    }
+                    s => format!("{:?}", s),
+                };
+
+                let install_json = j.install.as_ref().map(|p| {
+                    let meta = state.metadata_cache.lock().ok().and_then(|c| {
+                        c.get(&p.title.to_lowercase())
+                            .or_else(|| c.get(&p.game_id.to_lowercase()))
+                            .cloned()
+                    });
+                    let steam_id = meta
+                        .as_ref()
+                        .and_then(|m| m.steam_app_id.map(|id| id.to_string()))
+                        .or_else(|| parse_steam_id(&p.game_id));
+                    let banner = meta
+                        .as_ref()
+                        .and_then(|m| m.banner_url.clone())
+                        .or_else(|| steam_id.as_ref().map(|id| format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{id}/header.jpg")));
+                    let cover = meta
+                        .as_ref()
+                        .and_then(|m| m.cover_url.clone())
+                        .or_else(|| steam_id.as_ref().map(|id| format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{id}/library_600x900.jpg")));
+
+                    json!({
+                        "id": p.game_id,
+                        "title": p.title,
+                        "kind": format!("{:?}", p.kind),
+                        "banner_url": banner,
+                        "cover_url": cover,
+                        "file_size": None::<String>,
+                    })
+                });
+
+                let total_bytes = j.total_bytes;
+
+                json!({
+                    "id": j.id,
+                    "kind": format!("{:?}", j.kind),
+                    "status": status_str,
+                    "bytes": j.downloaded_bytes(),
+                    "total_bytes": total_bytes,
+                    "total": total_bytes,
+                    "estimated_bytes": None::<u64>,
+                    "target": j.target,
+                    "error": j.error,
+                    "install": install_json,
+                    "install_state": j.effective_install_state().map(|s| format!("{:?}", s)),
+                    "install_error": j.install_error,
+                })
+            })
+            .collect();
+
+        if let Ok(torrents) = azdl::torrent::list_torrent_jobs(&state.data_dir) {
+            for t in torrents {
+                let status_str = match t.status {
+                    azdl::jobs::JobStatus::Running => {
+                        if t.install_state.is_some() {
+                            "Installing".to_string()
+                        } else {
+                            "Downloading".to_string()
+                        }
+                    }
+                    s => format!("{:?}", s),
+                };
+
+                let meta = state.metadata_cache.lock().ok().and_then(|c| {
+                    c.get(&t.title.to_lowercase())
+                        .or_else(|| c.get(&t.id.to_lowercase()))
+                        .cloned()
+                });
+                let steam_id = meta
+                    .as_ref()
+                    .and_then(|m| m.steam_app_id.map(|id| id.to_string()))
+                    .or_else(|| parse_steam_id(&t.id));
+                let banner = meta
+                    .as_ref()
+                    .and_then(|m| m.banner_url.clone())
+                    .or_else(|| steam_id.as_ref().map(|id| format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{id}/header.jpg")));
+                let cover = meta
+                    .as_ref()
+                    .and_then(|m| m.cover_url.clone())
+                    .or_else(|| steam_id.as_ref().map(|id| format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{id}/library_600x900.jpg")));
+
+                let total_bytes = None::<u64>;
+
+                jobs_list.push(json!({
+                    "id": t.id,
+                    "kind": "Torrent",
+                    "status": status_str,
+                    "bytes": t.downloaded_bytes(&state.data_dir),
+                    "total_bytes": total_bytes,
+                    "total": total_bytes,
+                    "estimated_bytes": None::<u64>,
+                    "target": t.download_dir(&state.data_dir),
+                    "error": t.error,
+                    "install": Some(json!({
+                        "id": t.id,
+                        "title": t.title,
+                        "kind": "Archive",
+                        "banner_url": banner,
+                        "cover_url": cover,
+                        "file_size": None::<String>,
+                    })),
+                    "install_state": t.install_state.map(|s| format!("{:?}", s)),
+                    "install_error": None::<String>,
+                }));
+            }
+        }
+
+        jobs_list
+    }
+
     pub fn handle_get_state(state: &AppState) -> Result<Value, String> {
         let mut library = load_library_snapshot(&state.data_dir, &state.library_cache)?;
         if library
@@ -998,6 +1117,9 @@ mod commands {
             }
             library = library_snapshot;
         }
+        state
+            .dir_size_cache
+            .retain(library.games.values().map(|game| game.install_dir.clone()));
         let running = state
             .running_games
             .lock()
@@ -1066,8 +1188,9 @@ mod commands {
                 let genres: Vec<String> = Vec::new();
                 let addons_count = 0;
 
-                let dir_bytes = calc_dir_size_cached(state, &game.install_dir);
-                let file_size = format_file_size(dir_bytes);
+                let updated = state.clone();
+                let dir_bytes = state.dir_size_cache.get(&game.install_dir, move || updated.notify_state_changed());
+                let file_size = dir_bytes.map(format_file_size);
 
                 let meta_entry = {
                     let lock = state.metadata_cache.lock().ok();
@@ -1259,138 +1382,7 @@ mod commands {
 
         let store = cached_store(&state.data_dir).unwrap_or_default();
 
-        let mut jobs_list: Vec<Value> = download_jobs
-            .into_iter()
-            .filter_map(|j| {
-                if j.kind == azdl::jobs::JobKind::PluginPackage
-                    && matches!(
-                        j.effective_status(),
-                        azdl::jobs::JobStatus::Complete | azdl::jobs::JobStatus::Cancelled
-                    )
-                {
-                    let _ = azdl::jobs::clear_job(&state.data_dir, &j.id);
-                    return None;
-                }
-                Some(j)
-            })
-            .take(100)
-            .map(|j| {
-                let status_str = match j.effective_status() {
-                    azdl::jobs::JobStatus::Running => {
-                        if j.effective_install_state().is_some() {
-                            "Installing".to_string()
-                        } else {
-                            "Downloading".to_string()
-                        }
-                    }
-                    s => format!("{:?}", s),
-                };
-
-                let install_json = j.install.as_ref().map(|p| {
-                    let meta = state.metadata_cache.lock().ok().and_then(|c| {
-                        c.get(&p.title.to_lowercase())
-                            .or_else(|| c.get(&p.game_id.to_lowercase()))
-                            .cloned()
-                    });
-                    let steam_id = meta
-                        .as_ref()
-                        .and_then(|m| m.steam_app_id.map(|id| id.to_string()))
-                        .or_else(|| parse_steam_id(&p.game_id));
-                    let banner = meta
-                        .as_ref()
-                        .and_then(|m| m.banner_url.clone())
-                        .or_else(|| steam_id.as_ref().map(|id| format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{id}/header.jpg")));
-                    let cover = meta
-                        .as_ref()
-                        .and_then(|m| m.cover_url.clone())
-                        .or_else(|| steam_id.as_ref().map(|id| format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{id}/library_600x900.jpg")));
-
-                    json!({
-                        "id": p.game_id,
-                        "title": p.title,
-                        "kind": format!("{:?}", p.kind),
-                        "banner_url": banner,
-                        "cover_url": cover,
-                        "file_size": None::<String>,
-                    })
-                });
-
-                let total_bytes = j.total_bytes;
-
-                json!({
-                    "id": j.id,
-                    "kind": format!("{:?}", j.kind),
-                    "status": status_str,
-                    "bytes": j.downloaded_bytes(),
-                    "total_bytes": total_bytes,
-                    "total": total_bytes,
-                    "estimated_bytes": None::<u64>,
-                    "target": j.target,
-                    "error": j.error,
-                    "install": install_json,
-                    "install_state": j.effective_install_state().map(|s| format!("{:?}", s)),
-                    "install_error": j.install_error,
-                })
-            })
-            .collect();
-
-        if let Ok(torrents) = azdl::torrent::list_torrent_jobs(&state.data_dir) {
-            for t in torrents {
-                let status_str = match t.status {
-                    azdl::jobs::JobStatus::Running => {
-                        if t.install_state.is_some() {
-                            "Installing".to_string()
-                        } else {
-                            "Downloading".to_string()
-                        }
-                    }
-                    s => format!("{:?}", s),
-                };
-
-                let meta = state.metadata_cache.lock().ok().and_then(|c| {
-                    c.get(&t.title.to_lowercase())
-                        .or_else(|| c.get(&t.id.to_lowercase()))
-                        .cloned()
-                });
-                let steam_id = meta
-                    .as_ref()
-                    .and_then(|m| m.steam_app_id.map(|id| id.to_string()))
-                    .or_else(|| parse_steam_id(&t.id));
-                let banner = meta
-                    .as_ref()
-                    .and_then(|m| m.banner_url.clone())
-                    .or_else(|| steam_id.as_ref().map(|id| format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{id}/header.jpg")));
-                let cover = meta
-                    .as_ref()
-                    .and_then(|m| m.cover_url.clone())
-                    .or_else(|| steam_id.as_ref().map(|id| format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{id}/library_600x900.jpg")));
-
-                let total_bytes = None::<u64>;
-
-                jobs_list.push(json!({
-                    "id": t.id,
-                    "kind": "Torrent",
-                    "status": status_str,
-                    "bytes": t.downloaded_bytes(&state.data_dir),
-                    "total_bytes": total_bytes,
-                    "total": total_bytes,
-                    "estimated_bytes": None::<u64>,
-                    "target": t.download_dir(&state.data_dir),
-                    "error": t.error,
-                    "install": Some(json!({
-                        "id": t.id,
-                        "title": t.title,
-                        "kind": "Archive",
-                        "banner_url": banner,
-                        "cover_url": cover,
-                        "file_size": None::<String>,
-                    })),
-                    "install_state": t.install_state.map(|s| format!("{:?}", s)),
-                    "install_error": None::<String>,
-                }));
-            }
-        }
-
+        let jobs_list = progress_jobs(state, download_jobs);
         let running_map: HashMap<String, RunningGameInfo> = running;
         let tasks_list: Vec<TaskInfo> = tasks;
         let settings = azdl::settings::load_settings(&state.data_dir)
@@ -1422,6 +1414,34 @@ mod commands {
             "data_dir": state.data_dir,
             "platform": if cfg!(windows) { "windows" } else { "linux" },
         }))
+    }
+
+    /// Transfer updates exclude library scans, plugin catalogs, settings, and diagnostics.
+    pub fn handle_get_progress(state: &AppState) -> Result<Value, String> {
+        let jobs = list_jobs(&state.data_dir).map_err(|error| error.to_string())?;
+        let tasks = state
+            .tasks
+            .lock()
+            .map_err(|_| "State lock poisoned")?
+            .clone();
+        let running = state
+            .running_games
+            .lock()
+            .map_err(|_| "State lock poisoned")?
+            .clone();
+        Ok(json!({
+            "jobs": progress_jobs(state, jobs),
+            "tasks": tasks,
+            "running_games": running,
+        }))
+    }
+
+    #[tauri::command]
+    pub async fn get_progress(state: State<'_, AppState>) -> Result<Value, String> {
+        let state = state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || handle_get_progress(&state))
+            .await
+            .map_err(|error| error.to_string())?
     }
 
     #[tauri::command]
@@ -2059,6 +2079,12 @@ mod commands {
         action: ActionRequest,
     ) -> Result<Value, LauncherError> {
         let data_dir = &state.data_dir;
+        let content_path = match &action {
+            Action::DlcRemove { id, .. } | Action::DlcRecover { id, .. } => load_library(data_dir)
+                .ok()
+                .and_then(|library| library.games.get(id).map(|game| game.install_dir.clone())),
+            _ => None,
+        };
         let res = match action {
             Action::Launch { id, arguments } => handle_launch_game(state, id, arguments),
             Action::Stop { id } => handle_stop_game(state, id),
@@ -2106,9 +2132,7 @@ mod commands {
                         t.id != format!("install-{id}") && t.game_id.as_deref() != Some(&id)
                     });
                 }
-                if let Ok(mut cache) = state.dir_size_cache.lock() {
-                    cache.clear();
-                }
+                state.dir_size_cache.invalidate_all();
                 if let Ok(mut cache) = state.steamstub_cache.lock() {
                     cache.clear();
                 }
@@ -3094,9 +3118,7 @@ mod commands {
                             save_library(data_dir, &library)?;
                             Ok(())
                         })();
-                        if let Ok(mut cache) = state_clone.dir_size_cache.lock() {
-                            cache.clear();
-                        }
+                        state_clone.dir_size_cache.invalidate_all();
                         finish_install_task(
                             &state_clone,
                             &task_id_clone,
@@ -3260,6 +3282,9 @@ mod commands {
         };
 
         if res.is_ok() {
+            if let Some(path) = content_path {
+                state.dir_size_cache.invalidate(&path);
+            }
             state.notify_state_changed();
         }
 
@@ -3947,6 +3972,7 @@ fn main() {
 
     let data_dir = data_dir().expect("Failed to resolve azdl data directory");
     let metadata_cache = load_metadata_cache(&data_dir);
+    let dir_size_cache = Arc::new(sizes::SizeCache::new(&data_dir));
     let state = AppState {
         data_dir,
         running_games: Arc::new(Mutex::new(HashMap::new())),
@@ -3954,7 +3980,7 @@ fn main() {
         mutating: Arc::new(AtomicBool::new(false)),
         cached_diagnostics: Arc::new(Mutex::new(None)),
         library_cache: Arc::new(Mutex::new(None)),
-        dir_size_cache: Arc::new(Mutex::new(HashMap::new())),
+        dir_size_cache,
         steamstub_cache: Arc::new(Mutex::new(HashMap::new())),
         fix_status_cache: Arc::new(Mutex::new(HashMap::new())),
         metadata_cache: Arc::new(Mutex::new(metadata_cache)),
@@ -4044,6 +4070,41 @@ fn main() {
             if let Ok(mut handle) = state.app_handle.lock() {
                 *handle = Some(app.handle().clone());
             }
+            let progress_state = state.inner().clone();
+            std::thread::Builder::new()
+                .name("azdl-progress-events".into())
+                .spawn(move || {
+                    use tauri::Emitter;
+                    let mut previous = serde_json::Value::Null;
+                    let mut interval = Duration::from_secs(1);
+                    loop {
+                        std::thread::sleep(interval);
+                        if let Ok(progress) = commands::handle_get_progress(&progress_state) {
+                            let active = progress["tasks"].as_array().is_some_and(|tasks| {
+                                tasks.iter().any(|task| {
+                                    task["status"] == "running" || task["status"] == "working"
+                                })
+                            }) || progress["jobs"].as_array().is_some_and(|jobs| {
+                                jobs.iter().any(|job| {
+                                    matches!(
+                                        job["status"].as_str(),
+                                        Some("Downloading" | "Installing" | "Queued")
+                                    )
+                                })
+                            });
+                            interval = Duration::from_secs(if active { 1 } else { 15 });
+                            if progress == previous {
+                                continue;
+                            }
+                            if let Ok(handle) = progress_state.app_handle.lock()
+                                && let Some(handle) = handle.as_ref()
+                            {
+                                let _ = handle.emit("progress-changed", &progress);
+                            }
+                            previous = progress;
+                        }
+                    }
+                })?;
             if let Some(window) = app.get_webview_window("main") {
                 let icon_bytes = include_bytes!("../icons/icon.png");
                 if let Ok(icon) = tauri::image::Image::from_bytes(icon_bytes) {
@@ -4055,6 +4116,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
+            commands::get_progress,
             commands::get_runners,
             commands::get_steam_details,
             commands::get_game_dlc,
@@ -4195,13 +4257,27 @@ mod tests {
             mutating: Arc::new(AtomicBool::new(false)),
             cached_diagnostics: Arc::new(Mutex::new(None)),
             library_cache: Arc::new(Mutex::new(None)),
-            dir_size_cache: Arc::new(Mutex::new(HashMap::new())),
+            dir_size_cache: Arc::new(sizes::SizeCache::new(root)),
             steamstub_cache: Arc::new(Mutex::new(HashMap::new())),
             fix_status_cache: Arc::new(Mutex::new(HashMap::new())),
             metadata_cache: Arc::new(Mutex::new(HashMap::new())),
             metadata_pending: Arc::new(Mutex::new(HashSet::new())),
             app_handle: Arc::new(Mutex::new(None)),
         }
+    }
+
+    #[test]
+    fn progress_snapshot_does_not_read_library_or_settings() {
+        let root = scratch();
+        fs::write(root.join("library.json"), b"invalid library JSON").unwrap();
+        fs::write(root.join("settings.json"), b"invalid settings JSON").unwrap();
+        let state = test_state(&root);
+        let progress = commands::handle_get_progress(&state).unwrap();
+        assert_eq!(progress["jobs"], serde_json::json!([]));
+        assert_eq!(progress["tasks"], serde_json::json!([]));
+        assert!(progress.get("library").is_none());
+        assert!(!root.join("directory-sizes.json").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4949,8 +5025,8 @@ mod tests {
         assert_eq!(card["steam_app_id"], 620);
         assert_eq!(card["banner_url"], "https://cdn.example/portal-header.jpg");
         assert_eq!(card["cover_url"], "https://cdn.example/portal-cover.jpg");
-        assert_eq!(card["file_size"], "4 B");
-        assert_eq!(card["size_bytes"], 4);
+        // First state response does not wait for a recursive directory scan.
+        assert!(card["size_bytes"].is_null() || card["size_bytes"] == 4);
         fs::remove_dir_all(root).unwrap();
     }
 

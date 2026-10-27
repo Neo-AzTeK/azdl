@@ -47,3 +47,44 @@ export function reconcileData(previous, next) {
   }
   return result || previous;
 }
+
+/** Share an in-flight refresh and collapse overlapping triggers into one follow-up. */
+export function createRefreshQueue(refresh) {
+  let inFlight = null;
+  let pending = false;
+  let latestArgs = [];
+  return (...args) => {
+    pending = true;
+    latestArgs = args;
+    if (!inFlight) {
+      inFlight = Promise.resolve().then(async () => {
+        try {
+          while (pending) {
+            pending = false;
+            await refresh(...latestArgs);
+          }
+        } finally {
+          inFlight = null;
+        }
+      });
+    }
+    return inFlight;
+  };
+}
+
+/** State changes that require refreshing library metadata, excluding byte progress. */
+export function progressTopology(state) {
+  return JSON.stringify({
+    jobs: (state.jobs || []).map((job) => [job.id, job.status, job.install_state, job.error, job.install_error]).sort(),
+    tasks: (state.tasks || []).map((task) => [task.id, task.status, task.log_tail]).sort(),
+    running: Object.entries(state.running_games || {}).map(([id, game]) => [id, game.pid]).sort(),
+  });
+}
+export function applyProgressSnapshot(state, progress) {
+  return reconcileData(state, {
+    ...state,
+    jobs: progress.jobs,
+    tasks: progress.tasks,
+    running_games: progress.running_games,
+  });
+}
