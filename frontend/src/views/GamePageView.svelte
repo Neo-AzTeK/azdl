@@ -33,6 +33,7 @@
     calculateJobProgressPercent,
   } from '../transfers.js';
   import { getSteamStorageSize } from '../steam_storage.js';
+  import { detailGameIdentity as getDetailGameIdentity } from '../detail_tabs.js';
 
   let {
     game,
@@ -146,9 +147,7 @@
   });
 
   $effect(() => {
-    const currentGameIdentity = game?.steam_app_id
-      ? `steam:${game.steam_app_id}`
-      : game?.qualified_id || `${game?.source_id || ''}:${game?.id || ''}`;
+    const currentGameIdentity = getDetailGameIdentity(game);
     if (currentGameIdentity !== detailGameIdentity) {
       detailGameIdentity = currentGameIdentity;
       detailTabTouched = false;
