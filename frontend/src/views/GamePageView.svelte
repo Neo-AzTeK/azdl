@@ -1,6 +1,6 @@
 <script>
   import { onMount, onDestroy, tick } from 'svelte';
-  import { Button, Tabs, FAB, LinearProgress, LinearProgressEstimate } from 'm3-svelte';
+  import { Button, Tabs, FAB, LinearProgress, LinearProgressEstimate, Switch } from 'm3-svelte';
   import SectionCard from '../components/SectionCard.svelte';
   import { dlcTransfer, dlcTransferActive, dlcTransferStatus, dlcTransferInstalling, isDlcTransferJob, dlcProgress, filterDlc } from '../dlc.js';
   import iconPlay from '@ktibow/iconset-material-symbols/play-arrow';
@@ -1259,11 +1259,13 @@
                     </svg>
                     <h4>Online-Fix / SteamFix Overlay</h4>
                   </div>
-                  {#if installedRecord.fix && installedRecord.fix !== 'None'}
-                    <span class="tool-pill active">{installedRecord.fix}</span>
-                  {:else}
-                    <span class="tool-pill inactive">Clean / Inactive</span>
-                  {/if}
+                  <label class="switch-container" aria-label="Toggle Online-Fix or SteamFix overlay">
+                    <Switch
+                      checked={installedRecord.fix && installedRecord.fix !== 'None'}
+                      disabled={isRunning || pendingAction === 'overlay-toggle'}
+                      onchange={() => handleAction({ action: 'overlay-toggle' }, 'Toggled DLL overlay')}
+                    />
+                  </label>
                 </div>
                 <p class="tool-desc">
                   Toggle multiplayer fix DLLs and FakeAppId via reversible <code>.arachnel-off</code> renames.
@@ -1272,12 +1274,9 @@
                   class="md3-btn"
                   class:primary={!installedRecord.fix || installedRecord.fix === 'None'}
                   class:tonal={installedRecord.fix && installedRecord.fix !== 'None'}
-                  disabled={pendingAction === 'overlay-toggle'}
+                  disabled={isRunning || pendingAction === 'overlay-toggle'}
                   onclick={() => handleAction({ action: 'overlay-toggle' }, 'Toggled DLL overlay')}
                 >
-                  <svg class="btn-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-                    <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
-                  </svg>
                   <span>{installedRecord.fix && installedRecord.fix !== 'None' ? 'Disable DLL Overlay' : 'Enable DLL Overlay'}</span>
                 </button>
               </div>
@@ -1291,13 +1290,16 @@
                     </svg>
                     <h4>Steamless DRM Stripper</h4>
                   </div>
-                  {#if effectiveSteamStub?.applied}
-                    <span class="tool-pill success">Unpacked (.steamstub.bak)</span>
-                  {:else if effectiveSteamStub?.stub_present}
-                    <span class="tool-pill warning">SteamStub Protected</span>
-                  {:else}
-                    <span class="tool-pill inactive">Clean / No DRM</span>
-                  {/if}
+                  <label class="switch-container" aria-label="Toggle Steamless DRM unpack">
+                    <Switch
+                      checked={!!effectiveSteamStub?.applied}
+                      disabled={isRunning || (!effectiveSteamStub?.stub_present && !effectiveSteamStub?.applied) || pendingAction === 'steamstub-unpack' || pendingAction === 'steamstub-rollback'}
+                      onchange={() => handleAction(
+                        { action: effectiveSteamStub?.applied ? 'steamstub-rollback' : 'steamstub-unpack' },
+                        effectiveSteamStub?.applied ? 'Restored original SteamStub executable' : 'SteamStub DRM unpacked'
+                      )}
+                    />
+                  </label>
                 </div>
                 <p class="tool-desc">
                   Strip SteamStub DRM from PE binaries with automated <code>.steamstub.bak</code> backups.
@@ -1305,12 +1307,9 @@
                 {#if effectiveSteamStub?.applied}
                   <button
                     class="md3-btn tonal"
-                    disabled={pendingAction === 'steamstub-rollback'}
+                    disabled={isRunning || pendingAction === 'steamstub-rollback'}
                     onclick={() => handleAction({ action: 'steamstub-rollback' }, 'Restored original SteamStub executable')}
                   >
-                    <svg class="btn-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-                      <path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/>
-                    </svg>
                     <span>{pendingAction === 'steamstub-rollback' ? 'Restoring...' : 'Rollback Original Binary'}</span>
                   </button>
                 {:else}
@@ -1318,12 +1317,9 @@
                     class="md3-btn"
                     class:primary={effectiveSteamStub?.stub_present}
                     class:tonal={!effectiveSteamStub?.stub_present}
-                    disabled={!effectiveSteamStub?.stub_present || pendingAction === 'steamstub-unpack'}
+                    disabled={isRunning || !effectiveSteamStub?.stub_present || pendingAction === 'steamstub-unpack'}
                     onclick={() => handleAction({ action: 'steamstub-unpack' }, 'SteamStub DRM unpacked')}
                   >
-                    <svg class="btn-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-                      <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14l-5-5 1.41-1.41L12 14.17l7.59-7.59L21 8l-9 9z"/>
-                    </svg>
                     <span>{pendingAction === 'steamstub-unpack' ? 'Stripping SteamStub DRM...' : effectiveSteamStub?.stub_present ? 'Strip SteamStub DRM' : 'No SteamStub DRM Detected'}</span>
                   </button>
                 {/if}
@@ -1339,9 +1335,16 @@
                       </svg>
                       <h4>EA Activation Patch</h4>
                     </div>
-                    <span class="tool-pill" class:active={installedRecord.ea_heal_applied} class:inactive={!installedRecord.ea_heal_applied}>
-                      {installedRecord.ea_heal_applied ? 'Patched' : 'Original'}
-                    </span>
+                    <label class="switch-container" aria-label="Toggle EA activation patch">
+                      <Switch
+                        checked={!!installedRecord.ea_heal_applied}
+                        disabled={isRunning || pendingAction === 'ea-heal' || pendingAction === 'ea-rollback'}
+                        onchange={() => handleAction(
+                          { action: installedRecord.ea_heal_applied ? 'ea-rollback' : 'ea-heal' },
+                          installedRecord.ea_heal_applied ? 'EA activation restored' : 'EA activation patched'
+                        )}
+                      />
+                    </label>
                   </div>
                   <p class="tool-desc">
                     Bypasses EA Desktop / Origin activation checks and restores original entitlement binaries.
@@ -1349,7 +1352,7 @@
                   {#if installedRecord.ea_heal_applied}
                     <button
                       class="md3-btn tonal"
-                      disabled={pendingAction === 'ea-rollback'}
+                      disabled={isRunning || pendingAction === 'ea-rollback'}
                       onclick={() => handleAction({ action: 'ea-rollback' }, 'EA activation restored')}
                     >
                       <span>Rollback EA Patch</span>
@@ -1357,7 +1360,7 @@
                   {:else}
                     <button
                       class="md3-btn primary"
-                      disabled={pendingAction === 'ea-heal'}
+                      disabled={isRunning || pendingAction === 'ea-heal'}
                       onclick={() => handleAction({ action: 'ea-heal' }, 'EA activation patched')}
                     >
                       <span>Apply Activation Patch</span>
@@ -1376,9 +1379,16 @@
                       </svg>
                       <h4>DLC License Bypass</h4>
                     </div>
-                    <span class="tool-pill" class:active={effectiveDlcPatchApplied} class:inactive={!effectiveDlcPatchApplied}>
-                      {effectiveDlcPatchApplied ? 'Patched' : 'Original'}
-                    </span>
+                    <label class="switch-container" aria-label="Toggle DLC license bypass">
+                      <Switch
+                        checked={effectiveDlcPatchApplied}
+                        disabled={isRunning || pendingAction === 'dlc-license-patch' || pendingAction === 'dlc-license-rollback' || (!installedRecord.dlc_patch_available && !effectiveDlcPatchApplied)}
+                        onchange={() => handleAction(
+                          { action: effectiveDlcPatchApplied ? 'dlc-license-rollback' : 'dlc-license-patch' },
+                          effectiveDlcPatchApplied ? 'DLC license patch rolled back' : 'DLC license patch applied'
+                        )}
+                      />
+                    </label>
                   </div>
                   <p class="tool-desc">
                     Bypasses Steamworks <code>BIsDlcInstalled</code> entitlement checks in <code>steam_api64.dll</code> so Unity and Godot load offline DLCs under Wine/Proton.
@@ -1386,7 +1396,7 @@
                   {#if effectiveDlcPatchApplied}
                     <button
                       class="md3-btn tonal"
-                      disabled={pendingAction === 'dlc-license-rollback'}
+                      disabled={isRunning || pendingAction === 'dlc-license-rollback'}
                       onclick={() => handleAction({ action: 'dlc-license-rollback' }, 'DLC license patch rolled back')}
                     >
                       <span>Rollback DLC Patch</span>
@@ -1394,7 +1404,7 @@
                   {:else}
                     <button
                       class="md3-btn primary"
-                      disabled={pendingAction === 'dlc-license-patch'}
+                      disabled={isRunning || pendingAction === 'dlc-license-patch' || (!installedRecord.dlc_patch_available && !effectiveDlcPatchApplied)}
                       onclick={() => handleAction({ action: 'dlc-license-patch' }, 'DLC license patch applied')}
                     >
                       <span>Apply DLC License Patch</span>
@@ -1413,9 +1423,16 @@
                       </svg>
                       <h4>Goldberg Emulator Settings</h4>
                     </div>
-                    <span class="tool-pill" class:active={effectiveGoldbergHasSettings} class:inactive={!effectiveGoldbergHasSettings}>
-                      {effectiveGoldbergHasSettings ? 'Configured' : 'Available'}
-                    </span>
+                    <label class="switch-container" aria-label="Toggle Goldberg emulator settings">
+                      <Switch
+                        checked={effectiveGoldbergHasSettings}
+                        disabled={isRunning || pendingAction === 'goldberg-sync' || pendingAction === 'goldberg-rollback' || (!installedRecord.goldberg_compatible && !effectiveGoldbergHasSettings)}
+                        onchange={() => handleAction(
+                          { action: effectiveGoldbergHasSettings ? 'goldberg-rollback' : 'goldberg-sync' },
+                          effectiveGoldbergHasSettings ? 'Goldberg configuration removed' : 'Goldberg DLC configuration generated'
+                        )}
+                      />
+                    </label>
                   </div>
                   <p class="tool-desc">
                     Auto-provisions <code>steam_settings/DLC.txt</code> and offline AppID entitlements for games using the Goldberg Steam emulator.
@@ -1423,7 +1440,7 @@
                   {#if effectiveGoldbergHasSettings}
                     <button
                       class="md3-btn tonal"
-                      disabled={pendingAction === 'goldberg-rollback'}
+                      disabled={isRunning || pendingAction === 'goldberg-rollback'}
                       onclick={() => handleAction({ action: 'goldberg-rollback' }, 'Goldberg configuration removed')}
                     >
                       <span>Remove Goldberg Config</span>
@@ -1431,7 +1448,7 @@
                   {:else}
                     <button
                       class="md3-btn primary"
-                      disabled={pendingAction === 'goldberg-sync'}
+                      disabled={isRunning || pendingAction === 'goldberg-sync' || (!installedRecord.goldberg_compatible && !effectiveGoldbergHasSettings)}
                       onclick={() => handleAction({ action: 'goldberg-sync' }, 'Goldberg DLC configuration generated')}
                     >
                       <span>Generate Goldberg Config</span>
@@ -1467,7 +1484,7 @@
                     {#if !installedRecord.dependencies.vcredist_x64}
                       <button
                         class="md3-btn primary small"
-                        disabled={pendingAction === 'install-vcredist'}
+                        disabled={isRunning || pendingAction === 'install-vcredist'}
                         onclick={() => handleAction({ action: 'install-vcredist' }, 'Visual C++ 2015-2022 (x64) installed')}
                       >
                         <span>Install VC++ 2022</span>
@@ -1476,7 +1493,7 @@
                     {#if !installedRecord.dependencies.directx}
                       <button
                         class="md3-btn tonal small"
-                        disabled={pendingAction === 'install-directx'}
+                        disabled={isRunning || pendingAction === 'install-directx'}
                         onclick={() => handleAction({ action: 'install-directx' }, 'DirectX runtimes installed')}
                       >
                         <span>Install DirectX</span>
@@ -1496,16 +1513,20 @@
                       </svg>
                       <h4>Standalone Game Patch</h4>
                     </div>
-                    <span class="tool-pill" class:active={installedRecord.patch === 'enabled'} class:inactive={installedRecord.patch !== 'enabled'}>
-                      {installedRecord.patch === 'enabled' ? 'Active' : 'Disabled'}
-                    </span>
+                    <label class="switch-container" aria-label="Toggle standalone game patch">
+                      <Switch
+                        checked={installedRecord.patch === 'enabled'}
+                        disabled={isRunning || pendingAction === 'patch-toggle'}
+                        onchange={() => handleAction({ action: 'patch-toggle' }, 'Toggled game patch')}
+                      />
+                    </label>
                   </div>
                   <p class="tool-desc">
                     Toggle standalone game patch files and mod payloads staged in this game directory.
                   </p>
                   <button
                     class="md3-btn tonal"
-                    disabled={pendingAction === 'patch-toggle'}
+                    disabled={isRunning || pendingAction === 'patch-toggle'}
                     onclick={() => handleAction({ action: 'patch-toggle' }, 'Toggled game patch')}
                   >
                     <span>{installedRecord.patch === 'enabled' ? 'Disable Patch' : 'Enable Patch'}</span>
@@ -1519,7 +1540,7 @@
           <section id="section-diagnostics" class="steam-section-card" style="margin-top: 16px;">
             <div class="diag-header-row">
               <h3 class="section-heading">Environment Diagnostics & Readiness</h3>
-              <button class="md3-btn tonal small" onclick={refreshDiagnostics} disabled={loadingDiag}>
+              <button class="md3-btn tonal small" onclick={refreshDiagnostics} disabled={isRunning || loadingDiag}>
                 {loadingDiag ? 'Scanning...' : 'Re-run Checks'}
               </button>
             </div>
@@ -2341,6 +2362,20 @@
     justify-content: space-between;
     align-items: center;
     gap: 12px;
+  }
+
+  .switch-container {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  :global(.switch-container:has(input:disabled)) {
+    cursor: not-allowed;
+    opacity: 0.38;
+    pointer-events: none;
   }
 
   .tool-header-left {

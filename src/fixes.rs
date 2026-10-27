@@ -353,7 +353,7 @@ fn collect_dll_candidates(game_dir: &Path, out: &mut Vec<PathBuf>) -> Result<()>
                 stack.push(path);
             } else if meta.is_file() {
                 let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-                if (name.contains("steam") && name.ends_with(".dll")) || name.contains("godotsteam")
+                if name.ends_with(".dll") && (name.contains("steam") || name.contains("godotsteam"))
                 {
                     out.push(path);
                 }
@@ -567,22 +567,31 @@ pub fn has_dlc_installed_patch(game_dir: &Path) -> bool {
     }
 
     let mut dll_paths = Vec::new();
-    if find_dlc_dlls(game_dir, 0, 2, &mut dll_paths).is_ok() {
-        return dll_paths
+    if find_dlc_dlls(game_dir, 0, 2, &mut dll_paths).is_ok()
+        && dll_paths
             .iter()
-            .any(|p| p.with_extension("dll.dlc.bak").is_file());
+            .any(|p| p.with_extension("dll.dlc.bak").is_file())
+    {
+        return true;
     }
 
     // Check GodotSteam DLL backups
     let mut godotsteam_paths = Vec::new();
-    if collect_dll_candidates(game_dir, &mut godotsteam_paths).is_ok() {
-        return godotsteam_paths.iter().any(|p| {
-            let name_lower = p
-                .file_name()
-                .map(|n| n.to_string_lossy().to_ascii_lowercase())
-                .unwrap_or_default();
-            name_lower.contains("godotsteam") && p.with_extension("dll.dlc.bak").is_file()
-        });
+    if collect_dll_candidates(game_dir, &mut godotsteam_paths).is_ok()
+        && godotsteam_paths
+            .iter()
+            .any(|p| p.with_extension("dll.dlc.bak").is_file())
+    {
+        return true;
+    }
+
+    if let Ok(entries) = fs::read_dir(game_dir) {
+        for entry in entries.flatten() {
+            let name_lower = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if name_lower.contains("godotsteam") && name_lower.ends_with(".dlc.bak") {
+                return true;
+            }
+        }
     }
 
     false
@@ -614,8 +623,8 @@ pub fn has_dlc_installed_target(game_dir: &Path) -> bool {
     }
 
     let mut dll_paths = Vec::new();
-    if find_dlc_dlls(game_dir, 0, 2, &mut dll_paths).is_ok() {
-        return !dll_paths.is_empty();
+    if find_dlc_dlls(game_dir, 0, 2, &mut dll_paths).is_ok() && !dll_paths.is_empty() {
+        return true;
     }
 
     // Check GodotSteam DLL targets
@@ -1276,6 +1285,21 @@ mod tests {
         let dir = test_dir("godotsteam_nomatch");
         let mut content = vec![0x90; 64];
         assert!(!patch_godotsteam_dll(&mut content));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn has_dlc_installed_patch_detects_godotsteam_backup_with_unpatched_steam_api() {
+        let dir = test_dir("has_dlc_godotsteam");
+        fs::write(dir.join("steam_api64.dll"), b"original").unwrap();
+        fs::write(
+            dir.join("libgodotsteam.windows.template_release.x86_64.dll.dlc.bak"),
+            b"backup",
+        )
+        .unwrap();
+
+        assert!(has_dlc_installed_patch(&dir));
 
         let _ = fs::remove_dir_all(dir);
     }
