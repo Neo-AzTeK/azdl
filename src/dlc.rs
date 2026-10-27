@@ -80,6 +80,44 @@ fn state_dir(data_dir: &Path, game_id: &str, dlc_id: &str) -> PathBuf {
     data_dir.join("dlc").join(game_id).join(dlc_id)
 }
 
+fn dlc_io<T>(operation: &str, path: &Path, result: io::Result<T>) -> Result<T> {
+    result
+        .map_err(|error| format!("Cannot {operation} DLC path {}: {error}", path.display()).into())
+}
+
+/// Finish and close a manifest before publishing its file or containing directory.
+fn write_manifest_file(path: &Path, manifest: &DlcManifest) -> Result<()> {
+    let mut output = dlc_io(
+        "create manifest at",
+        path,
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path),
+    )?;
+    serde_json::to_writer_pretty(&mut output, manifest)
+        .map_err(|error| format!("Cannot write DLC manifest {}: {error}", path.display()))?;
+    dlc_io("write manifest at", path, output.write_all(b"\n"))?;
+    dlc_io("sync manifest at", path, output.sync_all())?;
+    Ok(())
+}
+
+/// Sync backups through the writable handle rather than a read-only Windows handle.
+fn copy_backup(source: &Path, backup: &Path) -> Result<()> {
+    let mut input = dlc_io("read backup source at", source, File::open(source))?;
+    let mut output = dlc_io(
+        "create backup at",
+        backup,
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(backup),
+    )?;
+    dlc_io("write backup at", backup, io::copy(&mut input, &mut output))?;
+    dlc_io("sync backup at", backup, output.sync_all())?;
+    Ok(())
+}
+
 /// Serialize game launch and content mutations across processes.
 pub fn lock_game(data_dir: &Path, game_id: &str) -> Result<File> {
     validate_id(game_id)?;
@@ -198,13 +236,7 @@ pub(crate) fn prepare_move(game: &Game, data_dir: &Path) -> Result<()> {
         manifest.install_dir = PathBuf::new();
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let temp = state.join(format!("manifest.json.{}.{nonce}.tmp", std::process::id()));
-        let mut output = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
-        serde_json::to_writer_pretty(&mut output, &manifest)?;
-        output.write_all(b"\n")?;
-        output.sync_all()?;
+        write_manifest_file(&temp, &manifest)?;
         #[cfg(windows)]
         {
             let target = state.join("manifest.json");
@@ -423,8 +455,7 @@ fn install_payload_unlocked(
                         }
                         let backup = staging.join("backup").join(&relative);
                         fs::create_dir_all(backup.parent().ok_or("invalid DLC backup path")?)?;
-                        fs::copy(&target, &backup)?;
-                        File::open(&backup)?.sync_all()?;
+                        copy_backup(&target, &backup)?;
                         if file_sha256(&backup)? != existing_hash
                             || file_sha256(&target)? != existing_hash
                         {
@@ -453,8 +484,7 @@ fn install_payload_unlocked(
                         }
                         let backup = staging.join("backup").join(&relative);
                         fs::create_dir_all(backup.parent().ok_or("invalid DLC backup path")?)?;
-                        fs::copy(&from, &backup)?;
-                        File::open(&backup)?.sync_all()?;
+                        copy_backup(&from, &backup)?;
                         if file_sha256(&backup)? != *backup_hash {
                             return Err("Shared DLC overlay backup copy does not match".into());
                         }
@@ -511,11 +541,12 @@ fn install_payload_unlocked(
             install_dir: PathBuf::new(),
             files: entries,
         };
-        let mut output = File::create(staging.join("manifest.json"))?;
-        serde_json::to_writer_pretty(&mut output, &manifest)?;
-        output.write_all(b"\n")?;
-        output.sync_all()?;
-        fs::rename(&staging, &state)?;
+        write_manifest_file(&staging.join("manifest.json"), &manifest)?;
+        dlc_io(
+            "publish transaction at",
+            &state,
+            fs::rename(&staging, &state),
+        )?;
         for entry in &manifest.files {
             if !entry.created && (entry.backup_sha256.is_none() || entry.shared_overlay) {
                 let target = check_target(&install, &entry.path)?;
@@ -533,40 +564,76 @@ fn install_payload_unlocked(
             } else if fs::symlink_metadata(&target).is_ok() {
                 return Err("DLC target changed during installation".into());
             }
-            fs::create_dir_all(target.parent().ok_or("invalid DLC target")?)?;
+            let parent = target.parent().ok_or("invalid DLC target")?;
+            dlc_io(
+                "create installation directory at",
+                parent,
+                fs::create_dir_all(parent),
+            )?;
             let mut source = File::open(state.join("payload").join(&entry.path))?;
-            let mut output = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&staged_target)?;
+            let mut output = dlc_io(
+                "create staged file at",
+                &staged_target,
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&staged_target),
+            )?;
             if let Err(error) = io::copy(&mut source, &mut output).and_then(|_| output.sync_all()) {
                 drop(output);
                 let _ = fs::remove_file(&staged_target);
-                return Err(error.into());
+                return dlc_io("write staged file at", &staged_target, Err(error));
             }
             drop(output);
             if let Some(backup_hash) = &entry.backup_sha256 {
                 if file_sha256(&target)? != *backup_hash {
                     return Err("Base file changed during DLC installation".into());
                 }
-                fs::remove_file(&target)?;
+                dlc_io(
+                    "replace existing file at",
+                    &target,
+                    fs::remove_file(&target),
+                )?;
             } else if fs::symlink_metadata(&target).is_ok() {
                 return Err("DLC target changed during installation".into());
             }
             if fs::hard_link(&staged_target, &target).is_err() {
                 // Removable filesystems may not support hard links.
                 let mut input = File::open(&staged_target)?;
-                let mut output = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&target)?;
-                io::copy(&mut input, &mut output)?;
-                output.sync_all()?;
+                let mut output = dlc_io(
+                    "create installed file at",
+                    &target,
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&target),
+                )?;
+                dlc_io(
+                    "write installed file at",
+                    &target,
+                    io::copy(&mut input, &mut output),
+                )?;
+                dlc_io("sync installed file at", &target, output.sync_all())?;
             }
-            fs::remove_file(&staged_target)?;
+            dlc_io(
+                "remove staged file at",
+                &staged_target,
+                fs::remove_file(&staged_target),
+            )?;
         }
-        fs::remove_dir_all(state.join("payload"))?;
-        File::create(state.join("complete"))?.sync_all()?;
+        let payload = state.join("payload");
+        dlc_io(
+            "remove transaction payload at",
+            &payload,
+            fs::remove_dir_all(&payload),
+        )?;
+        let complete = state.join("complete");
+        let output = dlc_io(
+            "create completion record at",
+            &complete,
+            File::create(&complete),
+        )?;
+        dlc_io("sync completion record at", &complete, output.sync_all())?;
         Ok(manifest.files.len())
     })();
     if result.is_err() {
@@ -575,7 +642,13 @@ fn install_payload_unlocked(
             let _ = recover_unlocked(game, data_dir, dlc_id);
         }
     }
-    result
+    result.map_err(|error| {
+        format!(
+            "DLC {dlc_id} installation into {} failed: {error}",
+            install.display()
+        )
+        .into()
+    })
 }
 
 /// Download an explicit provider DLC archive and install it into its base game.
@@ -1087,6 +1160,74 @@ mod tests {
     use crate::{Library, Runner};
     use std::collections::BTreeMap;
     use std::process::Command;
+
+    #[test]
+    fn staged_dlc_finalizes_moves_and_removes_without_open_file_handles() {
+        let root = std::env::temp_dir().join(format!("azdl-dlc-finalize-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let install_dir = root.join("games/base");
+        let source = root.join("source/Content/DLC");
+        fs::create_dir_all(&install_dir).unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::write(install_dir.join("base.exe"), b"base").unwrap();
+        fs::write(source.join("bonus.dat"), b"bonus").unwrap();
+        let mut game = Game {
+            id: "base".into(),
+            title: "Base".into(),
+            executable: install_dir.join("base.exe"),
+            install_dir,
+            runner: Runner::Native,
+            arguments: Vec::new(),
+            environment: BTreeMap::new(),
+            last_played_unix: None,
+            origin: None,
+            steam_app_id: None,
+            launch_options: Vec::new(),
+            selected_launch_option_id: None,
+            cover_url: None,
+            banner_url: None,
+        };
+        assert_eq!(
+            install_staged(&game, &root, "bonus", &root.join("source")).unwrap(),
+            1
+        );
+        assert_eq!(list_installed(&game, &root).unwrap(), ["bonus"]);
+        assert!(!state_dir(&root, "base", "bonus").join("payload").exists());
+        prepare_move(&game, &root).unwrap();
+        let moved = root.join("moved");
+        fs::rename(&game.install_dir, &moved).unwrap();
+        game.install_dir = moved;
+        remove(&game, &root, "bonus").unwrap();
+        assert!(!game.install_dir.join("Content/DLC/bonus.dat").exists());
+        assert_eq!(
+            fs::read(game.install_dir.join("base.exe")).unwrap(),
+            b"base"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backup_is_synced_with_write_access_without_overwriting_existing_files() {
+        let root = std::env::temp_dir().join(format!("azdl-dlc-backup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.bin");
+        let backup = root.join("backup.bin");
+        fs::write(&source, b"base").unwrap();
+        let permissions = fs::metadata(&source).unwrap().permissions();
+        let mut readonly = permissions.clone();
+        readonly.set_readonly(true);
+        fs::set_permissions(&source, readonly).unwrap();
+        copy_backup(&source, &backup).unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), b"base");
+        assert!(!fs::metadata(&backup).unwrap().permissions().readonly());
+        let error = copy_backup(&source, &backup).unwrap_err().to_string();
+        assert!(error.contains("create backup"));
+        assert!(error.contains(backup.to_string_lossy().as_ref()));
+        assert_eq!(fs::read(&backup).unwrap(), b"base");
+        fs::set_permissions(source, permissions).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn archive_overlay_restores_base_after_move_and_interruption() {

@@ -38,6 +38,8 @@ The optional `tests/live_dlc_install.rs` check uses `AZDL_LIVE_DLC_LIBRARY_DIR`,
 
 ## Provider-owned delivery
 
+Windows DLC finalization closes the synced manifest before renaming its transaction directory. Base backups are copied and synced through a writable handle; syncing a read-only handle can fail with access denied on Windows. Finalization write failures include the operation and destination path. Archive-free regression tests cover staged installation, manifest relocation, removal, and backup writes; the Windows release workflow runs DLC tests before packaging. Native validation of this change remains pending.
+
 Arachnel API 4 exposes a JSON catalog boundary, but its C ABI does not expose the C++ `startOwnedDownload` method. Rust must not call C++ virtual methods or infer a depot URL from a Store DLC ID. A future provider-owned DLC adapter should use a versioned C ABI with an opaque session handle:
 
 1. The host passes the source game ID, DLC ID, platform, and an isolated staging directory. The plugin may download into that directory and report progress and cancellation through the adapter. It receives no writable base game path.

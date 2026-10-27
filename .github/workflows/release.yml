@@ -154,6 +154,10 @@ jobs:
           cargo test -p azdl --lib bundled_windows_engine_loads_without_qt_and_validates_requests -- --ignored
           if ($LASTEXITCODE -ne 0) { throw 'Windows depot engine ABI check failed' }
 
+      - name: Verify Windows DLC finalization and rollback
+        if: runner.os == 'Windows'
+        run: cargo test -p azdl --lib 'dlc::tests::'
+
       - name: Build and bundle Desktop application (Tauri)
         uses: tauri-apps/tauri-action@v1
         with:
