@@ -168,7 +168,7 @@ fn decrypt_name(encoded: &[u8], cipher: &Aes256) -> Result<String> {
     cipher.decrypt_block(&mut initial);
     let mut previous: [u8; 16] = initial.into();
     let mut plaintext = Vec::with_capacity(encrypted.len() - 16);
-    for chunk in encrypted[16..].chunks_exact(16) {
+    for chunk in encrypted[16..].as_chunks::<16>().0 {
         let mut block = GenericArray::clone_from_slice(chunk);
         cipher.decrypt_block(&mut block);
         plaintext.extend(
