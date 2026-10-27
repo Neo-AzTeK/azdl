@@ -5,6 +5,7 @@ use crate::steam::steam_root;
 use crate::{Game, Runner, clean_command, resolve_launch};
 use serde::Serialize;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -61,13 +62,51 @@ fn usable_file(path: &Path) -> bool {
     }
 }
 
-fn command_available(program: &Path) -> bool {
-    if program.is_absolute() || program.components().count() > 1 {
-        return usable_file(program);
+fn find_command_in_path(program: &Path, paths: &OsStr, extensions: &[OsString]) -> Option<PathBuf> {
+    for directory in env::split_paths(paths) {
+        let candidate = directory.join(program);
+        if usable_file(&candidate) {
+            return Some(candidate);
+        }
+        if program.extension().is_none() {
+            for extension in extensions {
+                let mut filename = program.as_os_str().to_os_string();
+                filename.push(extension);
+                let candidate = directory.join(filename);
+                if usable_file(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
     }
-    env::var_os("PATH").is_some_and(|path| {
-        env::split_paths(&path).any(|directory| usable_file(&directory.join(program)))
-    })
+    None
+}
+
+fn command_path(program: &Path) -> Option<PathBuf> {
+    if program.is_absolute() || program.components().count() > 1 {
+        return usable_file(program).then(|| program.to_path_buf());
+    }
+    let paths = env::var_os("PATH")?;
+    #[cfg(windows)]
+    let extensions = env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+        .split(';')
+        .filter(|extension| {
+            extension.starts_with('.')
+                && extension.len() > 1
+                && extension[1..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric())
+        })
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+    #[cfg(not(windows))]
+    let extensions = Vec::new();
+    find_command_in_path(program, &paths, &extensions)
+}
+
+fn command_available(program: &Path) -> bool {
+    command_path(program).is_some()
 }
 
 pub fn diagnose_game(game: &Game, data_dir: &Path) -> DiagnosticReport {
@@ -275,24 +314,10 @@ pub struct SystemCheck {
 }
 
 fn check_binary(name: &str, description: &str, required: bool, version_flag: &str) -> SystemCheck {
-    let which = if cfg!(windows) {
-        clean_command("where").arg(name).output()
-    } else {
-        clean_command("which").arg(name).output()
-    };
-    let path = which
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            String::from_utf8(o.stdout)
-                .ok()
-                .map(|s| s.lines().next().unwrap_or("").trim().to_string())
-        })
-        .filter(|s| !s.is_empty());
-
+    let path = command_path(Path::new(name));
     let available = path.is_some();
-    let version = if available {
-        clean_command(name)
+    let version = if let Some(path) = &path {
+        clean_command(path)
             .arg(version_flag)
             .output()
             .ok()
@@ -310,7 +335,7 @@ fn check_binary(name: &str, description: &str, required: bool, version_flag: &st
         name: name.to_string(),
         description: description.to_string(),
         available,
-        path,
+        path: path.map(|path| path.to_string_lossy().into_owned()),
         version,
         required,
     }
@@ -388,6 +413,52 @@ mod tests {
     use super::*;
     use crate::{Library, add_game};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn path_lookup_preserves_directory_order_and_executable_extensions() {
+        let root = env::temp_dir().join(format!(
+            "azdl-doctor-path-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(first.join("tool.exe")).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let write_executable = |path: &Path| {
+            fs::write(path, b"#!/bin/sh\nexit 0\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        };
+        write_executable(&second.join("tool.exe"));
+        let paths = env::join_paths([&first, &second]).unwrap();
+        let extensions = [OsString::from(".exe"), OsString::from(".cmd")];
+        assert_eq!(
+            find_command_in_path(Path::new("tool"), &paths, &extensions),
+            Some(second.join("tool.exe"))
+        );
+        write_executable(&first.join("tool.cmd"));
+        assert_eq!(
+            find_command_in_path(Path::new("tool"), &paths, &extensions),
+            Some(first.join("tool.cmd"))
+        );
+        assert_eq!(
+            find_command_in_path(Path::new("tool.exe"), &paths, &extensions),
+            Some(second.join("tool.exe"))
+        );
+        assert!(find_command_in_path(Path::new("missing"), &paths, &extensions).is_none());
+        assert_eq!(
+            command_path(&second.join("tool.exe")),
+            Some(second.join("tool.exe"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]
