@@ -1517,6 +1517,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        fs::create_dir_all(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
         let game_dir = root.join("games/base");
         fs::create_dir_all(&game_dir).unwrap();
         fs::write(game_dir.join("base.exe"), b"base").unwrap();

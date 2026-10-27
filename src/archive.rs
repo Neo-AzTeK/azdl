@@ -851,6 +851,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn normalizes_nested_and_merging_windows_paths() {
         let root = std::env::temp_dir().join(format!(

@@ -116,7 +116,17 @@ jobs:
             libssl-dev \
             libasound2-dev \
             libfuse2 \
-            xdg-utils
+            xdg-utils \
+            zip \
+            unzip \
+            libarchive-tools
+
+      - name: Install Windows archive test tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install zip --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot install ZIP test tool' }
 
       - name: Update version in tauri.conf.json (Linux)
         if: runner.os == 'Linux'

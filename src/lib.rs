@@ -1041,9 +1041,10 @@ mod tests {
         .unwrap();
         let game = library.games.get_mut("game").unwrap();
         set_executable(game, Path::new("game.exe")).unwrap();
-        assert_eq!(game.executable, game_dir.join("game.exe"));
+        let selected_executable = fs::canonicalize(game_dir.join("game.exe")).unwrap();
+        assert_eq!(game.executable, selected_executable);
         assert!(set_executable(game, Path::new("../outside.exe")).is_err());
-        assert_eq!(game.executable, game_dir.join("game.exe"));
+        assert_eq!(game.executable, selected_executable);
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(root.join("outside.exe"), game_dir.join("link.exe"))

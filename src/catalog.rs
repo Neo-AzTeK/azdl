@@ -1140,6 +1140,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        fs::create_dir_all(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
         let id = install_id(&game);
         let downloads = root.join("downloads").join(&id);
         fs::create_dir_all(&downloads).unwrap();

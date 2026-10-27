@@ -453,7 +453,10 @@ mod tests {
             .to_string();
         assert!(error.contains("DLC download"), "{error}");
         assert!(game_dir.join("game.exe").exists());
-        assert_eq!(library.games["game"].install_dir, game_dir);
+        assert_eq!(
+            library.games["game"].install_dir,
+            fs::canonicalize(&game_dir).unwrap()
+        );
         drop(worker);
         let moved = move_game_to_drive(&root, &mut library, "game", &drive.id).unwrap();
         assert_eq!(fs::read(moved.join("game.exe")).unwrap(), b"base");

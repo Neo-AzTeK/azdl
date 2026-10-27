@@ -444,7 +444,10 @@ mod tests {
             SetupOutcome::Imported(_)
         ));
         assert_eq!(library.games["test"].runner, Runner::Wine);
-        assert_eq!(library.games["test"].install_dir, game_dir);
+        assert_eq!(
+            library.games["test"].install_dir,
+            fs::canonicalize(&game_dir).unwrap()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

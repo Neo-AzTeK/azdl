@@ -31,7 +31,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libasound2-dev xdg-utils
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev libasound2-dev xdg-utils zip unzip libarchive-tools
+      - name: Install Windows archive test tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install zip --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot install ZIP test tool' }
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci --legacy-peer-deps
@@ -43,8 +49,6 @@ jobs:
         run: npm run build
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
-      - name: Test Rust workspace
-        run: cargo test --workspace
       - name: Build Qt-free Windows depot engine
         if: runner.os == 'Windows'
         shell: pwsh
@@ -56,6 +60,8 @@ jobs:
           $env:AZDL_TEST_DEPOTKIT = Join-Path $pwd 'target/depotkit-runtime/depotkit.dll'
           cargo test -p azdl --lib bundled_windows_engine_loads_without_qt_and_validates_requests -- --ignored
           if ($LASTEXITCODE -ne 0) { throw 'Windows depot engine ABI check failed' }
+      - name: Test Rust workspace
+        run: cargo test --workspace
       - name: Lint Rust workspace
         run: cargo clippy --all-targets -- -D warnings
       - name: Build desktop binary
