@@ -19,7 +19,7 @@
   } from './api.js';
   import { applyTheme, onSystemThemeChange } from './theme.js';
   import { notifications, dismissNotification, notify, notifyError } from './notifications.js';
-  import { reconcileData, createRefreshQueue, progressTopology, applyProgressSnapshot } from './state.js';
+  import { reconcileData, createRefreshCoordinator, progressTopology, applyProgressSnapshot } from './state.js';
 
   const viewModules = new Map();
   const viewLoaders = {
@@ -161,7 +161,7 @@
     if (changed) void refreshState(false);
   }
 
-  const refreshProgress = createRefreshQueue(async () => {
+  const { refreshFull: refreshState, refreshProgress } = createRefreshCoordinator(fetchFullState, async () => {
     const generation = fullRefreshGeneration;
     try {
       const progress = await getProgress();
@@ -262,7 +262,7 @@
   }
 
   const seenTaskFailures = new Map();
-  const refreshState = createRefreshQueue(async (showErrors = true) => {
+  async function fetchFullState(showErrors = true) {
     try {
         fullRefreshGeneration++;
         const revision = progressRevision;
@@ -304,7 +304,7 @@
     } catch (e) {
       if (showErrors) console.error('Failed to get state:', e);
     }
-  });
+  }
 
   async function refreshRunners() {
     try {

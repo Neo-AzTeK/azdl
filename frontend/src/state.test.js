@@ -1,5 +1,72 @@
 import { describe, expect, it } from 'vitest';
-import { reconcileData, createRefreshQueue, progressTopology, applyProgressSnapshot } from './state.js';
+import { reconcileData, createRefreshQueue, createRefreshCoordinator, progressTopology, applyProgressSnapshot } from './state.js';
+
+describe('full and progress refresh coordination', () => {
+  it('gives a queued full request priority over redundant progress work', async () => {
+    const calls = [];
+    const coordinator = createRefreshCoordinator(async () => calls.push('full'), async () => calls.push('progress'));
+    await Promise.all([coordinator.refreshProgress(), coordinator.refreshFull(), coordinator.refreshProgress()]);
+    expect(calls).toEqual(['full']);
+  });
+
+  it('waits for an existing progress request before fetching full state', async () => {
+    let releaseProgress;
+    let startedProgress;
+    const started = new Promise((resolve) => startedProgress = resolve);
+    const calls = [];
+    const coordinator = createRefreshCoordinator(async () => calls.push('full'), async () => {
+      calls.push('progress-start');
+      startedProgress();
+      await new Promise((resolve) => releaseProgress = resolve);
+      calls.push('progress-end');
+    });
+    const progress = coordinator.refreshProgress();
+    await started;
+    const full = coordinator.refreshFull();
+    await Promise.resolve();
+    expect(calls).toEqual(['progress-start']);
+    releaseProgress();
+    await Promise.all([progress, full]);
+    expect(calls).toEqual(['progress-start', 'progress-end', 'full']);
+  });
+
+  it('allows fallback progress again after a failed full refresh', async () => {
+    let progressCalls = 0;
+    const coordinator = createRefreshCoordinator(async () => { throw new Error('unavailable'); }, async () => progressCalls++);
+    await expect(coordinator.refreshFull()).rejects.toThrow('unavailable');
+    await coordinator.refreshProgress();
+    expect(progressCalls).toBe(1);
+  });
+
+  it('suppresses redundant progress throughout a full-refresh burst, then resumes it', async () => {
+    let firstStarted;
+    let secondStarted;
+    const firstStart = new Promise((resolve) => firstStarted = resolve);
+    const secondStart = new Promise((resolve) => secondStarted = resolve);
+    const releases = [];
+    let fullCalls = 0;
+    let progressCalls = 0;
+    const coordinator = createRefreshCoordinator(() => new Promise((resolve) => {
+      releases.push(resolve);
+      if (++fullCalls === 1) firstStarted();
+      else secondStarted();
+    }), async () => progressCalls++);
+    const first = coordinator.refreshFull();
+    await firstStart;
+    const second = coordinator.refreshFull();
+    await coordinator.refreshProgress();
+    expect(progressCalls).toBe(0);
+    releases.shift()();
+    await secondStart;
+    await coordinator.refreshProgress();
+    expect(progressCalls).toBe(0);
+    releases.shift()();
+    await Promise.all([first, second]);
+    await coordinator.refreshProgress();
+    expect(progressCalls).toBe(1);
+    expect(fullCalls).toBe(2);
+  });
+});
 
 describe('lightweight progress', () => {
   it('updates transfers without replacing library or settings, and ignores bytes for full-refresh decisions', () => {

@@ -72,6 +72,32 @@ export function createRefreshQueue(refresh) {
   };
 }
 
+/** Prioritize full snapshots and serialize their overlapping progress-only fallback. */
+export function createRefreshCoordinator(fetchFull, fetchProgress) {
+  let fullRequests = 0;
+  let progressInFlight = null;
+  const fullQueue = createRefreshQueue(async (...args) => {
+    if (progressInFlight) await progressInFlight.catch(() => {});
+    await fetchFull(...args);
+  });
+  const progressQueue = createRefreshQueue(async (...args) => {
+    if (fullRequests > 0) return;
+    progressInFlight = Promise.resolve().then(() => fullRequests > 0 ? undefined : fetchProgress(...args));
+    try {
+      await progressInFlight;
+    } finally {
+      progressInFlight = null;
+    }
+  });
+  return {
+    refreshFull(...args) {
+      fullRequests++;
+      return fullQueue(...args).finally(() => fullRequests--);
+    },
+    refreshProgress: progressQueue,
+  };
+}
+
 /** State changes that require refreshing library metadata, excluding byte progress. */
 export function progressTopology(state) {
   return JSON.stringify({
