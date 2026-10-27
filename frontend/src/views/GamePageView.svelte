@@ -33,7 +33,6 @@
     calculateJobProgressPercent,
   } from '../transfers.js';
   import { getSteamStorageSize } from '../steam_storage.js';
-  import { detailGameIdentity as getDetailGameIdentity } from '../detail_tabs.js';
 
   let {
     game,
@@ -91,7 +90,6 @@
   let previousDlcTasks = new Set();
   let dlcContext = '';
   let displayedSelection = '';
-  let detailGameIdentity = '';
   let detailTabTouched = $state(false);
 
   async function refreshDlc(id) {
@@ -147,14 +145,6 @@
   });
 
   $effect(() => {
-    const currentGameIdentity = getDetailGameIdentity(game);
-    if (currentGameIdentity !== detailGameIdentity) {
-      detailGameIdentity = currentGameIdentity;
-      detailTabTouched = false;
-      displayedSelection = '';
-      activeDetailTab = 'overview';
-    }
-
     const selection = game?.selected_dlc_id ? `${game.id}:${game.selected_dlc_id}` : '';
     if (!selection) displayedSelection = '';
     if (
@@ -165,7 +155,7 @@
       activeDetailTab = 'dlc';
       const selectedDlcId = game.selected_dlc_id;
       tick().then(() => {
-        if (activeDetailTab !== 'dlc' || detailGameIdentity !== currentGameIdentity) return;
+        if (activeDetailTab !== 'dlc' || detailTabTouched) return;
         (document.getElementById(`dlc-${selectedDlcId}`)
           || document.getElementById('section-dlc'))?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       });

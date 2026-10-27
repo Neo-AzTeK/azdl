@@ -20,6 +20,7 @@
   import { applyTheme, onSystemThemeChange } from './theme.js';
   import { notifications, dismissNotification, notify, notifyError } from './notifications.js';
   import { reconcileData, createRefreshCoordinator, progressTopology, applyProgressSnapshot } from './state.js';
+  import { detailGameIdentity } from './detail_tabs.js';
 
   const viewModules = new Map();
   const viewLoaders = {
@@ -473,6 +474,7 @@
           </div>
         {:then module}
         {@const GamePageView = module.default}
+        {#key detailGameIdentity(viewedGame)}
         <GamePageView
           game={viewedGame}
           library={appState.library}
@@ -489,6 +491,7 @@
           onRefresh={refreshState}
           onShowToast={showToast}
         />
+        {/key}
         {:catch}
           <button class="md3-btn text" onclick={handleBackFromGame}>Back</button>
         {/await}
