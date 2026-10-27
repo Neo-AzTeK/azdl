@@ -231,7 +231,7 @@ pub fn ensure_steamidra_fix(game: &Game, data_dir: &Path) -> Result<bool> {
     Ok(true)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::patch::rollback_patch;
@@ -239,7 +239,7 @@ mod tests {
     use std::process::Command;
 
     #[test]
-    fn installs_bundled_fix_with_rollback_and_respects_setting() {
+    fn installs_linux_bundled_fix_with_rollback_and_respects_setting() {
         let root = std::env::temp_dir().join(format!(
             "azdl-bundled-fix-{}-{}",
             std::process::id(),
