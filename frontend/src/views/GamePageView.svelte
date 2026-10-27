@@ -90,6 +90,8 @@
   let previousDlcTasks = new Set();
   let dlcContext = '';
   let displayedSelection = '';
+  let detailContext = '';
+  let detailTabTouched = $state(false);
 
   async function refreshDlc(id) {
     const request = ++dlcRequest;
@@ -144,13 +146,28 @@
   });
 
   $effect(() => {
-    const selection = game?.selected_dlc_id ? `${installedGameId}:${game.selected_dlc_id}` : '';
+    const context = `${game?.id || ''}:${game?.selected_dlc_id || ''}`;
+    if (context !== detailContext) {
+      detailContext = context;
+      detailTabTouched = false;
+      displayedSelection = '';
+      activeDetailTab = 'overview';
+    }
+
+    const selection = game?.selected_dlc_id ? `${game.id}:${game.selected_dlc_id}` : '';
     if (!selection) displayedSelection = '';
-    if (selection && selection !== displayedSelection && isInstalled && dlcInfo.available.length > 0) {
+    if (
+      selection && selection !== displayedSelection && isInstalled &&
+      dlcInfo.available.length > 0 && !detailTabTouched
+    ) {
       displayedSelection = selection;
       activeDetailTab = 'dlc';
-      tick().then(() => (document.getElementById(`dlc-${game.selected_dlc_id}`)
-        || document.getElementById('section-dlc'))?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+      const selectedDlcId = game.selected_dlc_id;
+      tick().then(() => {
+        if (activeDetailTab !== 'dlc' || detailContext !== context) return;
+        (document.getElementById(`dlc-${selectedDlcId}`)
+          || document.getElementById('section-dlc'))?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
     }
   });
 
@@ -901,18 +918,17 @@
     }
   }
 
-  function navigateToDetailTab(tabName, targetId = 'game-detail-tabs') {
+  async function navigateToDetailTab(tabName, targetId = 'game-detail-tabs') {
     showMoreMenu = false;
+    detailTabTouched = true;
     activeDetailTab = tabName;
     if (tabName === 'patches' || targetId === 'section-diagnostics') {
       refreshDiagnostics();
     }
-    setTimeout(() => {
-      const el = document.getElementById(targetId) || document.getElementById('game-detail-tabs');
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }
-    }, 50);
+    await tick();
+    if (activeDetailTab !== tabName) return;
+    const el = document.getElementById(targetId) || document.getElementById('game-detail-tabs');
+    el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 </script>
 
@@ -1167,6 +1183,7 @@
           <div id="game-detail-tabs" class="game-tabs-container">
             <Tabs
               bind:tab={activeDetailTab}
+              onchange={() => { detailTabTouched = true; }}
               items={[
                 { name: 'Overview', value: 'overview' },
                 { name: `DLC${dlcInfo.available.length ? ` (${dlcInfo.available.length})` : ''}`, value: 'dlc' },
