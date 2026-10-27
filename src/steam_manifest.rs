@@ -688,7 +688,7 @@ mod tests {
         plain.extend([0, 0]);
         let padding = 16 - plain.len() % 16;
         plain.extend(std::iter::repeat_n(padding as u8, padding));
-        for chunk in plain.chunks_exact(16) {
+        for chunk in plain.as_chunks::<16>().0 {
             let mut block = GenericArray::clone_from_slice(chunk);
             for (byte, prior) in block.iter_mut().zip(previous) {
                 *byte ^= prior;
