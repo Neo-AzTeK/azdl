@@ -222,6 +222,8 @@ Existing local overlay and patch journals remain available for rollback and remo
 
 The library is stored in `~/.local/share/azdl/library.json` on Linux or `%APPDATA%/azdl/library.json` on Windows. `XDG_DATA_HOME` and `AZDL_DATA_DIR` can change the location.
 
+The game page keeps runtime dependency installation under **Launch & Runner**. Patch cards have one sliding switch each. They retain the last observed state and stay disabled until the command and state refresh finish; failed commands do not leave an optimistic switch enabled. The backend checks the resolved Wine or Proton prefix when reporting runtime status.
+
 ## Native depot engine and releases
 
 Both platforms bundle the same Qt-free depotkit source revision, `976f3b8fa50d09bea6e2c1c871827752e32cbb91`, plus the tracked UTF-8 and resume patches. Windows uses `depotkit.dll`; Linux uses `libdepotkit.so`. Keep the engine and its license notices beside both portable executables. Linux installed bundles may place it under `lib/azdl` relative to the executable directory. Engine lookup never scans launcher data or game directories.
