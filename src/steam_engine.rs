@@ -518,6 +518,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "contacts live Steam CM and CDN directory services"]
+    fn live_anonymous_session_lists_cdn_servers() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let fetcher = runtime.block_on(CdnFetcher::connect(AppId(480))).unwrap();
+        assert!(!fetcher.pool.is_empty());
+    }
+
+    #[test]
     fn depot_keys_must_be_full_hex() {
         assert_eq!(parse_depot_key(&"0a".repeat(32)).unwrap().0, [10; 32]);
         assert!(parse_depot_key("0a").is_err());

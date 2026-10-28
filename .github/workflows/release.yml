@@ -156,26 +156,6 @@ jobs:
       - name: Build CLI executable (azdl)
         run: cargo build --release -p azdl --target ${{ matrix.target }}
 
-      - name: Build Qt-free Linux depot engine
-        if: runner.os == 'Linux'
-        run: python3 scripts/build-depotkit.py
-
-      - name: Verify Linux depot engine ABI
-        if: runner.os == 'Linux'
-        run: AZDL_TEST_DEPOTKIT="$PWD/target/depotkit-runtime/libdepotkit.so" cargo test -p azdl --lib bundled_engine_loads_without_qt_and_validates_requests -- --ignored
-
-      - name: Build Qt-free Windows depot engine
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/build-depotkit.ps1
-      - name: Verify Windows depot engine without Qt
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $env:AZDL_TEST_DEPOTKIT = Join-Path $pwd 'target/depotkit-runtime/depotkit.dll'
-          cargo test -p azdl --lib bundled_engine_loads_without_qt_and_validates_requests -- --ignored
-          if ($LASTEXITCODE -ne 0) { throw 'Windows depot engine ABI check failed' }
-
       - name: Verify Windows DLC finalization and rollback
         if: runner.os == 'Windows'
         run: cargo test -p azdl --lib 'dlc::tests::'
@@ -231,7 +211,6 @@ jobs:
           GUI_BIN="target/${{ matrix.target }}/release/azdl-desktop"
           [ -f "$GUI_BIN" ] || GUI_BIN="target/release/azdl-desktop"
           cp "$GUI_BIN" staging/azdl/
-          cp target/depotkit-runtime/* staging/azdl/
 
           [ -f "azdl.desktop" ] && cp "azdl.desktop" staging/azdl/
           [ -d "src-tauri/icons" ] && cp -r "src-tauri/icons" staging/azdl/
@@ -277,8 +256,6 @@ jobs:
           $guiBin = "target\${{ matrix.target }}\release\azdl-desktop.exe"
           if (-not (Test-Path $guiBin)) { $guiBin = "target\release\azdl-desktop.exe" }
           Copy-Item $guiBin staging\azdl\
-
-          Copy-Item target\depotkit-runtime\* staging\azdl\
 
           Compress-Archive -Path "staging\azdl\*" -DestinationPath "dist-release\azdl-$tag-windows-x64-portable.zip"
 

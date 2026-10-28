@@ -1,6 +1,6 @@
 # Steam and archive DLC lifecycle
 
-Steam DLC discovery and content availability are separate. Public Store/appinfo data identifies parent games, DLC and depot relationships; it does not grant ownership or download permission. Content-source authorization is supplied externally. azdl retains the existing manifest relay and uses its bundled Qt-free depotkit engine for Steam CDN transfers, without a launcher extension or source selector.
+Steam DLC discovery and content availability are separate. Public Store/appinfo data identifies parent games, DLC and depot relationships; it does not grant ownership or download permission. Content-source authorization is supplied externally. azdl retains the existing manifest relay and transfers Steam CDN content in-process with the pure-Rust `steamroom` crates, without a launcher extension or source selector.
 
 ## Exact revisions
 
@@ -22,7 +22,7 @@ Schema migration version 1 preserves game IDs, files, artwork, launch settings, 
 
 ## Evidence and acceptance
 
-Offline coverage includes source-pinned base versus current-public DLC selection, shared content-App grouping, absent manifests, corrupt files/manifests, encrypted names, unsafe paths, symlinks, file collisions, shared ownership, rollback, interrupted transfers, cancellation and migration. Native Linux depotkit has passed a clean pinned build, CTest and a real loader/export/invalid-request smoke test. This is not live CDN installation acceptance.
+Offline coverage includes source-pinned base versus current-public DLC selection, shared content-App grouping, absent manifests, corrupt files/manifests, encrypted names, unsafe paths, symlinks, file collisions, shared ownership, rollback, interrupted transfers, cancellation and migration. The `steamroom` engine has passed an anonymous Steam session and CDN directory check plus offline pause/cancel tests. This is not live CDN installation acceptance.
 
 Optional live tests remain opt-in:
 

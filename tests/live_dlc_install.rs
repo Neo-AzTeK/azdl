@@ -20,7 +20,7 @@ fn regular_files(root: &Path) -> azdl::Result<BTreeMap<String, u64>> {
 }
 
 #[test]
-#[ignore = "requires a copied compatible base, bundled depotkit, and authorized live content access"]
+#[ignore = "requires a copied compatible base and authorized live content access"]
 fn live_dlc_install_and_remove_preserve_base() -> azdl::Result<()> {
     let library_dir = env::var("AZDL_LIVE_DLC_LIBRARY_DIR")?;
     let data_dir = fs::canonicalize(env::var("AZDL_LIVE_DLC_DATA_DIR")?)?;
