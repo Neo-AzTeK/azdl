@@ -255,6 +255,10 @@ fn run() -> Result<()> {
             let pid = start_background(&data, &args[2])?;
             println!("Resumed download job {} (worker {pid})", args[2]);
         }
+        Some("jobs") if args.len() == 3 && args[1] == "work" => {
+            let target = retry_job(&data, &args[2])?;
+            println!("Finished download job {} at {}", args[2], target.display());
+        }
         Some("jobs") if args.len() == 3 && args[1] == "pause" => {
             pause_job(&data, &args[2])?;
             println!("Pause requested for download job {}", args[2]);
