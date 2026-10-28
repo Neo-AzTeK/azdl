@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub use crate::steam_engine::find_depotkit_library;
 use crate::steam_engine::{DownloadProgressSpan, download_steam_depots_with_progress};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -555,7 +554,6 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         )?;
         crate::steam_manifest::check_additive_install(&manifests, &game.install_dir)?;
         crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
-        let lib_path = find_depotkit_library(data_dir)?;
         let mut job = load_job(data_dir, &job_id)?;
         job.total_bytes = (total_bytes > 0).then_some(total_bytes);
         save_job(data_dir, &job)?;
@@ -571,7 +569,6 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
                 total_bytes,
                 |group_dir, content_app_id, group, span| {
                     download_steam_depots_with_progress(
-                        &lib_path,
                         group_dir,
                         content_app_id,
                         group,
@@ -1002,7 +999,6 @@ pub fn install_steam_manifest_game_in(
         return Ok(InstallOutcome::Installed(id));
     }
     let _game_lock = crate::dlc::lock_game(data_dir, &game.id)?;
-    let lib_path = find_depotkit_library(data_dir)?;
     let job_id = job_id_for_target(&games_dir.join(&game.id));
     let _worker_lock = crate::jobs::acquire_lock(data_dir, &job_id)?;
 
@@ -1016,7 +1012,6 @@ pub fn install_steam_manifest_game_in(
         games_dir,
         game,
         app_id,
-        &lib_path,
         &download_dir,
     );
     finish_base_install(result, &download_dir)
@@ -1028,7 +1023,6 @@ fn install_steam_manifest_game_in_inner(
     games_dir: &Path,
     game: &CatalogGame,
     app_id: u32,
-    lib_path: &Path,
     download_dir: &Path,
 ) -> Result<InstallOutcome> {
     prepare_base_scratch(data_dir, download_dir)?;
@@ -1152,7 +1146,6 @@ fn install_steam_manifest_game_in_inner(
             if !reusable {
                 prune_unlisted_staged_files(&group_manifests, &group_dir)?;
                 download_steam_depots_with_progress(
-                    lib_path,
                     &group_dir,
                     *content_app_id,
                     group,

@@ -36,9 +36,8 @@ const MAX_CONCURRENT_METADATA_LOOKUPS: usize = 8;
 const MAX_METADATA_CACHE_ENTRIES: usize = 2048;
 const FIX_STATUS_CACHE_TTL: Duration = Duration::from_secs(15);
 
-fn steam_dlc_provider_status(data_dir: &Path, app_id: u32) -> Result<(), String> {
-    azdl::steam_access::manifest_url(app_id).map_err(|error| error.to_string())?;
-    azdl::steam_depot::find_depotkit_library(data_dir)
+fn steam_dlc_provider_status(app_id: u32) -> Result<(), String> {
+    azdl::steam_access::manifest_url(app_id)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -3461,7 +3460,7 @@ mod commands {
                     store_ids.as_ref().ok().map(Vec::as_slice),
                     candidate_dlc_id,
                 );
-                let provider_status = super::steam_dlc_provider_status(&data_dir, app_id);
+                let provider_status = super::steam_dlc_provider_status(app_id);
                 let base_receipt = azdl::steam_content::load_base_receipt(&data_dir, &game.id);
                 let needs_existing_check = provider_status.is_ok() && matches!(&base_receipt, Ok(None));
                 let receipt_error = base_receipt.is_err();
@@ -4074,21 +4073,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn steam_dlc_reports_missing_bundled_engine() {
-        let root = std::env::temp_dir().join(format!(
-            "azdl-dlc-provider-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let missing_engine = steam_dlc_provider_status(&root, 100).unwrap_err();
-        assert!(missing_engine.contains("engine"));
-        assert!(!root.exists());
-    }
 
     #[test]
     fn selected_catalog_dlc_survives_missing_parent_lists() {

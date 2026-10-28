@@ -941,7 +941,7 @@ mod tests {
     #[test]
     fn test_catalog_install_never_spawns_steam() {
         let root = std::env::temp_dir().join(format!("azdl-cat-no-steam-{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
+        fs::write(&root, b"not a directory").unwrap();
         let game = CatalogGame {
             id: "steam-999999".to_string(),
             title: "Standalone Test Game".to_string(),
@@ -963,11 +963,10 @@ mod tests {
             genres: Vec::new(),
         };
         let mut library = Library::default();
-        // A missing bundled engine must fail locally before contacting any content service.
+        // Unusable job storage must fail locally before contacting any content service.
         let res = install_game(&mut library, &root, &game);
         assert!(res.is_err());
-        let err_msg = res.unwrap_err().to_string();
-        assert!(err_msg.contains("Steam download engine"));
-        fs::remove_dir_all(root).unwrap();
+        assert!(library.games.is_empty());
+        fs::remove_file(root).unwrap();
     }
 }
