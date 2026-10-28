@@ -89,7 +89,7 @@ When extending or modifying `azdl`, you must strictly maintain the following sec
 **Commit often.** Make small, coherent commits after verification, staging only changes made for the current task.
 
 1. **Rust Edition:** Rust 2024.
-2. **Minimal Dependencies:** Keep `Cargo.toml` lean. Do not introduce heavy dependencies (e.g., Tokio, Reqwest, or full OpenSSL/Ring) unless explicitly justified and approved by the user. The approved exception is `steamroom`/`steamroom-client` (with their Tokio, Reqwest and rustls stack), confined to `steam_engine`; do not spread async or HTTP-client use beyond it. Otherwise use existing lightweight primitives (`serde`, `serde_json`, standard library).
+2. **Minimal Dependencies:** Keep `Cargo.toml` lean. Do not introduce heavy dependencies (e.g., Tokio, Reqwest, or full OpenSSL/Ring) unless explicitly justified and approved by the user. The approved exception is `steamroom`/`steamroom-client` with their Tokio, Reqwest and rustls stack: async code stays confined to `steam_engine`, and other modules reach HTTPS only through the shared blocking client in `http.rs` for small metadata requests (large or resumable file transfers keep their own download paths). Otherwise use existing lightweight primitives (`serde`, `serde_json`, standard library).
 3. **Idiomatic Error Handling:** Return `Result<T, Box<dyn std::error::Error>>` or specific module errors with descriptive error messages. Avoid `unwrap()` or `expect()` in production library paths.
 4. **Formatting & Clippy:**
    - Code must format cleanly via `cargo fmt`.

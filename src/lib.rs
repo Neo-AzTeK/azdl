@@ -19,6 +19,7 @@ pub mod error;
 pub mod fixes;
 pub mod game_controls;
 pub mod goldberg;
+mod http;
 pub mod installscript;
 pub mod jobs;
 pub mod migration;

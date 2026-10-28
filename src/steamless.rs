@@ -150,23 +150,13 @@ pub fn find_steamless_cli(data_dir: &Path) -> Option<PathBuf> {
 
 /// Download and extract the latest Steamless release from GitHub into `data_dir/steamless`.
 pub fn download_steamless(data_dir: &Path) -> Result<PathBuf> {
-    let output = clean_command("curl")
-        .args([
-            "--silent",
-            "--show-error",
-            "--fail",
-            "--location",
-            "--max-time",
-            "20",
-            "-H",
-            "User-Agent: azdl",
-            "https://api.github.com/repos/atom0s/Steamless/releases/latest",
-        ])
-        .output()?;
-    if !output.status.success() {
-        return Err("failed to fetch latest Steamless release from GitHub".into());
-    }
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let body = crate::http::get_bytes(
+        "https://api.github.com/repos/atom0s/Steamless/releases/latest",
+        std::time::Duration::from_secs(20),
+        4_194_304,
+    )
+    .map_err(|error| format!("failed to fetch latest Steamless release from GitHub: {error}"))?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
     let assets = json
         .get("assets")
         .and_then(|v| v.as_array())

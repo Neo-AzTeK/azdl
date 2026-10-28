@@ -1,6 +1,6 @@
 //! Steam DLC identity and depot relationships from public app metadata.
 
-use crate::{Result, clean_command};
+use crate::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -210,27 +210,9 @@ pub fn fetch_appinfo(app_id: u32) -> Result<SteamAppMetadata> {
         return Ok(metadata.clone());
     }
     let url = format!("https://api.steamcmd.net/v1/info/{app_id}");
-    let output = clean_command("curl")
-        .args([
-            "--fail",
-            "--location",
-            "--silent",
-            "--show-error",
-            "--max-time",
-            "10",
-            "--max-filesize",
-            "4000000",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-        ])
-        .arg(url)
-        .output()?;
-    if !output.status.success() {
-        return Err(format!("Steam appinfo lookup failed for App ID {app_id}").into());
-    }
-    let metadata = parse_appinfo(&output.stdout, app_id)?;
+    let body = crate::http::get_bytes(&url, Duration::from_secs(10), 4_000_000)
+        .map_err(|error| format!("Steam appinfo lookup failed for App ID {app_id}: {error}"))?;
+    let metadata = parse_appinfo(&body, app_id)?;
     if let Ok(mut cache) = cache.lock() {
         cache.insert(app_id, (Instant::now(), metadata.clone()));
     }
@@ -245,27 +227,9 @@ pub fn fetch_store_dlc_ids(app_id: u32) -> Result<Vec<u32>> {
     let url = format!(
         "https://store.steampowered.com/api/appdetails?appids={app_id}&filters=basic&l=english"
     );
-    let output = clean_command("curl")
-        .args([
-            "--fail",
-            "--location",
-            "--silent",
-            "--show-error",
-            "--max-time",
-            "8",
-            "--max-filesize",
-            "4000000",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-        ])
-        .arg(url)
-        .output()?;
-    if !output.status.success() {
-        return Err(format!("Steam Store DLC lookup failed for App ID {app_id}").into());
-    }
-    parse_store_dlc_ids(&output.stdout, app_id)
+    let body = crate::http::get_bytes(&url, Duration::from_secs(8), 4_000_000)
+        .map_err(|error| format!("Steam Store DLC lookup failed for App ID {app_id}: {error}"))?;
+    parse_store_dlc_ids(&body, app_id)
 }
 
 /// Parse Store DLC identities while preserving a missing response as an error.

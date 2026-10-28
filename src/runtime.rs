@@ -158,23 +158,13 @@ pub fn resolve_runner(configured: &Runner, executable: &Path, data_dir: &Path) -
 }
 
 pub fn fetch_latest_proton_ge_release() -> Result<(String, String)> {
-    let output = clean_command("curl")
-        .args([
-            "--silent",
-            "--show-error",
-            "--fail",
-            "--location",
-            "--max-time",
-            "15",
-            "-H",
-            "User-Agent: azdl",
-            "https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest",
-        ])
-        .output()?;
-    if !output.status.success() {
-        return Err("failed to fetch latest Proton-GE release from GitHub".into());
-    }
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let body = crate::http::get_bytes(
+        "https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest",
+        std::time::Duration::from_secs(15),
+        4_194_304,
+    )
+    .map_err(|error| format!("failed to fetch latest Proton-GE release from GitHub: {error}"))?;
+    let json: serde_json::Value = serde_json::from_slice(&body)?;
     let tag = json
         .get("tag_name")
         .and_then(|v| v.as_str())
