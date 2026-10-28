@@ -102,6 +102,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: rustfmt, clippy
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -144,6 +145,10 @@ jobs:
         working-directory: frontend
         run: npm ci --legacy-peer-deps
 
+      - name: Test frontend
+        working-directory: frontend
+        run: npm test
+
       - name: Build frontend assets
         working-directory: frontend
         run: npm run build
@@ -179,8 +184,14 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test -p azdl --lib 'steam_depot::tests::'
 
-      - name: Verify desktop size persistence and lightweight progress
-        run: cargo test -p azdl-desktop
+      - name: Verify complete workspace
+        run: cargo test
+
+      - name: Verify formatting
+        run: cargo fmt --all --check
+
+      - name: Lint complete workspace
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Build and bundle Desktop application (Tauri)
         uses: tauri-apps/tauri-action@v1

@@ -36,7 +36,16 @@
       "icons/icon.ico"
     ],
     "shortDescription": "Modern game launcher and runtime orchestrator",
-    "longDescription": "Modern plug-and-play game launcher and runtime orchestrator with automated catalog aggregation, prefix isolation, DRM stripping, and patch management.",
-    "category": "Game"
+    "longDescription": "Modern plug-and-play game launcher and runtime orchestrator with built-in Steam discovery, verified content installation, prefix isolation, and library management.",
+    "category": "Game",
+    "linux": {
+      "deb": {
+        "depends": [
+          "curl",
+          "libcurl4 | libcurl4t64",
+          "libstdc++6"
+        ]
+      }
+    }
   }
 }
