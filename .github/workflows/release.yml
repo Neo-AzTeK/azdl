@@ -89,20 +89,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      - name: Show build revision
+        run: git rev-parse HEAD
+
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: "npm"
-          cache-dependency-path: "frontend/package-lock.json"
+          package-manager-cache: false
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Setup Rust cache
-        uses: swatinem/rust-cache@v2
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
