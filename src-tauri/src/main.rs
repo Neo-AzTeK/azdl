@@ -2602,8 +2602,14 @@ mod commands {
                 if azdl::jobs::load_job(data_dir, &id).is_ok() {
                     if let Some(count) = azdl::dlc::resume_catalog_dlc_job(data_dir, &id)? {
                         dlc_installed_files = Some(count);
-                    } else {
-                        azdl::jobs::retry_job(data_dir, &id)?;
+                    } else if let Err(error) = azdl::jobs::retry_job(data_dir, &id) {
+                        if error
+                            .downcast_ref::<azdl::jobs::TransferStopped>()
+                            .is_some()
+                        {
+                            return Ok(json!({ "success": true, "stopped": true }));
+                        }
+                        return Err(error.into());
                     }
                 } else if azdl::torrent::load_torrent_job(data_dir, &id).is_ok() {
                     let mut library = load_library(data_dir)?;
