@@ -148,6 +148,7 @@ fn library_file(root: &Path, manifest: &PluginManifest) -> Result<PathBuf> {
     Err("plugin library file is missing".into())
 }
 
+#[cfg(test)]
 /// Resolve the library declared by one installed plugin, without searching other providers.
 pub(crate) fn installed_library_file(data_dir: &Path, id: &str) -> Result<PathBuf> {
     validate_id(id)?;

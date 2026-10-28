@@ -35,6 +35,7 @@ pub mod steam;
 pub mod steam_content;
 pub mod steam_depot;
 pub mod steam_discovery;
+mod steam_engine;
 pub mod steam_manifest;
 pub mod steam_metadata;
 pub mod steam_shortcuts;

@@ -50,7 +50,7 @@ fn steam_dlc_provider_status(
     }
     azdl::plugins::manifest_download_url_for_plugin(data_dir, source_id, app_id)
         .map_err(|error| error.to_string())?;
-    azdl::steam_depot::find_depotkit_library_for(data_dir, source_id)
+    azdl::steam_depot::find_depotkit_library(data_dir)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }

@@ -50,3 +50,5 @@ int depotkit_download(const Request *request, void (*progress)(const Progress *,
     progress(&report, user);
     return cancelled ? 7 : 0;
 }
+
+const char *depotkit_strerror(int code) { (void)code; return "fixture error"; }
