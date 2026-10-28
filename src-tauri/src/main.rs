@@ -1495,7 +1495,7 @@ mod commands {
     }
 
     pub fn handle_search_steam_games(state: &AppState, query: String) -> Result<Value, String> {
-        let library = load_library(&state.data_dir).map_err(|e| e.to_string())?;
+        let library = load_library_snapshot(&state.data_dir, &state.library_cache)?;
         let discovered =
             azdl::steam_discovery::discover_games(&query).map_err(|e| e.to_string())?;
         let mut games = steam_games_to_values(&library, discovered);
@@ -1603,7 +1603,7 @@ mod commands {
     }
 
     pub fn handle_diagnose(state: &AppState, id: String) -> Result<Value, String> {
-        let library = load_library(&state.data_dir).map_err(|e| e.to_string())?;
+        let library = load_library_snapshot(&state.data_dir, &state.library_cache)?;
         let game = library
             .games
             .get(&id)
@@ -1621,7 +1621,7 @@ mod commands {
     }
 
     pub fn handle_discover_exes(state: &AppState, id: String) -> Result<Value, String> {
-        let library = load_library(&state.data_dir).map_err(|e| e.to_string())?;
+        let library = load_library_snapshot(&state.data_dir, &state.library_cache)?;
         if let Some(game) = library.games.get(&id) {
             let candidates =
                 discover_executables(&game.install_dir, &game.title).map_err(|e| e.to_string())?;
@@ -2124,7 +2124,7 @@ mod commands {
             } => {
                 let content_lock =
                     azdl::dlc::lock_game(data_dir, &id).map_err(|error| error.to_string())?;
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2218,7 +2218,7 @@ mod commands {
                 Ok(json!({ "success": true, "started": true, "task_id": task_id }))
             }
             Action::DlcRemove { id, dlc_id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2229,7 +2229,7 @@ mod commands {
                 Ok(json!({ "success": true }))
             }
             Action::DlcRecover { id, dlc_id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2378,7 +2378,7 @@ mod commands {
                 Ok(json!({ "success": true, "removed": id }))
             }
             Action::ShortcutCreate { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2394,7 +2394,7 @@ mod commands {
                 Ok(json!({ "success": true }))
             }
             Action::ShortcutRemove { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2409,7 +2409,7 @@ mod commands {
                 Ok(json!({ "success": true }))
             }
             Action::SteamShortcutCreate { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2418,7 +2418,7 @@ mod commands {
                 Ok(json!({ "success": true }))
             }
             Action::SteamShortcutRemove { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2427,7 +2427,7 @@ mod commands {
                 Ok(json!({ "success": true }))
             }
             Action::OverlayToggle { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2440,7 +2440,7 @@ mod commands {
                 Ok(json!({ "success": true, "enabled": !status.enabled }))
             }
             Action::SteamstubUnpack { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2458,7 +2458,7 @@ mod commands {
                 }))
             }
             Action::SteamstubRollback { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2475,7 +2475,7 @@ mod commands {
                 }))
             }
             Action::EaHeal { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2485,7 +2485,7 @@ mod commands {
                 Ok(json!({ "success": true, "message": msg }))
             }
             Action::EaRollback { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2495,7 +2495,7 @@ mod commands {
                 Ok(json!({ "success": true, "message": msg }))
             }
             Action::DlcLicensePatch { id, dlc_ids } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2517,7 +2517,7 @@ mod commands {
                 }))
             }
             Action::DlcLicenseRollback { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2531,7 +2531,7 @@ mod commands {
                 }))
             }
             Action::GoldbergSync { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2545,7 +2545,7 @@ mod commands {
                 }))
             }
             Action::GoldbergRollback { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2559,7 +2559,7 @@ mod commands {
                 }))
             }
             Action::InstallVcredist { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2574,7 +2574,7 @@ mod commands {
                 Ok(json!({ "success": true, "installed": ok }))
             }
             Action::InstallDirectx { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2919,7 +2919,7 @@ mod commands {
                 }))
             }
             Action::PatchToggle { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -2940,7 +2940,7 @@ mod commands {
                 }
             }
             Action::PatchRollback { id } => {
-                let library = load_library(data_dir).map_err(|e| e.to_string())?;
+                let library = load_library_snapshot(data_dir, &state.library_cache)?;
                 let game = library
                     .games
                     .get(&id)
@@ -3385,7 +3385,7 @@ mod commands {
     }
 
     pub fn handle_get_game_controls(state: &AppState, id: &str) -> Result<Value, String> {
-        let library = load_library(&state.data_dir).map_err(|error| error.to_string())?;
+        let library = load_library_snapshot(&state.data_dir, &state.library_cache)?;
         let game = library.games.get(id).ok_or("Game is not installed")?;
         let controls = azdl::game_controls::inspect(game, &state.data_dir)
             .map_err(|error| error.to_string())?;
