@@ -57,6 +57,17 @@ fn check_depotkit_library(path: &Path) -> Result<()> {
                 .get::<unsafe extern "C" fn()>(name)
                 .map_err(|error| format!("Invalid Steam engine {}: {error}", path.display()))?;
         }
+        let version = library
+            .get::<unsafe extern "C" fn() -> *const c_char>(b"depotkit_version")
+            .map_err(|error| format!("Invalid Steam engine {}: {error}", path.display()))?;
+        let pointer = version();
+        if pointer.is_null() || CStr::from_ptr(pointer).to_bytes() != b"0.2.0" {
+            return Err(format!(
+                "Unsupported depotkit ABI in {}. Install the pinned azdl runtime package",
+                path.display()
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -119,7 +130,13 @@ extern "C" fn depotkit_progress_cb(prog: *const DepotkitProgress, user_data: *mu
                 .data_dir
                 .join("jobs")
                 .join(format!("{}.cancel", ctx.job_id));
-            let cancel = cancel_marker.exists() && ctx.cancel_fn.is_some() && ctx.ctrl != 0;
+            let pause_marker = ctx
+                .data_dir
+                .join("jobs")
+                .join(format!("{}.pause", ctx.job_id));
+            let cancel = (cancel_marker.exists() || pause_marker.exists())
+                && ctx.cancel_fn.is_some()
+                && ctx.ctrl != 0;
             let cancel_fn = ctx.cancel_fn;
             let ctrl = ctx.ctrl;
 
@@ -233,6 +250,10 @@ pub(crate) fn download_steam_depots_with_progress(
         std::ptr::null_mut()
     };
 
+    if ctrl.is_null() {
+        return Err("Steam download engine could not allocate cancellation control".into());
+    }
+
     let cancel_fn_ptr = cancel_ctrl.as_ref().map(|s| **s);
     let ctx = Mutex::new(ProgressContext {
         data_dir,
@@ -261,6 +282,18 @@ pub(crate) fn download_steam_depots_with_progress(
         unsafe { destroy(ctrl) };
     }
 
+    let pause_marker = data_dir.join("jobs").join(format!("{job_id}.pause"));
+    let cancel_marker = data_dir.join("jobs").join(format!("{job_id}.cancel"));
+    if pause_marker.exists() && !cancel_marker.exists() {
+        if let Ok(mut job) = load_job(data_dir, job_id) {
+            job.status = JobStatus::Paused;
+            job.pid = None;
+            job.install_state = Some(crate::jobs::InstallState::Pending);
+            save_job(data_dir, &job)?;
+        }
+        crate::jobs::clear_pause(data_dir, job_id)?;
+        return Err(crate::jobs::TransferStopped::Paused(job_id.into()).into());
+    }
     let cancel_marker = data_dir.join("jobs").join(format!("{job_id}.cancel"));
     if cancel_marker.exists() {
         if let Ok(mut job) = load_job(data_dir, job_id) {
@@ -268,7 +301,7 @@ pub(crate) fn download_steam_depots_with_progress(
             let _ = save_job(data_dir, &job);
         }
         let _ = clear_cancel(data_dir, job_id);
-        return Err("Download cancelled by user".into());
+        return Err(crate::jobs::TransferStopped::Cancelled(Some(job_id.into())).into());
     }
 
     if res != 0 {
@@ -397,8 +430,15 @@ mod tests {
             b"cancel",
         )
         .unwrap();
-        let error =
-            download_steam_depots(&engine, &root, 480, &[depot], &root, job_id).unwrap_err();
+        let error = download_steam_depots(
+            &engine,
+            &root,
+            480,
+            std::slice::from_ref(&depot),
+            &root,
+            job_id,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("cancelled"));
         assert_eq!(
             load_job(&root, job_id).unwrap().status,
@@ -409,7 +449,36 @@ mod tests {
         }
         .unwrap();
         assert_eq!(unsafe { cancel_count() }, 1);
+        fs::write(root.join("jobs").join(format!("{job_id}.pause")), b"pause").unwrap();
+        let error =
+            download_steam_depots(&engine, &root, 480, &[depot], &root, job_id).unwrap_err();
+        assert!(
+            matches!(error.downcast_ref::<crate::jobs::TransferStopped>(), Some(crate::jobs::TransferStopped::Paused(id)) if id == job_id)
+        );
+        assert_eq!(load_job(&root, job_id).unwrap().status, JobStatus::Paused);
+        assert_eq!(unsafe { cancel_count() }, 2);
         drop(inspector);
+        let unsupported = root.join("unsupported-engine.so");
+        assert!(
+            Command::new("cc")
+                .args([
+                    "-shared",
+                    "-fPIC",
+                    "-DAZDL_DEPOTKIT_VERSION=\"9.9.9\"",
+                    "-o"
+                ])
+                .arg(&unsupported)
+                .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/depotkit_abi.c"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            check_depotkit_library(&unsupported)
+                .unwrap_err()
+                .to_string()
+                .contains("Unsupported depotkit ABI")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

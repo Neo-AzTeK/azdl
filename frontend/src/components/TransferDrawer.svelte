@@ -354,12 +354,12 @@
 
               <div class="job-actions">
                 {#if isJobActive(job.status)}
-                  {#if job.kind?.toLowerCase() !== 'dlc'}
+                  {#if job.kind?.toLowerCase() !== 'dlc' && job.install_state?.toLowerCase() !== 'installing'}
                     <button class="action-btn" onclick={() => handleJobAction('pause', job.id)}>
                       Pause
                     </button>
                   {/if}
-                  {#if job.kind?.toLowerCase() !== 'dlc' || job.install_state?.toLowerCase() !== 'installing'}
+                  {#if job.install_state?.toLowerCase() !== 'installing'}
                     <button class="action-btn danger" onclick={() => handleJobAction('cancel', job.id)}>
                       Cancel
                     </button>
@@ -374,6 +374,9 @@
                     Cancel
                   </button>
                 {:else}
+                  {#if job.kind?.toLowerCase() !== 'dlc' && ['failed', 'interrupted'].includes(job.status?.toLowerCase())}
+                    <button class="action-btn primary" onclick={() => handleJobAction('resume', job.id)}>Retry</button>
+                  {/if}
                   <button class="action-btn outlined" onclick={() => handleJobAction('clear', job.id)}>
                     Clear
                   </button>

@@ -51,6 +51,7 @@ pub(crate) fn validate_manifest_archive(path: &Path, app_id: u32) -> Result<()> 
     Ok(())
 }
 
+/// Fetch and safely extract a manifest bundle from the configured built-in source.
 pub fn fetch_manifest_bundle(root: &Path, app_id: u32) -> Result<PathBuf> {
     fs::create_dir_all(root)?;
     let archive = root.join(format!("{app_id}.zip"));

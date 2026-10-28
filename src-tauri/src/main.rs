@@ -2886,7 +2886,9 @@ mod commands {
                                         "Background install failed for {}: {e}",
                                         cat_game_clone.title
                                     );
-                                    failure = Some(e.to_string());
+                                    if e.downcast_ref::<azdl::jobs::TransferStopped>().is_none() {
+                                        failure = Some(e.to_string());
+                                    }
                                 }
                             }
                             finish_install_task(&state_clone, &task_id_clone, failure);
@@ -3834,6 +3836,9 @@ fn run_worker_install(
             std::process::exit(0);
         }
         Err(e) => {
+            if e.downcast_ref::<azdl::jobs::TransferStopped>().is_some() {
+                std::process::exit(0);
+            }
             eprintln!("Worker error: install failed for {}: {e}", cat_game.title);
             std::process::exit(1);
         }

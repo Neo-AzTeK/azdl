@@ -52,3 +52,8 @@ int depotkit_download(const Request *request, void (*progress)(const Progress *,
 }
 
 const char *depotkit_strerror(int code) { (void)code; return "fixture error"; }
+
+#ifndef AZDL_DEPOTKIT_VERSION
+#define AZDL_DEPOTKIT_VERSION "0.2.0"
+#endif
+const char *depotkit_version(void) { return AZDL_DEPOTKIT_VERSION; }

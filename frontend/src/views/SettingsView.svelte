@@ -513,7 +513,6 @@
         </div>
       </SectionCard>
 
-    <!-- 3. PLUGINS & SOURCES (STORE & INSTALLED ONLY) -->
     {:else if activeCategory === 'appearance'}
       <div class="panel-header">
         <h2>Material You Personalization</h2>

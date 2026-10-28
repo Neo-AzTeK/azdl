@@ -6,7 +6,7 @@ use crate::jobs::{
 use crate::steam::{import_steam, scan_steam, steam_root};
 use crate::steam_access::fetch_manifest_bundle as fetch_provider_bundle;
 use crate::steam_metadata::{ResolvedDepotSource, SteamAppMetadata};
-use crate::{Game, Library, Result, clean_command, discovery, validate_id};
+use crate::{Game, Library, Result, discovery, validate_id};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -540,7 +540,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
                     &root,
                     &metadata,
                     crate::steam_metadata::fetch_appinfo,
-                    |bundle_root, app_id| fetch_provider_bundle(bundle_root, app_id),
+                    fetch_provider_bundle,
                 )?;
                 crate::steam_content::save_base_receipt(data_dir, &verified)?;
                 verified
@@ -551,7 +551,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             &root.join("base-verification-provider"),
             &metadata,
             crate::steam_metadata::fetch_appinfo,
-            |bundle_root, app_id| fetch_provider_bundle(bundle_root, app_id),
+            fetch_provider_bundle,
         )?;
         crate::steam_manifest::check_additive_install(&manifests, &game.install_dir)?;
         crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
@@ -692,8 +692,11 @@ pub fn prune_unlisted_staged_files(
     manifests: &[crate::steam_manifest::DepotManifest],
     staged_dir: &Path,
 ) -> Result<()> {
-    if !staged_dir.is_dir() {
-        return Ok(());
+    match fs::symlink_metadata(staged_dir) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+        Ok(_) => return Err("Depot staging root is not a regular directory".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
     }
     let allowed = crate::steam_manifest::expected_files(manifests)?;
     let root = fs::canonicalize(staged_dir)?;
@@ -887,7 +890,17 @@ fn save_new_base_receipt_with(
 }
 
 fn finish_base_install<T>(result: Result<T>, scratch: &Path) -> Result<T> {
-    let cleanup = remove_staging_dir(scratch);
+    let cancelled = result.as_ref().err().is_some_and(|error| {
+        matches!(
+            error.downcast_ref::<crate::jobs::TransferStopped>(),
+            Some(crate::jobs::TransferStopped::Cancelled(_))
+        )
+    });
+    let cleanup = if result.is_ok() || cancelled {
+        remove_staging_dir(scratch)
+    } else {
+        Ok(())
+    };
     match (result, cleanup) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), Ok(())) => Err(error),
@@ -906,8 +919,53 @@ fn prepare_base_scratch(data_dir: &Path, scratch: &Path) -> Result<()> {
         return Err("Download scratch root is a symbolic link".into());
     }
     fs::create_dir_all(&root)?;
-    remove_staging_dir(scratch)?;
-    fs::create_dir(scratch)?;
+    match fs::symlink_metadata(scratch) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {}
+        Ok(_) => return Err("Steam download scratch is not a regular directory".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(scratch)?,
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+/// Pin a complete revision set before allowing any base transfer cache to be reused.
+fn pin_base_download(root: &Path, depots: &[DepotInfo]) -> Result<()> {
+    let mut revisions = depots
+        .iter()
+        .map(|depot| {
+            Ok((
+                depot.depot_id,
+                depot.manifest_id,
+                crate::sha256::file_sha256(&depot.manifest_path)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    revisions.sort();
+    let target = root.join("base.resume.json");
+    match fs::symlink_metadata(&target) {
+        Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
+            let previous: Vec<(u32, u64, String)> = serde_json::from_slice(&fs::read(&target)?)?;
+            if previous != revisions {
+                return Err("Steam base revision changed since this download started. Cancel the old transfer before starting a different revision".into());
+            }
+        }
+        Ok(_) => return Err("Steam base revision journal is not a regular file".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if fs::read_dir(root)?.any(|entry| {
+                entry.is_ok_and(|entry| entry.file_name().to_string_lossy().starts_with("group-"))
+            }) {
+                return Err("Cannot resume unpinned Steam depot groups. Cancel the old transfer and start again".into());
+            }
+            let mut output = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)?;
+            use std::io::Write;
+            output.write_all(&serde_json::to_vec(&revisions)?)?;
+            output.sync_all()?;
+        }
+        Err(error) => return Err(error.into()),
+    }
     Ok(())
 }
 
@@ -945,6 +1003,8 @@ pub fn install_steam_manifest_game_in(
     }
     let _game_lock = crate::dlc::lock_game(data_dir, &game.id)?;
     let lib_path = find_depotkit_library(data_dir)?;
+    let job_id = job_id_for_target(&games_dir.join(&game.id));
+    let _worker_lock = crate::jobs::acquire_lock(data_dir, &job_id)?;
 
     // 2. Prepare downloads directory
     let download_dir = data_dir
@@ -974,19 +1034,6 @@ fn install_steam_manifest_game_in_inner(
     prepare_base_scratch(data_dir, download_dir)?;
 
     let unpack_dir = fetch_provider_bundle(download_dir, app_id)?;
-
-    let depot_cache = download_dir.join("depotcache");
-    fs::create_dir_all(&depot_cache)?;
-    for entry in fs::read_dir(&unpack_dir)? {
-        let entry = entry?;
-        if entry
-            .path()
-            .extension()
-            .is_some_and(|ext| ext == "manifest")
-        {
-            fs::copy(entry.path(), depot_cache.join(entry.file_name()))?;
-        }
-    }
 
     // 4. Parse depots from Lua manifests
     let appinfo = crate::steam_metadata::fetch_appinfo(app_id)?;
@@ -1033,6 +1080,8 @@ fn install_steam_manifest_game_in_inner(
                 .ok_or("Base game size exceeds u64")
         })?;
 
+    pin_base_download(download_dir, &downloads.depots)?;
+
     // 6. Target installation directory
     fs::create_dir_all(games_dir)?;
     let target_dir = games_dir.join(&game.id);
@@ -1072,7 +1121,7 @@ fn install_steam_manifest_game_in_inner(
             title: game.title.clone(),
             kind: InstallKind::Archive,
         }),
-        install_state: Some(InstallState::Installing),
+        install_state: Some(InstallState::Pending),
         install_error: None,
         progress_bytes: Some(0),
         total_bytes: (total_bytes > 0).then_some(total_bytes),
@@ -1101,6 +1150,7 @@ fn install_steam_manifest_game_in_inner(
                 .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
                 && crate::steam_manifest::verify_staged_exact(&group_manifests, &group_dir).is_ok();
             if !reusable {
+                prune_unlisted_staged_files(&group_manifests, &group_dir)?;
                 download_steam_depots_with_progress(
                     lib_path,
                     &group_dir,
@@ -1114,11 +1164,10 @@ fn install_steam_manifest_game_in_inner(
                     },
                 )?;
                 normalize_windows_paths(&group_dir)?;
-                let _ = prune_unlisted_staged_files(&group_manifests, &group_dir);
+                prune_unlisted_staged_files(&group_manifests, &group_dir)?;
             }
             crate::steam_manifest::verify_staged_exact(&group_manifests, &group_dir)?;
             merge_verified_payload(&group_dir, &base_stage)?;
-            remove_staging_dir(&group_dir)?;
             let group_bytes = group_manifests
                 .iter()
                 .flat_map(|manifest| &manifest.files)
@@ -1135,10 +1184,35 @@ fn install_steam_manifest_game_in_inner(
                 Some(progress.progress_bytes.unwrap_or(0).max(completed_bytes));
             save_job(data_dir, &progress)?;
         }
+        let mut committing = load_job(data_dir, &job_id)?;
+        if data_dir
+            .join("jobs")
+            .join(format!("{job_id}.cancel"))
+            .exists()
+        {
+            committing.status = JobStatus::Cancelled;
+            save_job(data_dir, &committing)?;
+            crate::jobs::clear_cancel(data_dir, &job_id)?;
+            return Err(crate::jobs::TransferStopped::Cancelled(Some(job_id.clone())).into());
+        }
+        if data_dir
+            .join("jobs")
+            .join(format!("{job_id}.pause"))
+            .exists()
+        {
+            committing.status = JobStatus::Paused;
+            committing.pid = None;
+            save_job(data_dir, &committing)?;
+            crate::jobs::clear_pause(data_dir, &job_id)?;
+            return Err(crate::jobs::TransferStopped::Paused(job_id.clone()).into());
+        }
+        committing.install_state = Some(InstallState::Installing);
+        save_job(data_dir, &committing)?;
         publish_verified_base(&base_stage, &target_dir, &manifests)?;
         Ok(())
     })();
     if dl_result.is_err() {
+        let _ = remove_staging_dir(&base_stage);
         let is_cancelled =
             load_job(data_dir, &job_id).is_ok_and(|j| j.status == JobStatus::Cancelled);
         if is_cancelled {
@@ -1406,7 +1480,7 @@ mod tests {
     }
 
     #[test]
-    fn base_install_removes_scratch_on_success_and_failure() {
+    fn base_install_cleans_success_but_preserves_failed_transfer_cache() {
         let root = std::env::temp_dir().join(format!(
             "azdl-base-scratch-{}-{}",
             std::process::id(),
@@ -1425,13 +1499,13 @@ mod tests {
                 finish_base_install(Err("download failed".into()), &scratch)
             };
             assert_eq!(result.is_ok(), success);
-            assert!(!scratch.exists());
+            assert_eq!(scratch.exists(), !success);
         }
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn base_install_discards_interrupted_scratch_before_retry() {
+    fn base_install_preserves_interrupted_scratch_before_retry() {
         let root = std::env::temp_dir().join(format!(
             "azdl-base-retry-{}-{}",
             std::process::id(),
@@ -1445,8 +1519,48 @@ mod tests {
         fs::write(scratch.join("group-100/partial.bin"), b"stale").unwrap();
         prepare_base_scratch(&root, &scratch).unwrap();
         assert!(scratch.is_dir());
-        assert!(fs::read_dir(&scratch).unwrap().next().is_none());
+        assert_eq!(
+            fs::read(scratch.join("group-100/partial.bin")).unwrap(),
+            b"stale"
+        );
         finish_base_install(Ok(()), &scratch).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn base_resume_pins_manifest_bytes_and_rejects_revision_substitution() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-base-pin-{}-{}",
+            std::process::id(),
+            now().unwrap()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let manifest = root.join("101_42.manifest");
+        fs::write(&manifest, b"manifest").unwrap();
+        let mut depots = vec![DepotInfo {
+            depot_id: 101,
+            manifest_id: 42,
+            manifest_path: manifest.clone(),
+            depot_key: "key".into(),
+        }];
+        pin_base_download(&root, &depots).unwrap();
+        fs::create_dir(root.join("group-100")).unwrap();
+        fs::write(root.join("group-100/chunk.part"), b"partial").unwrap();
+        pin_base_download(&root, &depots).unwrap();
+        depots[0].manifest_id = 43;
+        assert!(
+            pin_base_download(&root, &depots)
+                .unwrap_err()
+                .to_string()
+                .contains("revision changed")
+        );
+        depots[0].manifest_id = 42;
+        fs::write(&manifest, b"changed manifest bytes").unwrap();
+        assert!(pin_base_download(&root, &depots).is_err());
+        assert_eq!(
+            fs::read(root.join("group-100/chunk.part")).unwrap(),
+            b"partial"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

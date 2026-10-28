@@ -423,7 +423,7 @@ fn dlc_worker_active(data_dir: &Path, id: &str) -> Result<bool> {
     }
 }
 
-struct JobLock(PathBuf);
+pub(crate) struct JobLock(PathBuf);
 
 impl Drop for JobLock {
     fn drop(&mut self) {
@@ -431,7 +431,7 @@ impl Drop for JobLock {
     }
 }
 
-fn acquire_lock(data_dir: &Path, id: &str) -> Result<JobLock> {
+pub(crate) fn acquire_lock(data_dir: &Path, id: &str) -> Result<JobLock> {
     let lock = job_path(data_dir, id)?.with_extension("lock");
     fs::create_dir_all(job_dir(data_dir))?;
     for _ in 0..2 {
@@ -499,7 +499,7 @@ fn remove_partial(job: &DownloadJob) -> Result<()> {
     }
 }
 
-fn clear_pause(data_dir: &Path, id: &str) -> Result<()> {
+pub(crate) fn clear_pause(data_dir: &Path, id: &str) -> Result<()> {
     match fs::remove_file(pause_path(data_dir, id)?) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -800,6 +800,9 @@ pub fn recorded_download_with_sha256(
 }
 
 pub fn retry_job(data_dir: &Path, id: &str) -> Result<PathBuf> {
+    if load_job(data_dir, id)?.url.starts_with("steam://") {
+        return crate::steam_install::resume_job(data_dir, id);
+    }
     resume_job(data_dir, id)
 }
 
@@ -1103,6 +1106,9 @@ pub fn start_background(data_dir: &Path, id: &str) -> Result<u32> {
 
 pub fn pause_job(data_dir: &Path, id: &str) -> Result<()> {
     let mut job = load_job(data_dir, id)?;
+    if job.url.starts_with("steam://") && job.install_state == Some(InstallState::Installing) {
+        return Err("Wait for the atomic Steam installation commit to finish".into());
+    }
     if job.kind == JobKind::Dlc {
         return Err(
             "DLC depot jobs cannot be paused; cancel and restart from the game page".into(),
@@ -1123,6 +1129,9 @@ pub fn pause_job(data_dir: &Path, id: &str) -> Result<()> {
 
 pub fn cancel_job(data_dir: &Path, id: &str) -> Result<()> {
     let job = load_job(data_dir, id)?;
+    if job.url.starts_with("steam://") && job.install_state == Some(InstallState::Installing) {
+        return Err("Wait for the atomic Steam installation commit to finish".into());
+    }
     if job.kind == JobKind::Dlc {
         if !dlc_worker_active(data_dir, id)? {
             return Err("DLC download was interrupted; restart it from the game page".into());
@@ -1176,6 +1185,13 @@ pub fn cancel_job(data_dir: &Path, id: &str) -> Result<()> {
         return Err("download job completed before cancellation".into());
     }
     remove_partial(&job)?;
+    if job
+        .url
+        .strip_prefix("steam://")
+        .is_some_and(|id| id.parse::<u32>().is_ok())
+    {
+        crate::steam_install::cleanup_cancelled_download(data_dir, &job)?;
+    }
     job.status = JobStatus::Cancelled;
     job.pid = None;
     job.error = None;

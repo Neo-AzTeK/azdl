@@ -267,9 +267,11 @@ pub fn remove_game_with_guard(
     }
 
     // Remove dedicated Wine/Proton prefix if present
-    let prefix = data_dir.join("prefixes").join(id);
-    if prefix.is_dir() {
-        let _ = fs::remove_dir_all(&prefix);
+    for root in ["prefixes", "compatdata"] {
+        let prefix = data_dir.join(root).join(id);
+        if prefix.is_dir() {
+            let _ = fs::remove_dir_all(&prefix);
+        }
     }
 
     // Clean up shortcuts
@@ -285,11 +287,16 @@ pub fn remove_game_with_guard(
     let _ = fs::remove_dir_all(data_dir.join("dlc-downloads").join(id));
     let _ = fs::remove_dir_all(data_dir.join("dlc-observations").join(id));
     let _ = fs::remove_file(data_dir.join("content-receipts").join(format!("{id}.json")));
+    let _ = fs::remove_file(data_dir.join("content-sources").join(format!("{id}.json")));
 
     // Clean up any jobs associated with this game
     if let Ok(jobs) = jobs::list_jobs(data_dir) {
         for job in jobs {
-            if job.install.as_ref().is_some_and(|plan| plan.game_id == id) {
+            if job.install.as_ref().is_some_and(|plan| plan.game_id == id)
+                || job
+                    .target
+                    .starts_with(data_dir.join("dlc-downloads").join(id))
+            {
                 let _ = jobs::clear_job(data_dir, &job.id);
             }
         }
@@ -1204,6 +1211,13 @@ mod tests {
         fs::create_dir_all(&prefix_dir).unwrap();
         fs::write(prefix_dir.join("system.reg"), b"registry").unwrap();
 
+        let compat_dir = root.join("compatdata/removable-game/pfx");
+        fs::create_dir_all(&compat_dir).unwrap();
+        fs::write(compat_dir.join("user.reg"), b"proton registry").unwrap();
+        let source_record = root.join("content-sources/removable-game.json");
+        fs::create_dir_all(source_record.parent().unwrap()).unwrap();
+        fs::write(&source_record, b"[]").unwrap();
+
         let downloads_dir = root.join("downloads").join("removable-game");
         fs::create_dir_all(&downloads_dir).unwrap();
         fs::write(downloads_dir.join("game.zip"), b"zip").unwrap();
@@ -1228,6 +1242,8 @@ mod tests {
 
         assert!(!library.games.contains_key("removable-game"));
         assert!(!game_dir.exists());
+        assert!(!compat_dir.exists());
+        assert!(!source_record.exists());
         assert!(!prefix_dir.exists());
         assert!(!downloads_dir.exists());
 

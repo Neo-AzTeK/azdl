@@ -106,8 +106,8 @@
     )
   );
 
-  // Discrete global "doing something" indicator state (downloads use their own progress bar in transfers)
-  let isAppDoingSomething = $derived(isApiBusy);
+  // Keep the global activity bar active throughout background work.
+  let isAppDoingSomething = $derived(isApiBusy || hasActiveJobs || hasActiveTasks);
 
   let settingsCategory = $state('storage');
 

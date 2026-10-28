@@ -12,7 +12,16 @@ const VERSION: u64 = 1;
 
 fn regular(path: &Path, directory: bool) -> Result<bool> {
     match fs::symlink_metadata(path) {
-        Ok(meta) if !meta.file_type().is_symlink() && meta.is_dir() == directory => Ok(true),
+        Ok(meta)
+            if !meta.file_type().is_symlink()
+                && if directory {
+                    meta.is_dir()
+                } else {
+                    meta.is_file()
+                } =>
+        {
+            Ok(true)
+        }
         Ok(_) => Err(format!("Migration refuses unsafe path {}", path.display()).into()),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),
@@ -173,6 +182,34 @@ pub fn migrate(data_dir: &Path) -> Result<()> {
         }
         backup(&library_path, &backup_dir.join("library.json"))?;
         publish(&library_path, &library)?;
+    }
+    let pending = data_dir.join("setup-pending");
+    if regular(&pending, true)? {
+        let saved_pending = backup_dir.join("setup-pending");
+        directory(&saved_pending)?;
+        for entry in fs::read_dir(&pending)? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let Some(mut origin) = read_json(&path)? else {
+                continue;
+            };
+            let app_id = origin["qualified_id"]
+                .as_str()
+                .and_then(|id| id.split_once(':'))
+                .and_then(|(_, id)| id.strip_prefix("steam-"))
+                .and_then(|id| id.parse::<u32>().ok())
+                .filter(|id| *id > 0);
+            if let Some(app_id) = app_id {
+                backup(
+                    &path,
+                    &saved_pending.join(path.file_name().ok_or("Invalid pending origin path")?),
+                )?;
+                origin["qualified_id"] = format!("steam:steam-{app_id}").into();
+                publish(&path, &origin)?;
+            }
+        }
     }
     // Removed package jobs are archived; content jobs retain IDs, targets and partials.
     let jobs = data_dir.join("jobs");

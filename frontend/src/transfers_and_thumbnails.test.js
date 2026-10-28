@@ -354,14 +354,14 @@ describe('covers.js SteamGrid & Artwork Resolution', () => {
     expect(getJobProgressPercent(null)).toBe(0);
   });
 
-  it('ensures downloads do not trigger the main global doing something indicator', () => {
+  it('keeps the global activity indicator active during background work', () => {
     const isApiBusy = false;
     const hasActiveJobs = true;
     const hasActiveTasks = true;
 
-    // Decoupled architecture: downloads report progress in transfers, not app-wide top indeterminate bar
-    const isAppDoingSomething = isApiBusy;
-    expect(isAppDoingSomething).toBe(false);
+    // Both determinate transfer progress and global activity remain visible.
+    const isAppDoingSomething = isApiBusy || hasActiveJobs || hasActiveTasks;
+    expect(isAppDoingSomething).toBe(true);
   });
 
   it('falls back to alternate available images when regular size image is not available', async () => {

@@ -26,6 +26,10 @@ describe('API - Browser Fallback Mode', () => {
 
   it('returns valid fallback state on getState', async () => {
     const state = await api.getState();
+    expect(Object.keys(state).sort()).toEqual([
+      'data_dir', 'diagnostics', 'jobs', 'library', 'pending',
+      'platform', 'running_games', 'settings', 'tasks',
+    ]);
     expect(state).toHaveProperty('library');
     expect(Array.isArray(state.library)).toBe(true);
     expect(state).toHaveProperty('jobs');
