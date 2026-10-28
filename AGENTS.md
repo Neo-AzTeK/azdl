@@ -130,19 +130,20 @@ The `azdl` frontend is built with **Svelte 5** and strict adherence to **Materia
 
 ### 7.2. Mandatory Material You (Material Design 3) Theming & Unthemed Element Prevention
 - **Mandatory Design Tokens:** Always style UI elements with CSS custom properties (`--md-sys-color-*`, `--md-sys-shape-*`, `--md-sys-elevation-*`). Never hardcode raw hex values (`#ffffff`, `#10b981`, `#ef4444`, etc.) or arbitrary RGBA values into templates or scoped styles.
-- **Icon Theming:** All inline SVG icons MUST specify `fill="currentColor"`. This guarantees that icon buttons (`.icon-btn`, `.icon-btn.tonal`, `.icon-btn.danger` for trashbins/delete actions) automatically inherit their parent semantic colors and hover states.
+- **Icons Come Only From the Icon Library — NEVER Raw SVG:** Every icon MUST be imported from `@ktibow/iconset-material-symbols` (e.g. `import iconPlay from '@ktibow/iconset-material-symbols/play-arrow'`) and rendered through `m3-svelte` (its `Icon` component or a component's `icon` prop). NEVER write `<svg>`/`<path>` markup, hand-copied path data (`d="M..."`), SVG data URIs, CSS `url(...svg)` backgrounds or icon font glyphs for an icon. If a needed symbol seems missing, search the iconset first; never draw one by hand. When touching a file that still contains a raw SVG icon, replace it with the library icon.
+- **Icon Theming:** Library icons inherit `currentColor`, so icon buttons (`.icon-btn`, `.icon-btn.tonal`, `.icon-btn.danger` for trashbins/delete actions) take their parent semantic colors and hover states automatically.
 - **Theme Modes:** Supports 4 runtime modes: `system`, `dark`, `light`, and `amoled` (true black `#000000` surface).
 - **Opaque Windows:** Window backgrounds always use opaque theme surfaces. Do not restore Mica, Acrylic, compositor blur, or translucency preferences.
 - **Controls & Typography:**
   - Standard buttons must use `.md3-btn` (`.primary`, `.tonal`, `.outlined`, `.text`, `.danger`) with full pill border radius (`--md-sys-shape-full`).
   - Text inputs must use `.md3-input` with container-high background and focus outlines.
-  - Dropdown `<select>` inputs must use custom SVG chevron indicators and container-high fills (`app.css`, `.md3-select`).
+  - Dropdowns must use the library chevron icon (never a custom SVG chevron) with container-high fills (`app.css`, `.md3-select`).
   - Icon buttons must use `.icon-btn` with full circle radius and standard hover/tonal/danger tokens.
 
 ### 7.3. Shared Section Card Container Component (`SectionCard.svelte`)
 - **Single Component for Regular Sections:** All regular section containers across Settings, Panels, and views must use [`SectionCard.svelte`](file:///home/mixcraftio/Code/Repos/Crack/azdl/frontend/src/components/SectionCard.svelte).
 - **Title Adjacent to Optional Icon:** Section titles must always be placed directly next to the optional icon (`.title-with-icon`).
-- **Flexible Slots:** Supports title, optional SVG path icon, badge pill, description, header action buttons snippet, and custom children body content.
+- **Flexible Slots:** Supports title, optional library icon (`@ktibow/iconset-material-symbols`), badge pill, description, header action buttons snippet, and custom children body content.
 - Do not invent custom, ad-hoc section cards or place section icons disconnected from the section title.
 
 ### 7.4. Clean Global Search Bar (Minimalist, No Badge Bloat)
