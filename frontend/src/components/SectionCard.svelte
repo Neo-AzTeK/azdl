@@ -1,8 +1,8 @@
 <script>
+  import { Icon } from 'm3-svelte';
   let {
     title = '',
     icon = null,
-    iconSvg = null,
     badge = null,
     badgeType = 'default',
     description = '',
@@ -12,15 +12,11 @@
 </script>
 
 <section class="md3-section-card">
-  {#if title || icon || iconSvg || badge || headerActions}
+  {#if title || icon || badge || headerActions}
     <div class="section-title-row">
       <div class="title-with-icon">
-        {#if iconSvg}
-          {@render iconSvg()}
-        {:else if icon}
-          <svg class="title-icon" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-            <path d={icon} />
-          </svg>
+        {#if icon}
+          <Icon icon={icon} size={20} class="title-icon" />
         {/if}
         {#if title}
           <h3 class="section-title">{title}</h3>
@@ -75,7 +71,7 @@
     gap: 10px;
   }
 
-  .title-icon {
+  :global(.title-icon) {
     color: var(--md-sys-color-primary);
     fill: currentColor;
     flex-shrink: 0;

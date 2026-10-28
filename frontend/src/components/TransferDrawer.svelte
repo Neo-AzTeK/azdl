@@ -1,4 +1,8 @@
 <script>
+  import { Icon } from 'm3-svelte';
+  import iconCloudDownload from '@ktibow/iconset-material-symbols/cloud-download';
+  import iconExpandLess from '@ktibow/iconset-material-symbols/expand-less';
+  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset';
   import { onDestroy } from 'svelte';
   import { runAction } from '../api.js';
   import { dlcArchiveIdentity } from '../dlc.js';
@@ -213,9 +217,7 @@
 
     <div class="header-left">
       <div class="transfer-badge" class:has-active={activeJobs.length > 0}>
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-          <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/>
-        </svg>
+        <Icon icon={iconCloudDownload} size={16} />
         <span>
           {activeJobs.length > 0
             ? `${activeJobs.length} Active Transfer${activeJobs.length > 1 ? 's' : ''}`
@@ -252,16 +254,7 @@
 
     <div class="header-right">
       <div class="expand-btn" title={expanded ? 'Collapse drawer' : 'Expand drawer'}>
-        <svg
-          class="chevron-icon"
-          class:rotate={expanded}
-          viewBox="0 0 24 24"
-          width="18"
-          height="18"
-          fill="currentColor"
-        >
-          <path d="M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z" />
-        </svg>
+        <Icon icon={iconExpandLess} size={18} class={expanded ? 'chevron-icon rotate' : 'chevron-icon'} />
       </div>
     </div>
   </button>
@@ -302,9 +295,7 @@
                   />
                 {:else}
                   <div class="job-thumb-placeholder">
-                    <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-                      <path d="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm4-3c-.83 0-1.5-.67-1.5-1.5S18.67 9 19.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/>
-                    </svg>
+                    <Icon icon={iconVideogameAsset} size={16} />
                   </div>
                 {/if}
               </div>
@@ -498,11 +489,11 @@
     border-radius: 50%;
   }
 
-  .chevron-icon {
+  :global(.chevron-icon) {
     transition: transform 200ms ease;
   }
 
-  .chevron-icon.rotate {
+  :global(.chevron-icon.rotate) {
     transform: rotate(180deg);
   }
 

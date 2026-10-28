@@ -1,4 +1,7 @@
 <script>
+  import { Icon } from 'm3-svelte';
+  import iconError from '@ktibow/iconset-material-symbols/error';
+  import iconInfoOutline from '@ktibow/iconset-material-symbols/info-outline';
   import Modal from './Modal.svelte';
 
   let {
@@ -58,15 +61,11 @@
   <div class="confirm-modal-body" class:destructive={isDestructive}>
     {#if isDestructive}
       <div class="confirm-icon-wrap danger-icon">
-        <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
-          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
-        </svg>
+        <Icon icon={iconError} size={28} />
       </div>
     {:else}
       <div class="confirm-icon-wrap info-icon">
-        <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor">
-          <path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zM11 9h2V7h-2v2z"/>
-        </svg>
+        <Icon icon={iconInfoOutline} size={28} />
       </div>
     {/if}
 

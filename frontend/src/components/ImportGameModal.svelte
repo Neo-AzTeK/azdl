@@ -1,4 +1,6 @@
 <script>
+  import { Icon } from 'm3-svelte';
+  import iconArrowDropDown from '@ktibow/iconset-material-symbols/arrow-drop-down';
   import { runAction, discoverExecutables } from '../api.js';
   import Modal from './Modal.svelte';
   import ConfirmModal from './ConfirmModal.svelte';
@@ -165,20 +167,23 @@
         </div>
 
         {#if candidates.length > 0}
-          <select
-            id="exe-select"
-            class="md3-select"
-            bind:value={selectedExe}
-            disabled={submitting}
-          >
-            {#each candidates as cand}
-              {@const val = cand.relative_path || cand.path}
-              <option value={val}>
-                {val} {cand.score ? `(Score: ${cand.score})` : ''}
-              </option>
-            {/each}
-            <option value="__custom__">Custom path...</option>
-          </select>
+          <span class="select-field">
+            <select
+              id="exe-select"
+              class="md3-select"
+              bind:value={selectedExe}
+              disabled={submitting}
+            >
+              {#each candidates as cand}
+                {@const val = cand.relative_path || cand.path}
+                <option value={val}>
+                  {val} {cand.score ? `(Score: ${cand.score})` : ''}
+                </option>
+              {/each}
+              <option value="__custom__">Custom path...</option>
+            </select>
+            <Icon icon={iconArrowDropDown} size={20} class="select-chevron" />
+          </span>
         {/if}
 
         {#if selectedExe === '__custom__' || candidates.length === 0}

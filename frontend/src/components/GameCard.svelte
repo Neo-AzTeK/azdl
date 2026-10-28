@@ -1,5 +1,6 @@
 <script>
-  import { FAB } from 'm3-svelte';
+  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset';
+  import { FAB, Icon } from 'm3-svelte';
   import iconPlay from '@ktibow/iconset-material-symbols/play-arrow';
   import iconStop from '@ktibow/iconset-material-symbols/stop';
   import iconDownload from '@ktibow/iconset-material-symbols/download';
@@ -282,9 +283,7 @@
     {#if !activeDisplay.url}
       <div class="cover-placeholder">
         <div class="placeholder-content">
-          <svg viewBox="0 0 24 24" width="36" height="36" fill="currentColor" class="placeholder-icon">
-            <path d="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm4-3c-.83 0-1.5-.67-1.5-1.5S18.67 9 19.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/>
-          </svg>
+          <Icon icon={iconVideogameAsset} size={36} class="placeholder-icon" />
           <span class="placeholder-title">{cardGame.title}</span>
         </div>
       </div>
@@ -442,7 +441,7 @@
     max-width: 90%;
   }
 
-  .placeholder-icon {
+  :global(.placeholder-icon) {
     color: var(--md-sys-color-primary);
     opacity: 0.6;
   }

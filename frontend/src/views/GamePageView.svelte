@@ -1,9 +1,23 @@
 <script>
+  import iconArrowDropDown from '@ktibow/iconset-material-symbols/arrow-drop-down';
+  import iconArrowBack from '@ktibow/iconset-material-symbols/arrow-back';
+  import iconCheckBox from '@ktibow/iconset-material-symbols/check-box';
+  import iconCropLandscape from '@ktibow/iconset-material-symbols/crop-landscape';
+  import iconDelete from '@ktibow/iconset-material-symbols/delete';
+  import iconErrorOutline from '@ktibow/iconset-material-symbols/error-outline';
+  import iconFolder from '@ktibow/iconset-material-symbols/folder';
+  import iconFolderOpen from '@ktibow/iconset-material-symbols/folder-open';
+  import iconHelp from '@ktibow/iconset-material-symbols/help';
+  import iconLock from '@ktibow/iconset-material-symbols/lock';
+  import iconMoreVert from '@ktibow/iconset-material-symbols/more-vert';
+  import iconPublic from '@ktibow/iconset-material-symbols/public';
+  import iconSettings from '@ktibow/iconset-material-symbols/settings';
+  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset';
   import { untrack } from 'svelte';
   import { controlActionConfirmed } from '../game_controls.js';
   import ActionSwitch from '../components/ActionSwitch.svelte';
   import { onMount, onDestroy, tick } from 'svelte';
-  import { Button, Tabs, FAB, LinearProgress, LinearProgressEstimate } from 'm3-svelte';
+  import { Button, Tabs, FAB, LinearProgress, LinearProgressEstimate, Icon } from 'm3-svelte';
   import SectionCard from '../components/SectionCard.svelte';
   import { dlcTransfer, dlcTransferActive, dlcTransferStatus, dlcTransferInstalling, isDlcTransferJob, dlcProgress, filterDlc } from '../dlc.js';
   import iconPlay from '@ktibow/iconset-material-symbols/play-arrow';
@@ -937,9 +951,7 @@
         onclick={onBack}
         aria-label="Back"
       >
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-          <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z" />
-        </svg>
+        <Icon icon={iconArrowBack} size={18} />
         <span>Back</span>
       </Button>
 
@@ -1031,13 +1043,16 @@
               {#if settings?.storage_drives && settings.storage_drives.length > 0}
                 <div class="drive-select-container">
                   <label for="game-drive-select" class="drive-label">Install Location:</label>
-                  <select id="game-drive-select" class="md3-select" bind:value={selectedDriveId}>
-                    {#each settings.storage_drives as drive}
-                      <option value={drive.id}>
-                        {drive.label} ({drive.path}) {drive.is_default ? '— Default' : ''}
-                      </option>
-                    {/each}
-                  </select>
+                  <span class="select-field">
+                    <select id="game-drive-select" class="md3-select" bind:value={selectedDriveId}>
+                      {#each settings.storage_drives as drive}
+                        <option value={drive.id}>
+                          {drive.label} ({drive.path}) {drive.is_default ? '— Default' : ''}
+                        </option>
+                      {/each}
+                    </select>
+                    <Icon icon={iconArrowDropDown} size={20} class="select-chevron" />
+                  </span>
                 </div>
               {/if}
             {/if}
@@ -1063,33 +1078,31 @@
                   title="More Options"
                   aria-label="More options"
                 >
-                  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-                    <path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/>
-                  </svg>
+                  <Icon icon={iconMoreVert} size={20} />
                 </button>
 
                 {#if showMoreMenu}
                   <button type="button" class="menu-scrim" onclick={() => (showMoreMenu = false)} aria-label="Close menu"></button>
                   <div class="md3-dropdown-menu">
                     <button class="menu-item" onclick={() => { showMoreMenu = false; handleOpenFolder(); }}>
-                      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/></svg>
+                      <Icon icon={iconFolderOpen} size={18} />
                       <span>Open Installation Folder</span>
                     </button>
                     <button class="menu-item" onclick={() => { showMoreMenu = false; showMoveModal = true; }}>
-                      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+                      <Icon icon={iconFolder} size={18} />
                       <span>Move to Another Drive</span>
                     </button>
                     <button class="menu-item" onclick={() => navigateToDetailTab('config')}>
-                      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+                      <Icon icon={iconSettings} size={18} />
                       <span>Launch Options & Config</span>
                     </button>
                     <button class="menu-item" onclick={() => navigateToDetailTab('patches', 'section-patches')}>
-                      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>
+                      <Icon icon={iconLock} size={18} />
                       <span>Patches</span>
                     </button>
                     <div class="menu-divider"></div>
                     <button class="menu-item danger" onclick={() => { showMoreMenu = false; handleUninstall(); }}>
-                      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                      <Icon icon={iconDelete} size={18} />
                       <span>Uninstall Game</span>
                     </button>
                   </div>
@@ -1190,12 +1203,15 @@
               {/snippet}
               <div class="dlc-toolbar">
                 <input class="md3-input" type="search" aria-label="Search DLC" placeholder="Search downloadable content" bind:value={dlcQuery} />
-                <select class="md3-select" aria-label="Filter DLC" bind:value={dlcFilter}>
-                  <option value="all">All content</option>
-                  <option value="available">Available to install</option>
-                  <option value="installed">Installed</option>
-                  <option value="recovery">Needs recovery</option>
-                </select>
+                <span class="select-field">
+                  <select class="md3-select" aria-label="Filter DLC" bind:value={dlcFilter}>
+                    <option value="all">All content</option>
+                    <option value="available">Available to install</option>
+                    <option value="installed">Installed</option>
+                    <option value="recovery">Needs recovery</option>
+                  </select>
+                  <Icon icon={iconArrowDropDown} size={20} class="select-chevron" />
+                </span>
               </div>
               {#if hasInterruptedDlc}<p class="section-subtext">Recover interrupted content before installing or removing DLC.</p>{/if}
               {#if isRunning}<p class="section-subtext">Stop the game before changing downloadable content.</p>{/if}
@@ -1257,9 +1273,7 @@
               <div class="tool-card" class:irrelevant={!isFixRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
-                    </svg>
+                    <Icon icon={iconPublic} class="tool-header-icon" />
                     <h4>Online-Fix / SteamFix Overlay</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle Online-Fix or SteamFix overlay">
@@ -1281,9 +1295,7 @@
               <div class="tool-card" class:irrelevant={!isSteamStubRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>
-                    </svg>
+                    <Icon icon={iconLock} class="tool-header-icon" />
                     <h4>Steamless DRM Stripper</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle Steamless DRM unpack">
@@ -1307,9 +1319,7 @@
               <div class="tool-card" class:irrelevant={!isDlcBypassRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
-                    </svg>
+                    <Icon icon={iconDownload} class="tool-header-icon" />
                     <h4>DLC License Bypass</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle DLC license bypass">
@@ -1333,9 +1343,7 @@
               <div class="tool-card" class:irrelevant={!isGoldbergRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/>
-                    </svg>
+                    <Icon icon={iconErrorOutline} class="tool-header-icon" />
                     <h4>Goldberg Emulator Settings</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle Goldberg emulator settings">
@@ -1359,9 +1367,7 @@
               <div class="tool-card" class:irrelevant={!isEaRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H7c0-2.76 2.24-5 5-5s5 2.24 5 5c0 1.04-.42 1.99-1.07 2.75z"/>
-                    </svg>
+                    <Icon icon={iconHelp} class="tool-header-icon" />
                     <h4>EA Activation Patch</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle EA activation patch">
@@ -1385,9 +1391,7 @@
               <div class="tool-card" class:irrelevant={!isPatchRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14l-5-5 1.41-1.41L12 14.17l7.59-7.59L21 8l-9 9z"/>
-                    </svg>
+                    <Icon icon={iconCheckBox} class="tool-header-icon" />
                     <h4>Standalone Game Patch</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle standalone game patch">
@@ -1531,7 +1535,7 @@
             </div>
           </section>
           <SectionCard title="Runtime Dependencies"
-            icon="M4 6h16v12H4zM2 4v16h20V4H2z"
+            icon={iconCropLandscape}
             description="Runtime libraries for the selected launch environment.">
             {#if controlsLoading}
               <p role="status">Reading runtime state…</p>
@@ -1584,9 +1588,7 @@
             />
           {:else}
             <div class="capsule-placeholder">
-              <svg viewBox="0 0 24 24" width="32" height="32" fill="currentColor" opacity="0.6">
-                <path d="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm4-3c-.83 0-1.5-.67-1.5-1.5S18.67 9 19.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/>
-              </svg>
+              <Icon icon={iconVideogameAsset} size={32} />
               <span>{game.title}</span>
             </div>
           {/if}
@@ -2275,7 +2277,7 @@
     background: var(--md-sys-color-surface-container-low);
   }
 
-  .tool-card.irrelevant .tool-header-icon {
+  .tool-card.irrelevant :global(.tool-header-icon) {
     color: var(--md-sys-color-on-surface-variant);
   }
 
@@ -2307,7 +2309,7 @@
     min-width: 0;
   }
 
-  .tool-header-icon {
+  :global(.tool-header-icon) {
     width: 20px;
     height: 20px;
     color: var(--md-sys-color-primary);
@@ -2659,7 +2661,7 @@
     transition: background 0.15s ease;
   }
 
-  .menu-item svg {
+  .menu-item :global(svg) {
     fill: currentColor;
     flex-shrink: 0;
   }
@@ -2697,7 +2699,7 @@
     transition: background 0.15s ease, color 0.15s ease;
   }
 
-  .icon-btn svg {
+  .icon-btn :global(svg) {
     fill: currentColor;
   }
 
