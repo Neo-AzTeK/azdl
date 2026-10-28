@@ -23,7 +23,7 @@ use steamroom_client::event::DownloadEvent;
 use steamroom_client::login::LoginBuilder;
 use tokio::sync::{Mutex, mpsc};
 
-const MAX_CONCURRENT_CHUNKS: usize = 16;
+const MAX_CONCURRENT_CHUNKS: usize = 32;
 const MAX_CDN_SERVERS: u32 = 40;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
 /// Bookkeeping directory steamroom creates for atomic staging; never part of a depot.
@@ -52,24 +52,94 @@ pub(crate) fn download_steam_depots_with_progress(
     span: DownloadProgressSpan,
 ) -> Result<()> {
     let plans = depots.iter().map(plan_depot).collect::<Result<Vec<_>>>()?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let fetcher = match runtime.block_on(CdnFetcher::connect(AppId(app_id))) {
-        Ok(fetcher) => Arc::new(fetcher),
-        Err(error) => {
-            return Err(fail_job(
-                data_dir,
-                job_id,
-                format!("Steam CDN unavailable: {error}"),
-            ));
+    let mut engine = ENGINE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if engine.is_none() {
+        match Engine::start() {
+            Ok(started) => *engine = Some(started),
+            Err(error) => {
+                return Err(fail_job(
+                    data_dir,
+                    job_id,
+                    format!("Steam CDN unavailable: {error}"),
+                ));
+            }
         }
+    }
+    let Some(active) = engine.as_ref() else {
+        return Err("Steam CDN session is unavailable".into());
     };
+    let fetcher = Arc::new(TransferFetcher {
+        cdn: Arc::clone(&active.cdn),
+        app_id: AppId(app_id),
+    });
     let result = transfer(
-        &runtime, &plans, target_dir, fetcher, data_dir, job_id, &span,
+        &active.runtime,
+        &plans,
+        target_dir,
+        fetcher,
+        data_dir,
+        job_id,
+        &span,
     );
-    runtime.shutdown_background();
+    if result.is_err()
+        && let Some(stopped) = engine.take()
+    {
+        // Abandoned chunk tasks must not keep writing after a stop or failure.
+        stopped.runtime.shutdown_background();
+    }
     result
+}
+
+/// Process-wide runtime and CDN session, reused by every depot group of an
+/// install so the anonymous logon and server discovery happen once.
+static ENGINE: std::sync::Mutex<Option<Engine>> = std::sync::Mutex::new(None);
+
+struct Engine {
+    runtime: tokio::runtime::Runtime,
+    cdn: Arc<CdnSession>,
+}
+
+impl Engine {
+    fn start() -> Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let cell = steam_cell_id();
+        let cdn = runtime
+            .block_on(CdnSession::connect(cell))
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            runtime,
+            cdn: Arc::new(cdn),
+        })
+    }
+}
+
+/// Read the content-server cell the local Steam client was assigned, so the
+/// directory returns nearby servers. Falls back to letting Steam choose.
+fn steam_cell_id() -> u32 {
+    crate::steam::steam_root()
+        .ok()
+        .and_then(|root| fs::read_to_string(root.join("config/config.vdf")).ok())
+        .and_then(|config| parse_cell_id(&config))
+        .unwrap_or(0)
+}
+
+fn parse_cell_id(config: &str) -> Option<u32> {
+    [
+        "\"CellIDServerOverride\"",
+        "\"CurrentCellID\"",
+        "\"CellID\"",
+    ]
+    .iter()
+    .find_map(|key| {
+        let rest = &config[config.find(key)? + key.len()..];
+        let value = rest.trim_start().strip_prefix('"')?;
+        value[..value.find('"')?].parse().ok()
+    })
+    .filter(|cell| *cell != 0)
 }
 
 /// Validate a provider manifest with azdl's own parser, then load it for steamroom.
@@ -267,20 +337,23 @@ impl Progress<'_> {
     }
 }
 
-/// CDN chunk source with per-host auth tokens fetched from an anonymous Steam session.
-struct CdnFetcher {
+/// CDN servers plus per-host, per-app auth tokens from an anonymous Steam session.
+struct CdnSession {
     cdn: CdnClient,
     pool: CdnServerPool,
-    app_id: AppId,
     session: Mutex<Option<SteamClient<LoggedIn>>>,
-    tokens: Mutex<HashMap<String, String>>,
+    tokens: Mutex<HashMap<(String, AppId), String>>,
 }
 
-impl CdnFetcher {
-    async fn connect(app_id: AppId) -> std::result::Result<Self, BoxError> {
-        let session = LoginBuilder::new().anonymous().login().await?;
+impl CdnSession {
+    async fn connect(cell: u32) -> std::result::Result<Self, BoxError> {
+        let session = LoginBuilder::new()
+            .cell_id(cell)
+            .anonymous()
+            .login()
+            .await?;
         let servers = session
-            .get_cdn_servers(CellId(0), Some(MAX_CDN_SERVERS))
+            .get_cdn_servers(CellId(cell), Some(MAX_CDN_SERVERS))
             .await?;
         if servers.is_empty() {
             return Err("Steam returned no CDN servers".into());
@@ -288,27 +361,26 @@ impl CdnFetcher {
         Ok(Self {
             cdn: CdnClient::new()?,
             pool: CdnServerPool::new(servers),
-            app_id,
             session: Mutex::new(Some(session)),
             tokens: Mutex::new(HashMap::new()),
         })
     }
 
     /// Request a fresh token, reconnecting once if the CM session has dropped.
-    async fn refresh_token(&self, depot_id: DepotId, host: &str) -> Option<String> {
+    async fn refresh_token(&self, app_id: AppId, depot_id: DepotId, host: &str) -> Option<String> {
         let mut session = self.session.lock().await;
         for _ in 0..2 {
             if session.is_none() {
                 *session = LoginBuilder::new().anonymous().login().await.ok();
             }
             let client = session.as_ref()?;
-            match client.get_cdn_auth_token(self.app_id, depot_id, host).await {
+            match client.get_cdn_auth_token(app_id, depot_id, host).await {
                 Ok(token) => {
                     let token = token.token.filter(|token| !token.is_empty())?;
                     self.tokens
                         .lock()
                         .await
-                        .insert(host.to_owned(), token.clone());
+                        .insert((host.to_owned(), app_id), token.clone());
                     return Some(token);
                 }
                 Err(_) => *session = None,
@@ -320,17 +392,23 @@ impl CdnFetcher {
     async fn fetch_from(
         &self,
         server: &CdnServer,
+        app_id: AppId,
         depot_id: DepotId,
         chunk_id: &ChunkId,
     ) -> steamroom::Result<Bytes> {
-        let token = self.tokens.lock().await.get(&server.host).cloned();
+        let token = self
+            .tokens
+            .lock()
+            .await
+            .get(&(server.host.clone(), app_id))
+            .cloned();
         let result = self
             .cdn
             .download_chunk(server, depot_id, chunk_id, token.as_deref())
             .await;
         if let Err(steamroom::Error::CdnStatus { status, .. }) = &result
             && matches!(status.as_u16(), 401 | 403)
-            && let Some(token) = self.refresh_token(depot_id, &server.host).await
+            && let Some(token) = self.refresh_token(app_id, depot_id, &server.host).await
         {
             return self
                 .cdn
@@ -341,19 +419,30 @@ impl CdnFetcher {
     }
 }
 
-impl ChunkFetcher for CdnFetcher {
+/// Chunk source for one content App, sharing the process-wide CDN session.
+struct TransferFetcher {
+    cdn: Arc<CdnSession>,
+    app_id: AppId,
+}
+
+impl ChunkFetcher for TransferFetcher {
     async fn fetch_chunk(
         &self,
         depot_id: DepotId,
         chunk_id: &ChunkId,
     ) -> std::result::Result<Bytes, BoxError> {
-        let (server, wait) = self.pool.pick();
+        let pool = &self.cdn.pool;
+        let (server, wait) = pool.pick();
         if !wait.is_zero() {
             tokio::time::sleep(wait).await;
         }
-        match self.fetch_from(server, depot_id, chunk_id).await {
+        match self
+            .cdn
+            .fetch_from(server, self.app_id, depot_id, chunk_id)
+            .await
+        {
             Ok(bytes) => {
-                self.pool.report_success(server);
+                pool.report_success(server);
                 Ok(bytes)
             }
             Err(error) => {
@@ -363,7 +452,7 @@ impl ChunkFetcher for CdnFetcher {
                     }
                     _ => None,
                 };
-                self.pool.report_failure(server, retry_after);
+                pool.report_failure(server, retry_after);
                 Err(Box::new(error))
             }
         }
@@ -521,8 +610,20 @@ mod tests {
     #[ignore = "contacts live Steam CM and CDN directory services"]
     fn live_anonymous_session_lists_cdn_servers() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let fetcher = runtime.block_on(CdnFetcher::connect(AppId(480))).unwrap();
-        assert!(!fetcher.pool.is_empty());
+        let session = runtime
+            .block_on(CdnSession::connect(steam_cell_id()))
+            .unwrap();
+        assert!(!session.pool.is_empty());
+    }
+
+    #[test]
+    fn steam_cell_prefers_the_override_and_ignores_zero() {
+        let config = "\"InstallConfigStore\"\n{\n\t\"CurrentCellID\"\t\t\"7\"\n\t\"CellIDServerOverride\"\t\t\"15\"\n}";
+        assert_eq!(parse_cell_id(config), Some(15));
+        assert_eq!(parse_cell_id("\"CurrentCellID\"\t\"7\""), Some(7));
+        assert_eq!(parse_cell_id("\"CurrentCellID\"\t\"0\""), None);
+        assert_eq!(parse_cell_id("\"CellID\" \"x\""), None);
+        assert_eq!(parse_cell_id(""), None);
     }
 
     #[test]
