@@ -53,3 +53,15 @@ describe('transfers utility', () => {
     expect(getEffectiveJobTotal(job, null, map)).toBe(20 * 1024 * 1024 * 1024);
   });
 });
+
+
+describe('global transfer activity', () => {
+  it('keeps background transfers active but excludes paused and failed native jobs', async () => {
+    const { isTransferActive } = await import('./transfers.js');
+    expect(isTransferActive({ status: 'Downloading', install_state: 'Pending' })).toBe(true);
+    expect(isTransferActive({ status: 'Installing' })).toBe(true);
+    for (const status of ['Paused', 'Failed', 'Interrupted', 'Cancelled']) {
+      expect(isTransferActive({ status, install_state: 'Pending' })).toBe(false);
+    }
+  });
+});

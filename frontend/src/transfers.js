@@ -118,3 +118,12 @@ export function calculateJobProgressPercent(job, effectiveTotal = 0) {
 
   return 0;
 }
+
+/** Whether a persisted transfer currently contributes to global activity. */
+export function isTransferActive(job) {
+  const status = String(job?.status || '').toLowerCase();
+  if (['paused', 'failed', 'interrupted', 'cancelled', 'canceled'].includes(status)) return false;
+  const installState = String(job?.install_state || '').toLowerCase();
+  return ['running', 'queued', 'downloading', 'installing', 'working', 'pending', 'starting', 'extracting'].includes(status)
+    || ['pending', 'installing'].includes(installState);
+}

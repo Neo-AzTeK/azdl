@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub use crate::steam_engine::find_depotkit_library;
 use crate::steam_engine::{DownloadProgressSpan, download_steam_depots_with_progress};
-pub use crate::steam_engine::{download_steam_depots, find_depotkit_library};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DepotInfo {

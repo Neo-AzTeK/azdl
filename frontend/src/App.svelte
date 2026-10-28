@@ -1,4 +1,5 @@
 <script>
+  import { isTransferActive } from './transfers.js';
   import { onMount } from 'svelte';
   import Titlebar from './components/Titlebar.svelte';
   import NavRail from './components/NavRail.svelte';
@@ -88,16 +89,7 @@
   let dlcRevision = $state(0);
 
   // Derive active downloads, unpacks, or jobs
-  let hasActiveJobs = $derived(
-    (appState.jobs || []).some((j) => {
-      const s = (j.status || '').toLowerCase();
-      const instS = (j.install_state || '').toLowerCase();
-      return (
-        ['running', 'queued', 'downloading', 'working', 'pending', 'starting', 'extracting'].includes(s) ||
-        ['pending', 'installing'].includes(instS)
-      );
-    })
-  );
+  let hasActiveJobs = $derived((appState.jobs || []).some(isTransferActive));
 
   // Derive active background tasks
   let hasActiveTasks = $derived(

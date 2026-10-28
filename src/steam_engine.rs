@@ -155,8 +155,8 @@ extern "C" fn depotkit_progress_cb(prog: *const DepotkitProgress, user_data: *mu
     }
 }
 
-/// Download Steam depot chunks via the native depotkit C ABI.
-pub fn download_steam_depots(
+#[cfg(test)]
+fn download_steam_depots(
     lib_path: &Path,
     target_dir: &Path,
     app_id: u32,

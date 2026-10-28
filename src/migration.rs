@@ -8,6 +8,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
+pub(crate) mod legacy_catalog;
+
 const VERSION: u64 = 1;
 
 fn regular(path: &Path, directory: bool) -> Result<bool> {
@@ -129,6 +131,7 @@ pub fn migrate(data_dir: &Path) -> Result<()> {
     }
     let library_path = data_dir.join("library.json");
     let mut installed_paths = Vec::<PathBuf>::new();
+    let mut warnings = Vec::new();
     if let Some(mut library) = read_json(&library_path)? {
         let games = library["games"]
             .as_object_mut()
@@ -149,7 +152,15 @@ pub fn migrate(data_dir: &Path) -> Result<()> {
                 if regular(&cache, true)? {
                     let feed = cache.join(format!("{source}.json"));
                     if regular(&feed, false)? {
-                        let entries = crate::catalog::parse_feed(&fs::read(feed)?, source)?;
+                        let entries = match legacy_catalog::parse_feed(&fs::read(&feed)?, source) {
+                            Ok(entries) => entries,
+                            Err(error) => {
+                                warnings.push(
+                                    serde_json::json!({"file":feed, "error":error.to_string()}),
+                                );
+                                Vec::new()
+                            }
+                        };
                         if let Some(entry) = entries
                             .into_iter()
                             .find(|entry| entry.qualified_id() == qualified)
@@ -167,12 +178,23 @@ pub fn migrate(data_dir: &Path) -> Result<()> {
                     }
                 }
             }
-            if let Some(app_id) = game["steam_app_id"]
+            let app_id = game["steam_app_id"]
                 .as_u64()
-                .filter(|id| *id > 0 && *id <= u64::from(u32::MAX))
-                && game["origin"].is_object()
-            {
-                game["origin"]["qualified_id"] = format!("steam:steam-{app_id}").into();
+                .and_then(|id| u32::try_from(id).ok())
+                .filter(|id| *id > 0)
+                .or_else(|| {
+                    game["origin"]["qualified_id"]
+                        .as_str()
+                        .and_then(|qualified| qualified.split_once(':'))
+                        .and_then(|(_, id)| id.strip_prefix("steam-"))
+                        .and_then(|id| id.parse::<u32>().ok())
+                        .filter(|id| *id > 0)
+                });
+            if let Some(app_id) = app_id {
+                game["steam_app_id"] = app_id.into();
+                if game["origin"].is_object() {
+                    game["origin"]["qualified_id"] = format!("steam:steam-{app_id}").into();
+                }
             }
             if let Some(object) = game.as_object_mut() {
                 object.remove("plugin_id");
@@ -232,6 +254,12 @@ pub fn migrate(data_dir: &Path) -> Result<()> {
                 fs::rename(path, destination)?;
             }
         }
+    }
+    if !warnings.is_empty() {
+        publish(
+            &backup_dir.join("catalog-warnings.json"),
+            &serde_json::to_value(warnings)?,
+        )?;
     }
     for name in [
         "plugins",
@@ -378,6 +406,56 @@ mod tests {
         for name in preserved {
             assert_eq!(fs::read(root.join(name)).unwrap(), name.as_bytes());
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn corrupt_optional_catalog_is_archived_without_blocking_library_migration() {
+        let root = scratch();
+        fs::create_dir(root.join("catalog-cache")).unwrap();
+        fs::write(root.join("catalog-cache/old.json"), b"broken cache").unwrap();
+        fs::write(root.join("library.json"), br#"{"games":{"kept":{"id":"kept","steam_app_id":480,"origin":{"qualified_id":"old:steam-480"}}}}"#).unwrap();
+        migrate(&root).unwrap();
+        assert_eq!(
+            fs::read(root.join("migration-backup-v1/catalog-cache/old.json")).unwrap(),
+            b"broken cache"
+        );
+        assert!(
+            root.join("migration-backup-v1/catalog-warnings.json")
+                .is_file()
+        );
+        assert_eq!(
+            read_json(&root.join("library.json")).unwrap().unwrap()["games"]["kept"]["id"],
+            "kept"
+        );
+        migrate(&root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_source_ids_and_pending_origins_migrate_without_changing_game_ids() {
+        let root = scratch();
+        fs::write(root.join("library.json"), br#"{"games":{"legacy-id":{"id":"legacy-id","origin":{"qualified_id":"steamidra:steam-480","version":"old"}}}}"#).unwrap();
+        fs::create_dir(root.join("setup-pending")).unwrap();
+        fs::write(
+            root.join("setup-pending/other-id.json"),
+            br#"{"qualified_id":"steamidra:steam-620","version":"old"}"#,
+        )
+        .unwrap();
+        migrate(&root).unwrap();
+        let library = read_json(&root.join("library.json")).unwrap().unwrap();
+        assert_eq!(library["games"]["legacy-id"]["id"], "legacy-id");
+        assert_eq!(library["games"]["legacy-id"]["steam_app_id"], 480);
+        assert_eq!(
+            library["games"]["legacy-id"]["origin"]["qualified_id"],
+            "steam:steam-480"
+        );
+        let pending = read_json(&root.join("setup-pending/other-id.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending["qualified_id"], "steam:steam-620");
+        assert_eq!(pending["version"], "old");
+        migrate(&root).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

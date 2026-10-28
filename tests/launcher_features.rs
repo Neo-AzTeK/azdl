@@ -1,4 +1,3 @@
-use azdl::catalog::parse_feed;
 use azdl::discovery::discover_executables;
 use azdl::doctor::diagnose_game;
 use azdl::multiplayer::{detect_fix, prepare_game_launch};
@@ -25,70 +24,6 @@ fn temp_workspace(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("azdl-integration-{name}-{nanos}"));
     fs::create_dir_all(&dir).unwrap();
     fs::canonicalize(dir).unwrap()
-}
-
-#[test]
-fn test_catalog_feed_parsing_and_search() {
-    let ws = temp_workspace("catalog");
-    let feed_path = ws.join("test-feed.json");
-
-    // Feed with both Ryuu entries format and Steam fields
-    let feed_content = r#"{
-        "schema": "azdl.catalog.v1",
-        "entries": [
-            {
-                "id": "steam-1091500",
-                "steamAppId": 1091500,
-                "title": "Cyberpunk 2077",
-                "description": "An open-world action-adventure RPG set in Night City",
-                "genres": ["Action", "RPG", "Cyberpunk"],
-                "fileSize": "70 GB",
-                "hasWorkshop": false,
-                "dlcCount": 1,
-                "dlc": ["2138330"]
-            },
-            {
-                "id": "steam-620",
-                "steamAppId": 620,
-                "title": "Portal 2",
-                "description": "The sequel to the acclaimed puzzle platformer",
-                "genres": ["Puzzle", "Co-op", "Sci-Fi"],
-                "fileSize": "12 GB",
-                "hasWorkshop": true,
-                "dlcCount": 0
-            }
-        ]
-    }"#;
-    fs::write(&feed_path, feed_content).unwrap();
-
-    let all_games = parse_feed(feed_content.as_bytes(), "official-ryuu").unwrap();
-    assert_eq!(all_games.len(), 2);
-
-    // Verify search by title
-    let portal_results: Vec<_> = all_games
-        .iter()
-        .filter(|g| g.title.contains("Portal"))
-        .collect();
-    assert_eq!(portal_results.len(), 1);
-    assert_eq!(portal_results[0].title, "Portal 2");
-
-    // Verify search by genre
-    let rpg_results: Vec<_> = all_games
-        .iter()
-        .filter(|g| g.genres.iter().any(|genre| genre == "RPG"))
-        .collect();
-    assert_eq!(rpg_results.len(), 1);
-    assert_eq!(rpg_results[0].title, "Cyberpunk 2077");
-
-    // Verify find game by ID
-    let found = all_games
-        .iter()
-        .find(|g| g.id == "steam-1091500")
-        .expect("game should be found");
-    assert_eq!(found.title, "Cyberpunk 2077");
-    assert_eq!(found.genres, vec!["Action", "RPG", "Cyberpunk"]);
-
-    let _ = fs::remove_dir_all(&ws);
 }
 
 #[test]
