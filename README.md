@@ -154,6 +154,8 @@ azdl launch steam-123456
 
 The **Catalog** view discovers games from the Steam Store API. Search by title or App ID; the initial page shows Steam's featured games. Discovery does not require a Hydra or Ryuu catalog feed and does not assert that a manifest is available. An installed download plugin is chosen on the game page when installation starts.
 
+Fresh base-game depot installations use the revisions pinned by the selected source. These may differ from the current Steam public branch. Downloaded files are verified against the selected manifests, and their exact revisions are recorded. DLC installation retains separate base-revision compatibility checks.
+
 The CLI exposes the same Steam discovery and plugin choice:
 
 ```sh

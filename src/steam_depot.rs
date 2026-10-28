@@ -680,11 +680,18 @@ fn verify_base_manifest_files(
     Ok(())
 }
 
-/// Verify existing DLC files, or download selected depots into a managed base game.
+/// Selected manifests grouped by the App ID used to download their content.
 #[derive(Debug)]
-struct ResolvedDlcDownloads {
+struct ResolvedDepotDownloads {
     groups: Vec<(u32, Vec<DepotInfo>)>,
     depots: Vec<DepotInfo>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ManifestRevisionPolicy {
+    CurrentPublic,
+    /// A fresh base installation records and verifies the source's selected revision.
+    ProviderPinnedBase,
 }
 
 fn resolve_dlc_download_groups(
@@ -693,7 +700,7 @@ fn resolve_dlc_download_groups(
     plugin_id: &str,
     metadata: &SteamAppMetadata,
     selected_ids: &BTreeSet<u32>,
-) -> Result<ResolvedDlcDownloads> {
+) -> Result<ResolvedDepotDownloads> {
     resolve_dlc_download_groups_with(
         root,
         metadata,
@@ -709,11 +716,37 @@ fn resolve_dlc_download_groups_with(
     root: &Path,
     metadata: &SteamAppMetadata,
     selected_ids: &BTreeSet<u32>,
+    load_app: impl FnMut(u32) -> Result<SteamAppMetadata>,
+    fetch_bundle: impl FnMut(&Path, u32) -> Result<PathBuf>,
+) -> Result<ResolvedDepotDownloads> {
+    resolve_download_groups_with(
+        root,
+        metadata,
+        selected_ids,
+        ManifestRevisionPolicy::CurrentPublic,
+        load_app,
+        fetch_bundle,
+    )
+}
+
+fn resolve_download_groups_with(
+    root: &Path,
+    metadata: &SteamAppMetadata,
+    selected_ids: &BTreeSet<u32>,
+    revision_policy: ManifestRevisionPolicy,
     mut load_app: impl FnMut(u32) -> Result<SteamAppMetadata>,
     mut fetch_bundle: impl FnMut(&Path, u32) -> Result<PathBuf>,
-) -> Result<ResolvedDlcDownloads> {
+) -> Result<ResolvedDepotDownloads> {
     if selected_ids.is_empty() {
         return Err(format!("No matching depots for Steam App ID {}", metadata.app_id).into());
+    }
+    if revision_policy == ManifestRevisionPolicy::ProviderPinnedBase
+        && metadata
+            .depots
+            .iter()
+            .any(|depot| selected_ids.contains(&depot.depot_id) && depot.dlc_app_id.is_some())
+    {
+        return Err("A base installation cannot select DLC depots".into());
     }
     let mut by_manifest_app = BTreeMap::<u32, Vec<ResolvedDepotSource>>::new();
     for depot_id in selected_ids {
@@ -758,10 +791,12 @@ fn resolve_dlc_download_groups_with(
                     source.depot_id
                 )
             })?;
-            if artifact.manifest_id != source.manifest_id {
+            if revision_policy == ManifestRevisionPolicy::CurrentPublic
+                && artifact.manifest_id != source.manifest_id
+            {
                 return Err(format!(
-                    "Depot {} provider revision differs from public manifest {}",
-                    source.depot_id, source.manifest_id
+                    "Depot {} provider revision differs from public manifest {}: source provides {}. The source and public metadata refer to different versions.",
+                    source.depot_id, source.manifest_id, artifact.manifest_id
                 )
                 .into());
             }
@@ -776,7 +811,7 @@ fn resolve_dlc_download_groups_with(
     for depots in download_groups.values_mut() {
         depots.sort_by_key(|depot| depot.depot_id);
     }
-    Ok(ResolvedDlcDownloads {
+    Ok(ResolvedDepotDownloads {
         groups: download_groups.into_iter().collect(),
         depots: selected,
     })
@@ -1103,7 +1138,7 @@ fn stage_verified_dlc_groups_with(
     data_dir: &Path,
     job_id: &str,
     payload: &Path,
-    downloads: &ResolvedDlcDownloads,
+    downloads: &ResolvedDepotDownloads,
     manifests: &[crate::steam_manifest::DepotManifest],
     total_bytes: u64,
     mut download: impl FnMut(&Path, u32, &[DepotInfo], DownloadProgressSpan) -> Result<()>,
@@ -1486,10 +1521,11 @@ fn install_steam_manifest_game_in_inner(
         .filter(|depot| crate::steam_content::matches_target(depot, "windows", "english"))
         .map(|depot| depot.depot_id)
         .collect::<std::collections::BTreeSet<_>>();
-    let downloads = resolve_dlc_download_groups_with(
+    let downloads = resolve_download_groups_with(
         download_dir,
         &appinfo,
         &selected_ids,
+        ManifestRevisionPolicy::ProviderPinnedBase,
         crate::steam_metadata::fetch_appinfo,
         |root, manifest_app_id| {
             if manifest_app_id == app_id {
@@ -1716,6 +1752,98 @@ fn install_steam_manifest_game_in_inner(
 mod tests {
     use super::*;
     use sha1::{Digest, Sha1};
+
+    #[test]
+    fn fresh_base_uses_provider_revision_while_dlc_requires_public_revision() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-base-revision-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let bundle = root.join("provider");
+        fs::create_dir_all(&bundle).unwrap();
+        let source_revision = 5181693942702269240_u64;
+        let public_revision = 4133263528433366014_u64;
+        fs::write(
+            bundle.join("5335510.lua"),
+            format!(
+                "addappid(5335511,0,\"{}\")\nsetManifestid(5335511,\"{source_revision}\")",
+                "00".repeat(32)
+            ),
+        )
+        .unwrap();
+        fs::write(
+            bundle.join(format!("5335511_{source_revision}.manifest")),
+            b"selection fixture",
+        )
+        .unwrap();
+        let mut metadata = crate::steam_metadata::parse_appinfo(
+            &serde_json::to_vec(&serde_json::json!({"data":{"5335510":{"depots":{
+                "5335511":{"manifests":{"public":{"gid":public_revision.to_string()}}}
+            }}}}))
+            .unwrap(),
+            5335510,
+        )
+        .unwrap();
+        let selected = BTreeSet::from([5335511]);
+        let base = resolve_download_groups_with(
+            &root,
+            &metadata,
+            &selected,
+            ManifestRevisionPolicy::ProviderPinnedBase,
+            |_| panic!("no shared app lookup expected"),
+            |_, _| Ok(bundle.clone()),
+        )
+        .unwrap();
+        assert_eq!(base.depots[0].manifest_id, source_revision);
+        assert_eq!(base.groups[0].1[0].manifest_id, source_revision);
+
+        let error = resolve_dlc_download_groups_with(
+            &root,
+            &metadata,
+            &selected,
+            |_| panic!("no shared app lookup expected"),
+            |_, _| Ok(bundle.clone()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(&source_revision.to_string()), "{error}");
+        assert!(error.contains(&public_revision.to_string()), "{error}");
+
+        fs::rename(
+            bundle.join(format!("5335511_{source_revision}.manifest")),
+            bundle.join(format!("5335511_{public_revision}.manifest")),
+        )
+        .unwrap();
+        let error = resolve_download_groups_with(
+            &root,
+            &metadata,
+            &selected,
+            ManifestRevisionPolicy::ProviderPinnedBase,
+            |_| panic!("no shared app lookup expected"),
+            |_, _| Ok(bundle.clone()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("No exact manifest"), "{error}");
+
+        metadata.depots[0].dlc_app_id = Some(42);
+        let error = resolve_download_groups_with(
+            &root,
+            &metadata,
+            &selected,
+            ManifestRevisionPolicy::ProviderPinnedBase,
+            |_| panic!("no shared app lookup expected"),
+            |_, _| panic!("DLC role must be rejected before loading the provider"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("cannot select DLC depots"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     #[ignore = "requires a saved appinfo response and extracted provider bundle"]
@@ -2344,7 +2472,7 @@ mod tests {
         };
         let first = depot(201, 100, "data/first.bin", b"first");
         let second = depot(202, 200, "data/second.bin", b"second");
-        let downloads = ResolvedDlcDownloads {
+        let downloads = ResolvedDepotDownloads {
             groups: vec![(100, vec![first.clone()]), (200, vec![second.clone()])],
             depots: vec![first, second],
         };
