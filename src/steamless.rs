@@ -108,7 +108,7 @@ fn find_file_in_tree(root: &Path, name: &str, max_depth: usize) -> Option<PathBu
     None
 }
 
-/// Locate Steamless.CLI.exe in env, data_dir, plugins, or system PATH.
+/// Locate Steamless.CLI.exe in env, data_dir, or system PATH.
 pub fn find_steamless_cli(data_dir: &Path) -> Option<PathBuf> {
     if let Some(val) = std::env::var_os("AZDL_STEAMLESS_PATH")
         .or_else(|| std::env::var_os("ARACHNEL_STEAMLESS_PATH"))
@@ -130,10 +130,7 @@ pub fn find_steamless_cli(data_dir: &Path) -> Option<PathBuf> {
         sanitize_steamless_dir(&in_steamless);
         return Some(in_steamless);
     }
-    if let Some(in_plugins) = find_file_in_tree(&data_dir.join("plugins"), "Steamless.CLI.exe", 8) {
-        sanitize_steamless_dir(&in_plugins);
-        return Some(in_plugins);
-    }
+
     if let Some(path_var) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path_var) {
             let candidate = dir.join("Steamless.CLI.exe");

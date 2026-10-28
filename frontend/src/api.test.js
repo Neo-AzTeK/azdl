@@ -28,7 +28,6 @@ describe('API - Browser Fallback Mode', () => {
     const state = await api.getState();
     expect(state).toHaveProperty('library');
     expect(Array.isArray(state.library)).toBe(true);
-    expect(state).toHaveProperty('plugins');
     expect(state).toHaveProperty('jobs');
     expect(state).toHaveProperty('running_games');
   });
@@ -235,16 +234,6 @@ describe('API - Desktop Mode IPC Bridge', () => {
     await api.downloadProtonGE();
     expect(mockInvoke).toHaveBeenCalledWith('run_action', {
       action: { action: 'proton-download' },
-    });
-
-    await api.refreshPluginStore();
-    expect(mockInvoke).toHaveBeenCalledWith('run_action', {
-      action: { action: 'plugin-store-refresh' },
-    });
-
-    await api.installStorePlugin('steamidra');
-    expect(mockInvoke).toHaveBeenCalledWith('run_action', {
-      action: { action: 'plugin-store-install', id: 'steamidra' },
     });
 
     await api.syncSteamShortcuts();

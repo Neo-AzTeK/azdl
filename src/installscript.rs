@@ -277,7 +277,7 @@ pub fn apply_installscript_for_game(game: &Game, prefix_dir: &Path) -> Result<bo
     }
 
     // 2. Ubisoft Connect bypass registration
-    if is_ubisoft_game(&game.install_dir) {
+    if game.steam_app_id.is_none() && is_ubisoft_game(&game.install_dir) {
         let wine_game_dir = to_wine_path(&game.install_dir);
         entries.push(RegistryEntry {
             root_key: "HKEY_LOCAL_MACHINE".into(),

@@ -34,7 +34,7 @@ fn test_catalog_feed_parsing_and_search() {
 
     // Feed with both Ryuu entries format and Steam fields
     let feed_content = r#"{
-        "schema": "arachnel.plugin.catalog.v1",
+        "schema": "azdl.catalog.v1",
         "entries": [
             {
                 "id": "steam-1091500",
@@ -360,68 +360,6 @@ fn test_diagnostics_never_hangs_or_launches_steam() {
 }
 
 #[test]
-fn test_plugin_store_settings_and_transient_job_cleanup() {
-    let ws = temp_workspace("plugin-jobs");
-
-    // Verify settings with multi-store URLs
-    let mut settings = azdl::settings::load_settings(&ws)
-        .unwrap_or_else(|_| azdl::settings::LauncherSettings::default_for(&ws));
-    assert!(settings.plugin_store_urls.is_empty());
-
-    let custom_url = "https://example.com/custom-plugins.json";
-    settings.plugin_store_urls.push(custom_url.to_string());
-    azdl::settings::save_settings(&ws, &settings).unwrap();
-
-    let reloaded = azdl::settings::load_settings(&ws).unwrap();
-    assert!(reloaded.plugin_store_urls.contains(&custom_url.to_string()));
-
-    // Verify transient plugin package job auto-cleanup behavior
-    let job_id = azdl::jobs::queue_job(
-        &ws,
-        "https://example.com/test-plugin.arach",
-        Path::new("test-plugin.arach"),
-    )
-    .unwrap();
-    let mut job = azdl::jobs::load_job(&ws, &job_id).unwrap();
-    assert_eq!(job.id, job_id);
-
-    // Mark as PluginPackage and Complete
-    job.kind = azdl::jobs::JobKind::PluginPackage;
-    job.status = azdl::jobs::JobStatus::Complete;
-    // Save job directly
-    let job_file = ws.join("jobs").join(format!("{job_id}.json"));
-    let mut f = fs::File::create(&job_file).unwrap();
-    serde_json::to_writer_pretty(&mut f, &job).unwrap();
-
-    // Verify that transient completed plugin packages get cleaned up
-    let jobs_before = azdl::jobs::list_jobs(&ws).unwrap();
-    assert_eq!(jobs_before.len(), 1);
-
-    // Simulate the state handler cleanup filter
-    let filtered_jobs: Vec<_> = jobs_before
-        .into_iter()
-        .filter_map(|j| {
-            if j.kind == azdl::jobs::JobKind::PluginPackage
-                && matches!(
-                    j.effective_status(),
-                    azdl::jobs::JobStatus::Complete | azdl::jobs::JobStatus::Cancelled
-                )
-            {
-                let _ = azdl::jobs::clear_job(&ws, &j.id);
-                return None;
-            }
-            Some(j)
-        })
-        .collect();
-
-    assert_eq!(filtered_jobs.len(), 0);
-    // After clear, job file should be removed from disk
-    assert!(azdl::jobs::load_job(&ws, &job_id).is_err());
-
-    let _ = fs::remove_dir_all(&ws);
-}
-
-#[test]
 fn test_move_game_across_drives_migrates_tree_and_remaps_executable() {
     let ws = temp_workspace("drive-migration");
     let drive_a = ws.join("drive_a");
@@ -537,61 +475,6 @@ fn test_native_runner_prepares_online_fix_and_propagates_payload() {
     // Verify OnlineFix64.dll and OnlineFix.ini were propagated downward to the shipping binary folder
     assert!(shipping_dir.join("OnlineFix64.dll").is_file());
     assert!(shipping_dir.join("OnlineFix.ini").is_file());
-
-    let _ = fs::remove_dir_all(&ws);
-}
-
-#[test]
-fn test_plugin_install_with_catalog_url_and_missing_native_library() {
-    let ws = temp_workspace("plugin-bundle-install");
-    let bundle_src = ws.join("bundle");
-    fs::create_dir_all(&bundle_src).unwrap();
-
-    // Manifest with a catalog URL and a C++ library name that does not exist on disk
-    fs::write(
-        bundle_src.join("plugin.json"),
-        r#"{
-            "id": "remote-provider",
-            "name": "Remote Provider",
-            "version": "1.0.0",
-            "apiVersion": 4,
-            "library": "nonexistent_lib",
-            "catalogUrl": "https://example.org/catalog.json"
-        }"#,
-    )
-    .unwrap();
-
-    let archive = ws.join("remote-provider.arach");
-    // Pack using zip/bsdtar
-    let status = azdl::clean_command("tar")
-        .args(["-a", "-c", "-f"])
-        .arg(&archive)
-        .arg("-C")
-        .arg(&ws)
-        .arg("bundle")
-        .status();
-    if status.is_err() || !status.unwrap().success() {
-        // Fallback to bsdtar if tar without -a
-        let _ = azdl::clean_command("bsdtar")
-            .args(["--format", "zip", "-cf"])
-            .arg(&archive)
-            .arg("-C")
-            .arg(&ws)
-            .arg("bundle")
-            .status();
-    }
-
-    if archive.is_file() {
-        let manifest = azdl::plugins::install_bundle(&ws, &archive).unwrap();
-        assert_eq!(manifest.id, "remote-provider");
-        assert_eq!(
-            manifest.catalog_url.as_deref(),
-            Some("https://example.org/catalog.json")
-        );
-
-        let installed = azdl::plugins::list_plugins(&ws).unwrap();
-        assert!(installed.iter().any(|p| p.id == "remote-provider"));
-    }
 
     let _ = fs::remove_dir_all(&ws);
 }

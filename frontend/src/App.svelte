@@ -75,8 +75,6 @@
   // App core state from Rust backend
   let appState = $state({
     library: [],
-    plugins: [],
-    plugin_store: [],
     jobs: [],
     running_games: {},
     tasks: [],
@@ -113,8 +111,8 @@
 
   let settingsCategory = $state('storage');
 
-  function handleOpenPlugins() {
-    settingsCategory = 'plugins';
+  function handleOpenSettings() {
+    settingsCategory = 'storage';
     activeTab = 'settings';
   }
 
@@ -428,7 +426,6 @@
           jobs={appState.jobs}
           tasks={appState.tasks}
           {dlcRevision}
-          plugins={appState.plugins}
           settings={appState.settings}
           searchQuery={tabSearches.catalog}
           onSelectGame={(game) => handleSelectGame(game, 'catalog')}
@@ -453,8 +450,6 @@
           {runners}
           dataDir={appState.data_dir}
           platform={appState.platform}
-          plugins={appState.plugins}
-          pluginStore={appState.plugin_store}
           settings={appState.settings}
           diagnostics={appState.diagnostics}
           library={appState.library}
@@ -478,7 +473,6 @@
         <GamePageView
           game={viewedGame}
           library={appState.library}
-          plugins={appState.plugins}
           settings={appState.settings}
           platform={appState.platform}
           {runners}
@@ -488,7 +482,7 @@
           onBack={handleBackFromGame}
           onLaunchGame={handleLaunch}
           onStopGame={handleStop}
-          onOpenPlugins={handleOpenPlugins}
+          onOpenSettings={handleOpenSettings}
           onRefresh={refreshState}
           onShowToast={showToast}
         />

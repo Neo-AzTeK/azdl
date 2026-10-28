@@ -1,17 +1,14 @@
-use crate::archive::{extract_checked, extract_checked_with_passphrase};
-use crate::catalog::{
-    AddonKind, CatalogAddon, CatalogGame, InstallOutcome, save_pending_setup_origin, stamp_origin,
-};
+use crate::catalog::{CatalogGame, InstallOutcome, save_pending_setup_origin, stamp_origin};
 use crate::jobs::{
     DownloadJob, InstallKind, InstallPlan, InstallState, JobKind, JobStatus, job_id_for_target,
     load_job, now, save_job,
 };
 use crate::steam::{import_steam, scan_steam, steam_root};
+use crate::steam_access::fetch_manifest_bundle as fetch_provider_bundle;
 use crate::steam_metadata::{ResolvedDepotSource, SteamAppMetadata};
 use crate::{Game, Library, Result, clean_command, discovery, validate_id};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::steam_engine::{DownloadProgressSpan, download_steam_depots_with_progress};
@@ -23,91 +20,6 @@ pub struct DepotInfo {
     pub manifest_id: u64,
     pub manifest_path: PathBuf,
     pub depot_key: String,
-}
-
-fn validate_manifest_archive(path: &Path, app_id: u32) -> Result<()> {
-    let mut file = fs::File::open(path)?;
-    let mut signature = [0u8; 4];
-    if file.read_exact(&mut signature).is_err()
-        || !matches!(
-            signature,
-            [b'P', b'K', 3, 4] | [b'P', b'K', 5, 6] | [b'P', b'K', 7, 8]
-        )
-    {
-        return Err(format!(
-            "No usable download manifest is available for Steam App ID {app_id}: the selected plugin's provider did not return a ZIP manifest"
-        )
-        .into());
-    }
-    Ok(())
-}
-
-fn fetch_provider_bundle(root: &Path, app_id: u32) -> Result<PathBuf> {
-    fetch_provider_bundle_for(None, "steamidra", root, app_id)
-}
-
-fn fetch_provider_bundle_for(
-    data_dir: Option<&Path>,
-    plugin_id: &str,
-    root: &Path,
-    app_id: u32,
-) -> Result<PathBuf> {
-    fs::create_dir_all(root)?;
-    let archive = root.join(format!("{app_id}.zip"));
-    if fs::symlink_metadata(&archive).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        return Err("Manifest archive path is a symbolic link".into());
-    }
-    let url = if let Some(dir) = data_dir {
-        crate::plugins::manifest_download_url_for_plugin(dir, plugin_id, app_id)?
-    } else {
-        format!("https://ryuu.badkiko.ru/v1/download/{app_id}")
-    };
-    if !archive.is_file() || archive.metadata()?.len() == 0 {
-        let output = clean_command("curl")
-            .args([
-                "--fail",
-                "--location",
-                "--silent",
-                "--show-error",
-                "--max-time",
-                "30",
-                "--proto",
-                "=https",
-                "--proto-redir",
-                "=https",
-                "--write-out",
-                "%{http_code}",
-                "--output",
-            ])
-            .arg(&archive)
-            .arg(&url)
-            .output()?;
-        if !output.status.success() {
-            let _ = fs::remove_file(&archive);
-            let code = String::from_utf8_lossy(&output.stdout);
-            if matches!(code.trim(), "404" | "410") {
-                return Err(format!(
-                    "No download manifest is available for Steam App ID {app_id} from the selected plugin's provider"
-                )
-                .into());
-            }
-            return Err(format!(
-                "Manifest provider could not be reached for Steam App ID {app_id}"
-            )
-            .into());
-        }
-    }
-    validate_manifest_archive(&archive, app_id)?;
-    let unpacked = root.join("manifest");
-    if let Ok(meta) = fs::symlink_metadata(&unpacked) {
-        if !meta.is_dir() || meta.file_type().is_symlink() {
-            return Err("Manifest staging path is not a directory".into());
-        }
-        fs::remove_dir_all(&unpacked)?;
-    }
-    fs::create_dir(&unpacked)?;
-    extract_checked(&archive, &unpacked)?;
-    Ok(unpacked)
 }
 
 /// Resolve each provider depot to exactly one manifest revision.
@@ -264,10 +176,6 @@ fn parse_lua_content(
 
 pub use crate::archive::normalize_windows_paths;
 
-fn base_install_addons(addons: &[CatalogAddon]) -> impl Iterator<Item = &CatalogAddon> {
-    addons.iter().filter(|addon| addon.kind != AddonKind::Dlc)
-}
-
 /// Verify every target base depot in an older installation without changing game files.
 pub fn verify_legacy_base(
     game: &Game,
@@ -382,8 +290,6 @@ enum ManifestRevisionPolicy {
 
 fn resolve_dlc_download_groups(
     root: &Path,
-    data_dir: &Path,
-    plugin_id: &str,
     metadata: &SteamAppMetadata,
     selected_ids: &BTreeSet<u32>,
 ) -> Result<ResolvedDepotDownloads> {
@@ -392,9 +298,7 @@ fn resolve_dlc_download_groups(
         metadata,
         selected_ids,
         crate::steam_metadata::fetch_appinfo,
-        |bundle_root, app_id| {
-            fetch_provider_bundle_for(Some(data_dir), plugin_id, bundle_root, app_id)
-        },
+        fetch_provider_bundle,
     )
 }
 
@@ -509,19 +413,6 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         return Err("DLC App ID is missing".into());
     }
     let app_id = game.steam_app_id.ok_or("This game has no Steam App ID")?;
-    let source = game
-        .origin
-        .as_ref()
-        .and_then(|origin| origin.qualified_id.split_once(':'))
-        .map(|(source, _)| source)
-        .ok_or("This game has no selected download source")?;
-    if source != "steamidra"
-        && (!crate::plugins::plugin_has_capability(data_dir, source, "steam_depot_download")
-            || !crate::plugins::plugin_has_capability(data_dir, source, "manifest_provider"))
-    {
-        return Err("This game's source does not provide Steam depot DLC".into());
-    }
-    let _ = crate::plugins::manifest_download_url_for_plugin(data_dir, source, dlc_id)?;
     let root = data_dir
         .join("dlc-downloads")
         .join(&game.id)
@@ -588,8 +479,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             )
             .into());
         }
-        let downloads =
-            resolve_dlc_download_groups(&root, data_dir, source, &source_metadata, &selected_ids)?;
+        let downloads = resolve_dlc_download_groups(&root, &source_metadata, &selected_ids)?;
         crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
         let manifests = downloads
             .depots
@@ -650,9 +540,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
                     &root,
                     &metadata,
                     crate::steam_metadata::fetch_appinfo,
-                    |bundle_root, app_id| {
-                        fetch_provider_bundle_for(Some(data_dir), source, bundle_root, app_id)
-                    },
+                    |bundle_root, app_id| fetch_provider_bundle(bundle_root, app_id),
                 )?;
                 crate::steam_content::save_base_receipt(data_dir, &verified)?;
                 verified
@@ -663,9 +551,7 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
             &root.join("base-verification-provider"),
             &metadata,
             crate::steam_metadata::fetch_appinfo,
-            |bundle_root, app_id| {
-                fetch_provider_bundle_for(Some(data_dir), source, bundle_root, app_id)
-            },
+            |bundle_root, app_id| fetch_provider_bundle(bundle_root, app_id),
         )?;
         crate::steam_manifest::check_additive_install(&manifests, &game.install_dir)?;
         crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
@@ -1026,8 +912,8 @@ fn prepare_base_scratch(data_dir: &Path, scratch: &Path) -> Result<()> {
 }
 
 /// Perform end-to-end installation of a Steam manifest-based catalog game:
-/// downloads manifest and addons, invokes native depotkit engine, normalizes paths,
-/// overlays addons, registers into library, and tracks full progress in the transfers drawer.
+/// downloads exact manifests, invokes the native engine, verifies files and
+/// registers the installation while reporting background progress.
 pub fn install_steam_manifest_game(
     library: &mut Library,
     data_dir: &Path,
@@ -1087,59 +973,7 @@ fn install_steam_manifest_game_in_inner(
 ) -> Result<InstallOutcome> {
     prepare_base_scratch(data_dir, download_dir)?;
 
-    let plugin_id = if game.source_id.is_empty() {
-        "steamidra"
-    } else {
-        &game.source_id
-    };
-    let manifest_url =
-        crate::plugins::manifest_download_url_for_plugin(data_dir, plugin_id, app_id)?;
-    let manifest_zip = download_dir.join(format!("{app_id}.zip"));
-    if !manifest_zip.is_file() || manifest_zip.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
-        let output = clean_command("curl")
-            .args([
-                "--fail",
-                "--location",
-                "--retry",
-                "2",
-                "--max-time",
-                "30",
-                "--proto",
-                "=https",
-                "--proto-redir",
-                "=https",
-                "--write-out",
-                "%{http_code}",
-                "--output",
-            ])
-            .arg(&manifest_zip)
-            .arg(&manifest_url)
-            .output()?;
-        if !output.status.success() {
-            let _ = fs::remove_file(&manifest_zip);
-            let http_code = String::from_utf8_lossy(&output.stdout);
-            if matches!(http_code.trim(), "404" | "410") {
-                return Err(format!("No download manifest is available for Steam App ID {app_id} from the selected plugin's provider").into());
-            }
-            return Err(format!(
-                "Manifest provider could not be reached for Steam App ID {app_id} ({})",
-                output.status
-            )
-            .into());
-        }
-    }
-
-    validate_manifest_archive(&manifest_zip, app_id)?;
-
-    let unpack_dir = download_dir.join("manifest");
-    if let Ok(metadata) = fs::symlink_metadata(&unpack_dir) {
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err("Manifest staging path is not a directory".into());
-        }
-        fs::remove_dir_all(&unpack_dir)?;
-    }
-    fs::create_dir_all(&unpack_dir)?;
-    extract_checked(&manifest_zip, &unpack_dir)?;
+    let unpack_dir = fetch_provider_bundle(download_dir, app_id)?;
 
     let depot_cache = download_dir.join("depotcache");
     fs::create_dir_all(&depot_cache)?;
@@ -1151,45 +985,6 @@ fn install_steam_manifest_game_in_inner(
             .is_some_and(|ext| ext == "manifest")
         {
             fs::copy(entry.path(), depot_cache.join(entry.file_name()))?;
-        }
-    }
-
-    // 3. Download addons (e.g. Online-Fix RAR)
-    let mut addon_files = Vec::new();
-    for addon in base_install_addons(&game.addons) {
-        if let Some(uri) = &addon.uri {
-            let filename = addon
-                .filename
-                .clone()
-                .unwrap_or_else(|| format!("{}.rar", addon.id));
-            let dest = download_dir.join(&filename);
-            if !dest.is_file() || dest.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
-                let mut cmd = clean_command("curl");
-                cmd.args([
-                    "--fail",
-                    "--location",
-                    "--retry",
-                    "2",
-                    "--max-time",
-                    "120",
-                    "--proto",
-                    "=https,http",
-                    "--proto-redir",
-                    "=https,http",
-                ]);
-                if let Some(ref referer) = addon.referer {
-                    cmd.arg("--referer").arg(referer);
-                }
-                let status = cmd.arg("--output").arg(&dest).arg(uri).status();
-                if let Ok(st) = status
-                    && st.success()
-                    && dest.is_file()
-                {
-                    addon_files.push(dest);
-                }
-            } else {
-                addon_files.push(dest);
-            }
         }
     }
 
@@ -1212,7 +1007,7 @@ fn install_steam_manifest_game_in_inner(
             if manifest_app_id == app_id {
                 Ok(unpack_dir.clone())
             } else {
-                fetch_provider_bundle_for(Some(data_dir), plugin_id, root, manifest_app_id)
+                fetch_provider_bundle(root, manifest_app_id)
             }
         },
     )?;
@@ -1391,27 +1186,11 @@ fn install_steam_manifest_game_in_inner(
     // 9. Normalize backslash paths on Linux
     let _ = normalize_windows_paths(&target_dir);
 
-    // 10. Extract addons over target directory
-    for addon_file in &addon_files {
-        let _ = extract_checked_with_passphrase(addon_file, &target_dir, Some("online-fix.me"));
-        let _ = normalize_windows_paths(&target_dir);
-    }
-
     // 11. Import into Library
     let import_result = discovery::import_game(library, &game.id, &game.title, &target_dir);
     match import_result {
         Ok(_) => {
             stamp_origin(library, &game.id, game);
-            if game.plugin_install_kind == Some(2)
-                && let Some(installed) = library.games.get(&game.id)
-                && let Err(error) = crate::bundled_fix::ensure_steamidra_fix(installed, data_dir)
-            {
-                job.status = JobStatus::Failed;
-                job.error = Some(format!("Bundled fix installation failed: {error}"));
-                job.updated_unix = now().unwrap_or(0);
-                let _ = save_job(data_dir, &job);
-                return Err(error);
-            }
             job.status = JobStatus::Complete;
             job.install_state = Some(InstallState::Complete);
             job.updated_unix = now().unwrap_or(0);
@@ -1432,6 +1211,7 @@ fn install_steam_manifest_game_in_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::steam_access::validate_manifest_archive;
     use sha1::{Digest, Sha1};
 
     #[test]
@@ -1623,30 +1403,6 @@ mod tests {
         manifest.extend(section(0x1B81B817, &[]));
         manifest.extend(0x32C415AB_u32.to_le_bytes());
         manifest
-    }
-
-    #[test]
-    fn base_install_does_not_fetch_catalog_dlc_archives() {
-        let addon = |id: &str, kind| CatalogAddon {
-            id: id.into(),
-            title: id.into(),
-            kind,
-            uri: Some(format!("https://example.invalid/{id}.zip")),
-            filename: Some(format!("{id}.zip")),
-            archive_parts: Vec::new(),
-            sha256: None,
-            archive_part_hashes: Vec::new(),
-            content_available: true,
-            referer: None,
-        };
-        let available = [
-            addon("fix", AddonKind::Addon),
-            addon("bonus", AddonKind::Dlc),
-        ];
-        let selected = base_install_addons(&available)
-            .map(|addon| addon.id.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(selected, vec!["fix"]);
     }
 
     #[test]

@@ -55,15 +55,6 @@ export function notifyError(err, actionHandlers = {}) {
         };
       }
       break;
-    case 'no_plugin_available':
-    case 'plugin_not_found':
-      if (actionHandlers.onOpenSettings) {
-        action = {
-          label: 'Plugins Store',
-          onClick: () => actionHandlers.onOpenSettings('plugins'),
-        };
-      }
-      break;
     case 'drive_full':
     case 'drive_not_found':
       if (actionHandlers.onOpenSettings) {

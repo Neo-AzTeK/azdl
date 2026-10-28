@@ -148,25 +148,6 @@ describe('Unified Notification System (notifications.js)', () => {
     expect(settingsOpened).toBe(true);
   });
 
-  it('attaches contextual remediation action for no_plugin_available', () => {
-    let pluginsOpened = false;
-    notifyError(
-      { code: 'no_plugin_available', message: 'No plugin installed' },
-      {
-        onOpenSettings: (cat) => {
-          expect(cat).toBe('plugins');
-          pluginsOpened = true;
-        },
-      }
-    );
-
-    const list = get(notifications);
-    expect(list).toHaveLength(1);
-    expect(list[0].action.label).toBe('Plugins Store');
-
-    list[0].action.onClick();
-    expect(pluginsOpened).toBe(true);
-  });
 
 });
 

@@ -4,7 +4,6 @@ use crate::Result;
 use crate::jobs::{JobStatus, clear_cancel, load_job, now, save_job};
 use crate::steam_depot::DepotInfo;
 use std::ffi::{CStr, CString, c_char, c_double, c_int, c_void};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -301,6 +300,7 @@ pub(crate) fn download_steam_depots_with_progress(
 mod tests {
     use super::*;
     use crate::jobs::{DownloadJob, InstallState, JobKind, job_id_for_target};
+    use std::fs;
     #[test]
     fn standalone_request_matches_public_depotkit_layout() {
         assert_eq!(std::mem::offset_of!(StandaloneDepotkitRequest, app_id), 0);

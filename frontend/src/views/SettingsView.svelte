@@ -13,10 +13,6 @@
     removeStorageDrive,
     setDefaultDrive,
     moveGameToDrive,
-    refreshPluginStore,
-    installStorePlugin,
-    removePlugin,
-    setFavoritePlugin,
     downloadProtonGE,
     openGameFolder,
   } from '../api.js';
@@ -24,12 +20,10 @@
   let {
     seedColor = $bindable('#10B981'),
     themeMode = $bindable('dark'), // 'system' | 'dark' | 'light' | 'amoled'
-    activeCategory = $bindable('storage'), // 'storage' | 'launch' | 'plugins' | 'appearance' | 'patches' | 'about'
+    activeCategory = $bindable('storage'), // 'storage' | 'launch' | 'appearance' | 'patches' | 'about'
     runners = [],
     dataDir = '',
     platform = 'linux',
-    plugins = [],
-    pluginStore = [],
     settings = null,
     diagnostics = [],
     library = [],
@@ -74,16 +68,9 @@
   let movingGameId = $state(null);
   let individualTargetDrives = $state({});
 
-  // Plugins UI state
-  let pluginSearchQuery = $state('');
-  let isRefreshingStore = $state(false);
-  let installingPluginId = $state(null);
-  let lastRefreshedCategory = $state(null);
-
   let settingsCategories = $derived([
     { id: 'storage', label: 'Storage & Drives', icon: 'M2 20h20v-4H2v4zm2-3h2v2H4v-2zM2 4v4h20V4H2zm4 3H4V5h2v2zm-4 7h20v-4H2v4zm2-3h2v2H4v-2z', keywords: ['storage', 'drive', 'disk', 'folder', 'migrate', 'path', 'games'] },
     { id: 'launch', label: platform === 'windows' ? 'Launch Options' : 'Launch & Runners', icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z', keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'arguments', 'dxvk', 'prefix'] },
-    { id: 'plugins', label: 'Plugins & Sources', icon: 'M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7 1.49 0 2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5s-1.12-2.5-2.5-2.5z', keywords: ['plugin', 'store', 'source', 'catalog', 'feed', 'json', 'url', 'store', 'default'] },
     { id: 'appearance', label: 'Material You Theming', icon: 'M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.23 19.64 10.57 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z', keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light'] },
     { id: 'patches', label: 'Patches', icon: 'M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z', keywords: ['patch', 'patches', 'steamless', 'onlinefix', 'overlay', 'drm', 'steamstub', 'fix', 'goldberg', 'dlc', 'ea'] },
     { id: 'about', label: 'About & Diagnostics', icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z', keywords: ['about', 'diagnostics', 'doctor', 'version', 'system', 'bwrap', 'unrar', 'bsdtar'] },
@@ -94,7 +81,6 @@
     const q = query.toLowerCase().trim();
     if (cat.label.toLowerCase().includes(q)) return true;
     if (cat.keywords.some(k => k.includes(q))) return true;
-    if (cat.id === 'plugins' && filteredPlugins.length > 0 && q.length > 1) return true;
     return false;
   }
 
@@ -110,49 +96,6 @@
       }
     }
   });
-
-  // Auto-refresh plugin store when navigating to the Plugins & Sources category
-  $effect(() => {
-    if (activeCategory === 'plugins' && lastRefreshedCategory !== 'plugins') {
-      lastRefreshedCategory = 'plugins';
-      handleRefreshStore();
-    } else if (activeCategory !== 'plugins') {
-      lastRefreshedCategory = activeCategory;
-    }
-  });
-
-  // Plugin Modals state
-  let showAddStoreModal = $state(false);
-  let newStoreUrl = $state('');
-  let isAddingStore = $state(false);
-
-  let allPlugins = $derived.by(() => {
-    const list = [...pluginStore];
-    for (const inst of plugins) {
-      if (!list.some((p) => p.id === inst.id)) {
-        list.push({
-          id: inst.id,
-          name: inst.name || inst.id,
-          description: 'Locally installed plugin bundle.',
-          version: inst.version || '1.0.0',
-          recommended: false,
-        });
-      }
-    }
-    return list;
-  });
-
-  let filteredPlugins = $derived(
-    allPlugins.filter((p) => {
-      if (!pluginSearchQuery.trim()) return true;
-      const q = pluginSearchQuery.toLowerCase();
-      return (
-        (p.name || '').toLowerCase().includes(q) ||
-        (p.id || '').toLowerCase().includes(q) ||
-        (p.description || '').toLowerCase().includes(q)
-      );
-    })
-  );
 
   // Launch UI state
   let isDownloadingProton = $state(false);
@@ -286,83 +229,6 @@
       notify(`Failed to download Proton-GE: ${e}`, 'error');
     } finally {
       isDownloadingProton = false;
-    }
-  }
-
-  // --- Plugin Actions ---
-  async function handleRefreshStore() {
-    isRefreshingStore = true;
-    try {
-      await refreshPluginStore();
-      if (onRefresh) await onRefresh();
-    } catch (e) {
-      notify(`Failed to refresh plugin store: ${e}`, 'error');
-    } finally {
-      isRefreshingStore = false;
-    }
-  }
-
-  async function handleAddStore() {
-    if (!newStoreUrl.trim()) {
-      notify('Store URL is required', 'error');
-      return;
-    }
-    isAddingStore = true;
-    try {
-      const res = await runAction({
-        action: 'plugin-store-add',
-        location: newStoreUrl.trim(),
-      });
-      notify(`Store added (${res?.count ?? 0} plugins cached)`, 'info');
-      newStoreUrl = '';
-      showAddStoreModal = false;
-      await handleRefreshStore();
-      if (onRefresh) await onRefresh();
-    } catch (e) {
-      notify(`Error adding store: ${e}`, 'error');
-    } finally {
-      isAddingStore = false;
-    }
-  }
-
-  async function handleInstallStorePlugin(id) {
-    installingPluginId = id;
-    try {
-      await installStorePlugin(id);
-      notify(`Plugin ${id} installed successfully`, 'info');
-      if (onRefresh) await onRefresh();
-    } catch (e) {
-      notify(`Failed to install plugin: ${e}`, 'error');
-    } finally {
-      installingPluginId = null;
-    }
-  }
-
-  function requestUninstallPlugin(id, name) {
-    triggerConfirm({
-      title: 'Uninstall Plugin',
-      message: `Are you sure you want to uninstall '${name || id}'?`,
-      confirmText: 'Uninstall',
-      isDestructive: true,
-      action: async () => {
-        try {
-          await removePlugin(id);
-          notify(`Plugin ${id} uninstalled`, 'info');
-          if (onRefresh) await onRefresh();
-        } catch (e) {
-          notify(`Failed to uninstall plugin: ${e}`, 'error');
-        }
-      },
-    });
-  }
-
-  async function handleFavoritePlugin(id) {
-    try {
-      await setFavoritePlugin(id);
-      if (onRefresh) await onRefresh();
-      notify.success(id ? 'Default download plugin updated.' : 'Default download plugin cleared.');
-    } catch (e) {
-      notify.error(`Could not update default plugin: ${e}`);
     }
   }
 
@@ -648,95 +514,6 @@
       </SectionCard>
 
     <!-- 3. PLUGINS & SOURCES (STORE & INSTALLED ONLY) -->
-    {:else if activeCategory === 'plugins'}
-      <div class="panel-header">
-        <h2>Plugins & Sources</h2>
-        <span class="subtext">Browse community plugins, install store packages, or manage installed extensions.</span>
-      </div>
-
-      <div class="plugins-toolbar">
-        <div class="plugin-search-box">
-          <input
-            type="text"
-            class="md3-input plugin-search-input"
-            placeholder="Search store and local plugins..."
-            bind:value={pluginSearchQuery}
-          />
-        </div>
-
-        <div class="toolbar-actions">
-          <button class="md3-btn tonal small" onclick={() => (showAddStoreModal = true)}>
-            <svg class="btn-icon" viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
-            Add Store
-          </button>
-        </div>
-      </div>
-
-      {#if filteredPlugins.length === 0}
-        <div class="empty-state-card">
-          <p class="desc">No plugins found matching your search.</p>
-        </div>
-      {:else}
-        <div class="plugin-cards-grid">
-          {#each filteredPlugins as p}
-            {@const installedMatch = plugins.find((inst) => inst.id === p.id)}
-            {@const isInstalled = !!installedMatch}
-            <div class="plugin-card" class:installed-card={isInstalled}>
-              <div class="plugin-card-header">
-                <div class="plugin-title-row">
-                  <span class="plugin-title">{p.name}</span>
-                  <span class="plugin-id-sub">{p.id}</span>
-                </div>
-                <div class="plugin-badges">
-                  {#if isInstalled}
-                    <span class="badge installed-badge">Installed</span>
-                    {#if settings?.favorite_plugin_id === p.id}
-                      <span class="badge recommended-badge">Default</span>
-                    {/if}
-                  {/if}
-                  {#if p.recommended}
-                    <span class="badge recommended-badge">Recommended</span>
-                  {/if}
-                </div>
-              </div>
-              <p class="plugin-desc">{p.description || 'Native Arachnel v4 plugin.'}</p>
-              <div class="plugin-footer">
-                <span class="plugin-version">
-                  v{installedMatch ? installedMatch.version : p.version}
-                </span>
-                <div class="card-action-group">
-                  {#if isInstalled}
-                    <button
-                      class="md3-btn tonal small"
-                      onclick={() => handleFavoritePlugin(settings?.favorite_plugin_id === p.id ? null : p.id)}
-                      aria-pressed={settings?.favorite_plugin_id === p.id}
-                    >
-                      {settings?.favorite_plugin_id === p.id ? 'Clear default' : 'Set default'}
-                    </button>
-                    <button
-                      class="md3-btn danger small"
-                      onclick={() => requestUninstallPlugin(p.id, p.name)}
-                      title="Uninstall plugin"
-                    >
-                      Uninstall
-                    </button>
-                  {:else}
-                    <button
-                      class="md3-btn primary small"
-                      onclick={() => handleInstallStorePlugin(p.id)}
-                      disabled={installingPluginId === p.id}
-                    >
-                      {installingPluginId === p.id ? 'Installing...' : 'Install'}
-                    </button>
-                  {/if}
-                </div>
-              </div>
-            </div>
-          {/each}
-        </div>
-      {/if}
-
-    <!-- 5. APPEARANCE & MATERIAL YOU -->
     {:else if activeCategory === 'appearance'}
       <div class="panel-header">
         <h2>Material You Personalization</h2>
@@ -976,39 +753,6 @@
       </SectionCard>
     {/if}
   </main>
-
-  <!-- MODAL: ADD STORE -->
-  <Modal
-    open={showAddStoreModal}
-    title="Add Plugin Store"
-    subtitle="Provide the HTTPS URL to a remote plugins.json index or catalog repository feed."
-    onClose={() => (showAddStoreModal = false)}
-  >
-    {#snippet children()}
-      <div class="form-group">
-        <label for="store-url-input">Store URL (HTTPS)</label>
-        <input
-          id="store-url-input"
-          type="text"
-          class="md3-input"
-          placeholder="https://example.com/plugins.json"
-          bind:value={newStoreUrl}
-        />
-      </div>
-    {/snippet}
-    {#snippet actions()}
-      <button class="md3-btn text" onclick={() => (showAddStoreModal = false)}>
-        Cancel
-      </button>
-      <button
-        class="md3-btn primary"
-        onclick={handleAddStore}
-        disabled={!newStoreUrl.trim() || isAddingStore}
-      >
-        {isAddingStore ? 'Adding...' : 'Add Store'}
-      </button>
-    {/snippet}
-  </Modal>
 
   <ConfirmModal
     bind:open={confirmDialog.open}
@@ -1327,126 +1071,6 @@
 
 
   /* SUBTABS */
-  /* PLUGINS TOOLBAR & GRID */
-  .plugins-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    flex-wrap: wrap;
-    margin-bottom: 4px;
-  }
-
-  .plugin-search-box {
-    flex: 1;
-    min-width: 260px;
-  }
-
-  .plugin-search-input {
-    width: 100%;
-  }
-
-  .toolbar-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .empty-state-card {
-    padding: 32px 20px;
-    text-align: center;
-    background: var(--md-sys-color-surface-container-high);
-    border-radius: var(--md-sys-shape-medium);
-  }
-
-  .plugin-cards-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 14px;
-  }
-
-  .plugin-card {
-    background: var(--md-sys-color-surface-container-high);
-    border: 1px solid var(--md-sys-color-outline-variant);
-    border-radius: var(--md-sys-shape-large);
-    padding: 16px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    transition: border-color 0.18s ease;
-  }
-
-  .plugin-card.installed-card {
-    border-color: rgba(var(--md-sys-color-primary-rgb, 16, 185, 129), 0.35);
-  }
-
-  .plugin-card-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 10px;
-  }
-
-  .plugin-title-row {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
-  .plugin-title {
-    font-weight: 600;
-    font-size: 0.95rem;
-    color: var(--md-sys-color-on-surface);
-  }
-
-  .plugin-id-sub {
-    font-size: 0.72rem;
-    color: var(--md-sys-color-on-surface-variant);
-    font-family: monospace;
-  }
-
-  .plugin-badges {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-shrink: 0;
-  }
-
-  .installed-badge {
-    background: var(--md-sys-color-primary-container);
-    color: var(--md-sys-color-on-primary-container);
-  }
-
-  .plugin-desc {
-    font-size: 0.8rem;
-    color: var(--md-sys-color-on-surface-variant);
-    margin: 0;
-    flex: 1;
-    line-height: 1.45;
-  }
-
-  .plugin-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-top: 4px;
-    gap: 8px;
-  }
-
-  .plugin-version {
-    font-size: 0.75rem;
-    color: var(--md-sys-color-on-surface-variant);
-    font-family: monospace;
-  }
-
-  .card-action-group {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-
   /* APPEARANCE SWATCHES */
   .seed-swatches {
     display: flex;

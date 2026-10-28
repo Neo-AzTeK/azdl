@@ -12,7 +12,6 @@
   let {
     jobs = [],
     tasks = [],
-    plugins = [],
     settings = null,
     searchQuery = '',
     onSelectGame = null,
@@ -68,28 +67,6 @@
   async function handleInstallGame(game) {
     if (!game) return;
     if (await selectCatalogEntry(game, false)) return;
-    const favoriteId = settings?.favorite_plugin_id;
-    const defaultPluginId = plugins.find((plugin) => plugin.id === favoriteId)?.id
-      || (plugins.length === 1 ? plugins[0].id : null);
-    if (game.source_id === 'steam' || !game.source_id) {
-      if (!defaultPluginId && plugins.length > 1) {
-        onSelectGame?.(game);
-        return;
-      }
-      if (!defaultPluginId || plugins.length === 0) {
-        notifyError(
-          {
-            code: 'no_plugin_available',
-            message: 'Install a download plugin from Settings first.',
-          },
-          {
-            onOpenSettings: () => onGoToSettings?.(),
-          }
-        );
-        return;
-      }
-    }
-
     try {
       await runAction({
         action: 'steam-install',
@@ -97,7 +74,6 @@
         title: game.title,
         banner_url: game.banner_url || game.header_image || game.large_capsule_image || null,
         cover_url: game.cover_url || null,
-        plugin_id: defaultPluginId || undefined,
       });
       if (onRefresh) onRefresh();
     } catch (err) {

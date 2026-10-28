@@ -23,7 +23,7 @@ describe('App-wide Per-Tab Search Architecture', () => {
           case 'catalog':
             return 'Search catalog packages, stores & sources...';
           case 'settings':
-            return 'Search settings, plugins & options...';
+            return 'Search settings & options...';
           case 'game':
             return 'Search game media & options...';
           default:
@@ -77,7 +77,7 @@ describe('App-wide Per-Tab Search Architecture', () => {
     mgr.switchTab('settings');
     expect(mgr.getActiveTab()).toBe('settings');
     expect(mgr.getDisplayedQuery()).toBe('');
-    expect(mgr.getPlaceholder()).toBe('Search settings, plugins & options...');
+    expect(mgr.getPlaceholder()).toBe('Search settings & options...');
 
     // Type query in settings tab
     mgr.setQuery('proton');
@@ -128,7 +128,6 @@ describe('Settings Category Search Matching', () => {
   const categories = [
     { id: 'storage', label: 'Storage & Drives', keywords: ['storage', 'drive', 'disk', 'folder', 'migrate', 'path', 'games'] },
     { id: 'launch', label: 'Launch & Runners', keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'arguments', 'dxvk', 'prefix'] },
-    { id: 'plugins', label: 'Plugins & Sources', keywords: ['plugin', 'store', 'source', 'catalog', 'feed', 'json', 'url', 'generator', 'make'] },
     { id: 'appearance', label: 'Material You Theming', keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light'] },
     { id: 'patches', label: 'Patches', keywords: ['patch', 'patches', 'steamless', 'onlinefix', 'overlay', 'drm', 'steamstub', 'fix'] },
     { id: 'about', label: 'About & Diagnostics', keywords: ['about', 'diagnostics', 'doctor', 'version', 'system', 'bwrap', 'unrar', 'bsdtar'] },
@@ -144,7 +143,6 @@ describe('Settings Category Search Matching', () => {
   it('matches category by direct label or keywords', () => {
     const storageCat = categories.find(c => c.id === 'storage');
     const launchCat = categories.find(c => c.id === 'launch');
-    const pluginsCat = categories.find(c => c.id === 'plugins');
     const themeCat = categories.find(c => c.id === 'appearance');
 
     expect(matchesCategory(storageCat, 'drive')).toBe(true);
@@ -152,9 +150,6 @@ describe('Settings Category Search Matching', () => {
     expect(matchesCategory(launchCat, 'proton')).toBe(true);
     expect(matchesCategory(launchCat, 'wine')).toBe(true);
     expect(matchesCategory(launchCat, 'prefix')).toBe(true);
-    expect(matchesCategory(pluginsCat, 'plugin')).toBe(true);
-    expect(matchesCategory(pluginsCat, 'feed')).toBe(true);
-    expect(matchesCategory(pluginsCat, 'generator')).toBe(true);
     expect(matchesCategory(themeCat, 'material')).toBe(true);
     expect(matchesCategory(themeCat, 'storage')).toBe(false);
   });
@@ -164,14 +159,13 @@ describe('Dedicated Game Page & Transfer Auto-Clear State Logic', () => {
   it('correctly maps Steam App ID from various candidate strings', () => {
     function extractSteamAppId(cand) {
       if (!cand) return null;
-      const match = cand.match(/steam-(\d+)/i) || cand.match(/steamidra:steam-(\d+)/i);
+      const match = cand.match(/steam-(\d+)/i);
       if (match) return match[1];
       if (/^\d{3,9}$/.test(cand.trim())) return cand.trim();
       return null;
     }
 
     expect(extractSteamAppId('steam-1091500')).toBe('1091500');
-    expect(extractSteamAppId('steamidra:steam-730')).toBe('730');
     expect(extractSteamAppId('1245620')).toBe('1245620');
     expect(extractSteamAppId('custom-game-slug')).toBe(null);
   });
@@ -409,34 +403,6 @@ describe('UI Cleanliness, Horizontal Cards & Library Component Invariants', () =
     expect(runningStatus.hasBlinkingDot).toBe(false);
   });
 
-  it('simplifies Plugins & Sources settings to store-only with auto-refresh on load and store add', () => {
-    let refreshCount = 0;
-    const storeState = {
-      stores: ['default-store'],
-      refresh: () => { refreshCount++; },
-    };
-
-    // Navigating to plugins category triggers auto-refresh
-    function onCategoryChange(category) {
-      if (category === 'plugins') {
-        storeState.refresh();
-      }
-    }
-
-    // Adding store triggers auto-refresh
-    function onAddStore(url) {
-      storeState.stores.push(url);
-      storeState.refresh();
-    }
-
-    onCategoryChange('plugins');
-    expect(refreshCount).toBe(1);
-
-    onAddStore('https://example.com/store.json');
-    expect(refreshCount).toBe(2);
-    expect(storeState.stores).toContain('https://example.com/store.json');
-  });
-
   it('enforces pending game modal invariants: fixed directory name, executable selector, and directory removal', () => {
     function createPendingGameForm(pendingItem, candidates = []) {
       const fixedName = pendingItem.id;
@@ -512,7 +478,6 @@ describe('UI Cleanliness, Horizontal Cards & Library Component Invariants', () =
     const settingsManagedDomains = [
       'storage',
       'launch',
-      'plugins',
       'appearance',
       'patches',
       'about',

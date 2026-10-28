@@ -16,7 +16,7 @@
       case 'catalog':
         return 'Search Steam games by title or App ID...';
       case 'settings':
-        return 'Search settings, plugins & options...';
+        return 'Search settings & options...';
       case 'game':
         return 'Search game media & options...';
       default:

@@ -119,8 +119,6 @@ export async function getState() {
   // Fallback for browser preview / development
   return {
     library: [],
-    plugins: [],
-    plugin_store: [],
     jobs: [],
     running_games: {},
     tasks: [],
@@ -277,21 +275,6 @@ export async function scanInstalledGames() {
   return await runAction({ action: 'scan-installed-games' });
 }
 
-export async function refreshPluginStore() {
-  return await runAction({ action: 'plugin-store-refresh' });
-}
-
-export async function installStorePlugin(id) {
-  return await runAction({ action: 'plugin-store-install', id });
-}
-
-export async function removePlugin(id) {
-  return await runAction({ action: 'plugin-remove', id });
-}
-
-export async function setFavoritePlugin(id) {
-  return await runAction({ action: 'plugin-favorite-set', id });
-}
 
 export async function downloadProtonGE() {
   return await runAction({ action: 'proton-download' });

@@ -18,7 +18,6 @@ pub enum JobKind {
     Setup,
     SetupArchive,
     Patch,
-    PluginPackage,
     AdditionalFile,
 }
 

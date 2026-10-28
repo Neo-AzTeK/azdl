@@ -37,7 +37,6 @@
   let {
     game,
     library = [],
-    plugins = [],
     settings = null,
     platform = '',
     runners = [],
@@ -48,7 +47,7 @@
     onBack,
     onLaunchGame = null,
     onStopGame = null,
-    onOpenPlugins = null,
+    onOpenSettings = null,
     onRefresh = null,
     onShowToast = null,
   } = $props();
@@ -301,7 +300,7 @@
     for (const cand of candidates) {
       if (!cand) continue;
       const str = String(cand).trim();
-      const match = str.match(/steam[:-](\d+)/i) || str.match(/steamidra:steam[:-](\d+)/i);
+      const match = str.match(/steam[:-](\d+)/i);
       if (match) return match[1];
       if (/^\d{3,9}$/.test(str)) return str;
     }
@@ -388,16 +387,7 @@
 
   // Install configuration (for non-installed games)
   let selectedDriveId = $state('');
-  let selectedPluginId = $state('');
   let isInstalling = $state(false);
-
-  $effect(() => {
-    if (plugins.length > 0 && !plugins.some((plugin) => plugin.id === selectedPluginId)) {
-      const favoriteId = settings?.favorite_plugin_id;
-      selectedPluginId = plugins.find((plugin) => plugin.id === favoriteId)?.id
-        || (plugins.length === 1 ? plugins[0].id : '');
-    }
-  });
 
   // Move game modal state
   let showMoveModal = $state(false);
@@ -740,19 +730,6 @@
 
   async function handleStartInstall() {
     if (isInstalling || activeJob) return;
-    const defaultPluginId = selectedPluginId;
-    if (game.source_id === 'steam' && (!defaultPluginId || plugins.length === 0)) {
-      notifyError(
-        {
-          code: 'no_plugin_available',
-          message: plugins.length ? 'Choose a download plugin for this game.' : 'Install a download plugin from Settings first.',
-        },
-        {
-          onOpenSettings: () => onOpenPlugins?.('plugins'),
-        }
-      );
-      return;
-    }
     isInstalling = true;
     const drives = settings?.storage_drives || [];
     const targetDrive = drives.find((d) => d.id === selectedDriveId);
@@ -766,7 +743,6 @@
         title: game.title,
         banner_url: game.banner_url || game.header_image || game.large_capsule_image || null,
         cover_url: game.cover_url || null,
-        plugin_id: game.source_id === 'steam' ? defaultPluginId : undefined,
         location: targetDrive?.id || undefined,
       });
 
@@ -776,7 +752,7 @@
       if (onRefresh) onRefresh();
     } catch (err) {
       notifyError(err, {
-        onOpenSettings: (cat) => onOpenPlugins?.(cat || 'plugins'),
+        onOpenSettings: (cat) => onOpenSettings?.(cat || 'storage'),
       });
       setBanner('error', `Installation error: ${err}`);
     } finally {
@@ -803,7 +779,7 @@
       await refreshDiagnostics();
     } catch (err) {
       notifyError(err, {
-        onOpenSettings: (cat) => onOpenPlugins?.(cat),
+        onOpenSettings: (cat) => onOpenSettings?.(cat),
         onConfigureExecutable: () => (showExePicker = true),
       });
       setBanner('error', String(err));
@@ -1032,32 +1008,6 @@
                   disabled={isInstalling}
                 />
               </div>
-
-              {#if game.source_id === 'steam'}
-                <div class="drive-select-container">
-                  {#if plugins.length > 0}
-                    <label for="game-plugin-select" class="drive-label">Download Plugin:</label>
-                    <select id="game-plugin-select" class="md3-select" bind:value={selectedPluginId}>
-                      {#if !selectedPluginId}<option value="">Choose a plugin</option>{/if}
-                      {#each plugins as plugin}
-                        <option value={plugin.id}>{plugin.name}</option>
-                      {/each}
-                    </select>
-                  {:else}
-                    <button
-                      type="button"
-                      class="md3-btn tonal open-plugins-btn"
-                      onclick={() => onOpenPlugins && onOpenPlugins()}
-                      title="Open Plugins settings to install a download plugin"
-                    >
-                      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-                        <path d="M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5C13 2.12 11.88 1 10.5 1S8 2.12 8 3.5V5H4c-1.1 0-1.99.9-1.99 2v3.8H3.5c1.49 0 2.7 1.21 2.7 2.7s-1.21 2.7-2.7 2.7H2V20c0 1.1.9 2 2 2h3.8v-1.5c0-1.49 1.21-2.7 2.7-2.7 1.49 0 2.7 1.21 2.7 2.7V22H17c1.1 0 2-.9 2-2v-4h1.5c1.38 0 2.5-1.12 2.5-2.5s-1.12-2.5-2.5-2.5z"/>
-                      </svg>
-                      <span>Plugins</span>
-                    </button>
-                  {/if}
-                </div>
-              {/if}
 
               <!-- Storage Drive Selector (Only present when not installed) -->
               {#if settings?.storage_drives && settings.storage_drives.length > 0}

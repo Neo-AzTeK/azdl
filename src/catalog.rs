@@ -2,7 +2,6 @@ use crate::archive::{fetch_archive_in, fetch_archive_parts_in, multipart_names};
 use crate::jobs::{JobKind, recorded_download_with_sha256};
 use crate::patch::{fetch_patch_archive, fetch_patch_archive_parts};
 use crate::setup::{SetupOutcome, fetch_setup, fetch_setup_archive, fetch_setup_archive_parts};
-use crate::steam::{import_steam, scan_steam, steam_root};
 use crate::torrent::fetch_magnet;
 use crate::{CatalogOrigin, Game, Library, Result, Runner, fetch_game_in, validate_id};
 use serde_json::Value;
@@ -19,7 +18,6 @@ pub enum PackageType {
     SetupArchive,
     Steam(u32),
     Magnet,
-    Plugin,
     Unknown,
 }
 
@@ -35,8 +33,6 @@ pub struct CatalogGame {
     pub sha256: Option<String>,
     pub archive_part_hashes: Vec<Option<String>>,
     pub package_type: PackageType,
-    pub plugin_install_kind: Option<i64>,
-    pub plugin_basic_install: bool,
     pub upload_date: Option<String>,
     pub version: Option<String>,
     pub addons: Vec<CatalogAddon>,
@@ -47,14 +43,14 @@ pub struct CatalogGame {
     pub steam_app_id: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AddonKind {
     Addon,
     Dlc,
     Other,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CatalogAddon {
     pub id: String,
     pub title: String,
@@ -456,8 +452,6 @@ pub fn parse_feed(payload: &[u8], source_id: &str) -> Result<Vec<CatalogGame>> {
             sha256,
             archive_part_hashes,
             package_type,
-            plugin_install_kind: entry.get("installKind").and_then(Value::as_i64),
-            plugin_basic_install: false,
             upload_date: text_field(entry, "uploadDate").map(str::to_owned),
             version: text_field(entry, "version").map(str::to_owned),
             addons: parse_addons(entry)?,
@@ -649,66 +643,6 @@ pub fn clear_pending_setup_origin(data_dir: &Path, id: &str) -> Result<()> {
     }
 }
 
-fn install_plugin_game(
-    library: &mut Library,
-    data_dir: &Path,
-    games_dir: &Path,
-    game: &CatalogGame,
-) -> Result<InstallOutcome> {
-    let steam_app_id = game.steam_app_id.or_else(|| {
-        game.id
-            .strip_prefix("steam-")
-            .and_then(|s| s.parse::<u32>().ok())
-    });
-
-    if (game.source_id == "steamidra"
-        || (crate::plugins::plugin_has_capability(
-            data_dir,
-            &game.source_id,
-            "steam_depot_download",
-        ) && crate::plugins::plugin_has_capability(
-            data_dir,
-            &game.source_id,
-            "manifest_provider",
-        )))
-        && let Some(app_id) = steam_app_id
-    {
-        return crate::steam_depot::install_steam_manifest_game_in(
-            library, data_dir, games_dir, game, app_id,
-        );
-    }
-
-    if let Some(url) = &game.uri {
-        let id = install_id(game);
-        let filename = game.filename.as_deref().unwrap_or("game.zip");
-        let prefetch = Prefetch {
-            data_dir,
-            folder: "downloads",
-            id: &id,
-            title: &game.title,
-            kind: JobKind::Archive,
-        };
-        let filename_path = Path::new(filename);
-        prefetch.file(filename, url, game.sha256.as_deref())?;
-        crate::archive::fetch_archive_in(
-            library,
-            data_dir,
-            games_dir,
-            &id,
-            &game.title,
-            url,
-            filename_path,
-        )?;
-        return Ok(InstallOutcome::Installed(id));
-    }
-
-    Err(format!(
-        "plugin '{}' does not have a downloadable package for {}",
-        game.source_id, game.title
-    )
-    .into())
-}
-
 pub fn install_game(
     library: &mut Library,
     data_dir: &Path,
@@ -717,7 +651,7 @@ pub fn install_game(
     install_game_in(library, data_dir, &data_dir.join("games"), game)
 }
 
-/// Install a plugin game into a selected library drive.
+/// Install a catalog game into a selected library drive.
 pub fn install_game_in(
     library: &mut Library,
     data_dir: &Path,
@@ -725,23 +659,9 @@ pub fn install_game_in(
     game: &CatalogGame,
 ) -> Result<InstallOutcome> {
     match game.package_type {
-        PackageType::Plugin => install_plugin_game(library, data_dir, games_dir, game),
-        PackageType::Steam(app_id) => {
-            if let Ok(root) = steam_root()
-                && scan_steam(&root)?
-                    .iter()
-                    .any(|candidate| candidate.app_id == app_id && candidate.installed)
-            {
-                let id = import_steam(library, &root, app_id)?;
-                stamp_origin(library, &id, game);
-                return Ok(InstallOutcome::Installed(id));
-            }
-            Err(format!(
-                "Steam app {app_id} ('{}') is not installed locally in Steam. Install it in Steam first to import, or download via an available catalog source.",
-                game.title
-            )
-            .into())
-        }
+        PackageType::Steam(app_id) => crate::steam_depot::install_steam_manifest_game_in(
+            library, data_dir, games_dir, game, app_id,
+        ),
         PackageType::Archive
         | PackageType::Executable
         | PackageType::Setup
@@ -989,7 +909,7 @@ mod tests {
         .unwrap();
         let catalog_game = parse_feed(
             br#"{"entries":[{"id":"steam-620","title":"Portal 2","steamAppId":620,"version":"1.0","bannerUrl":"https://cdn.example/header.jpg","coverUrl":"https://cdn.example/cover.jpg"}]}"#,
-            "steamidra",
+            "steam",
         )
         .unwrap()
         .remove(0);
@@ -1354,42 +1274,6 @@ mod tests {
     }
 
     #[test]
-    fn plugin_manifest_game_stages_setup_and_outcome() {
-        let root = std::env::temp_dir().join(format!(
-            "azdl-cat-plugin-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let payload = br#"{"entries":[{
-            "id": "steam-3892270",
-            "title": "Gamble With Your Friends",
-            "steamAppId": "3892270",
-            "delivery": "steam-manifest",
-            "installKind": 2,
-            "addons": [{
-                "id": "fix-1",
-                "title": "Fix.rar",
-                "kind": "addon"
-            }]
-        }]}"#;
-        let mut games = parse_feed(payload, "steamidra").unwrap();
-        assert_eq!(games.len(), 1);
-        let game = &mut games[0];
-        game.package_type = PackageType::Plugin;
-        assert_eq!(game.steam_app_id, Some(3892270));
-
-        let mut library = Library::default();
-        let error = install_game(&mut library, &root, game).unwrap_err();
-        assert!(error.to_string().contains("depot downloader"));
-        assert!(!root.join("downloads").exists());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn test_catalog_install_never_spawns_steam() {
         let root = std::env::temp_dir().join(format!("azdl-cat-no-steam-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
@@ -1405,8 +1289,6 @@ mod tests {
             sha256: None,
             archive_parts: Vec::new(),
             archive_part_hashes: Vec::new(),
-            plugin_install_kind: None,
-            plugin_basic_install: false,
             upload_date: None,
             version: None,
             addons: Vec::new(),
@@ -1416,11 +1298,11 @@ mod tests {
             genres: Vec::new(),
         };
         let mut library = Library::default();
-        // Since steam-999999 is not installed in local steam, it must fail safely with an error and NEVER spawn steam
+        // A missing bundled engine must fail locally before contacting any content service.
         let res = install_game(&mut library, &root, &game);
         assert!(res.is_err());
         let err_msg = res.unwrap_err().to_string();
-        assert!(err_msg.contains("not installed locally in Steam"));
+        assert!(err_msg.contains("Steam download engine"));
         fs::remove_dir_all(root).unwrap();
     }
 }

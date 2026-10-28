@@ -47,33 +47,19 @@ pub struct DlcManifest {
     pub files: Vec<DlcFile>,
 }
 
-/// DLC entries explicitly provided by the installed game's source plugin.
+/// Steam DLC availability is resolved by `steam_content` and `steam_metadata`.
+/// Historical archive receipts remain usable for rollback and removal.
 pub fn available_for_game(game: &Game, data_dir: &Path) -> Result<Vec<CatalogAddon>> {
     validate_id(&game.id)?;
-    let Some(origin) = game.origin.as_ref() else {
-        return Ok(Vec::new());
-    };
-    let Some((source, _)) = origin.qualified_id.split_once(':') else {
-        return Ok(Vec::new());
-    };
-    if source == "steamidra" {
-        return Ok(Vec::new());
+    crate::migration::migrate(data_dir)?;
+    let path = data_dir
+        .join("content-sources")
+        .join(format!("{}.json", game.id));
+    match fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error.into()),
     }
-    if !data_dir.join("plugins").join(source).is_dir() {
-        return Ok(Vec::new());
-    }
-    let catalog = crate::plugins::catalog_for(data_dir, source)?;
-    let Some(entry) = catalog.into_iter().find(|entry| {
-        entry.qualified_id() == origin.qualified_id
-            || (game.steam_app_id.is_some() && entry.steam_app_id == game.steam_app_id)
-    }) else {
-        return Ok(Vec::new());
-    };
-    Ok(entry
-        .addons
-        .into_iter()
-        .filter(|addon| addon.kind == AddonKind::Dlc)
-        .collect())
 }
 
 fn state_dir(data_dir: &Path, game_id: &str, dlc_id: &str) -> PathBuf {
@@ -842,7 +828,7 @@ fn resume_catalog_dlc_job_with(
     let addon = available_for_game(game, data_dir)?
         .into_iter()
         .find(|addon| addon.id == dlc_id && addon.content_available)
-        .ok_or("DLC is no longer offered by the game's source plugin")?;
+        .ok_or("DLC is no longer offered by the game's content source")?;
     let filename = addon
         .filename
         .as_deref()
@@ -1678,22 +1664,28 @@ mod tests {
         ));
         let game_dir = root.join("games/base");
         let source = root.join("source/Content/DLC");
-        let plugin = root.join("plugins/stub");
-        let cache = root.join("catalog-cache");
+        let cache = root.join("content-sources");
         let staging = root.join("dlc-downloads/base/bonus");
-        for dir in [&game_dir, &source, &plugin, &cache, &staging] {
+        for dir in [&game_dir, &source, &cache, &staging] {
             fs::create_dir_all(dir).unwrap();
         }
         fs::write(game_dir.join("base.exe"), b"base").unwrap();
         fs::write(source.join("bonus.dat"), b"bonus").unwrap();
+        let content_source = |url: &str| CatalogAddon {
+            id: "bonus".into(),
+            title: "Bonus".into(),
+            kind: AddonKind::Dlc,
+            uri: Some(url.into()),
+            filename: Some("bonus.zip".into()),
+            archive_parts: Vec::new(),
+            sha256: None,
+            archive_part_hashes: Vec::new(),
+            content_available: true,
+            referer: None,
+        };
         fs::write(
-            plugin.join("plugin.json"),
-            br#"{"id":"stub","name":"Stub","version":"1","apiVersion":4,"library":"missing"}"#,
-        )
-        .unwrap();
-        fs::write(
-            cache.join("stub.json"),
-            br#"{"schema":"arachnel.plugin.catalog.v1","entries":[{"id":"demo","title":"Base","kind":"game","addons":[{"id":"bonus","title":"Bonus","kind":"dlc","downloadUrl":"https://example.invalid/bonus.zip","filename":"bonus.zip"}]}]}"#,
+            cache.join("base.json"),
+            serde_json::to_vec(&vec![content_source("https://example.invalid/bonus.zip")]).unwrap(),
         )
         .unwrap();
         let archive = root.join("bonus.zip");
@@ -1800,8 +1792,11 @@ mod tests {
         assert!(!staging.exists());
         assert!(crate::jobs::load_job(&root, &id).is_err());
         fs::write(
-            cache.join("stub.json"),
-            br#"{"schema":"arachnel.plugin.catalog.v1","entries":[{"id":"demo","title":"Base","kind":"game","addons":[{"id":"bonus","title":"Bonus","kind":"dlc","downloadUrl":"https://example.invalid/new-bonus.zip","filename":"bonus.zip"}]}]}"#,
+            cache.join("base.json"),
+            serde_json::to_vec(&vec![content_source(
+                "https://example.invalid/new-bonus.zip",
+            )])
+            .unwrap(),
         )
         .unwrap();
         fs::create_dir_all(&staging).unwrap();

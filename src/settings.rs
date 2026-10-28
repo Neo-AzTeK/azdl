@@ -58,11 +58,6 @@ pub struct LauncherSettings {
     pub seed_color: String,
     #[serde(default = "default_theme_mode")]
     pub theme_mode: String,
-    #[serde(default)]
-    pub plugin_store_urls: Vec<String>,
-    /// Preferred installed provider for one-click game downloads.
-    #[serde(default)]
-    pub favorite_plugin_id: Option<String>,
 }
 
 fn default_runner_str() -> String {
@@ -113,8 +108,6 @@ impl LauncherSettings {
             auto_game_patch: true,
             seed_color: "#10B981".into(),
             theme_mode: "dark".into(),
-            plugin_store_urls: Vec::new(),
-            favorite_plugin_id: None,
         }
     }
 
@@ -127,6 +120,7 @@ impl LauncherSettings {
 }
 
 pub fn load_settings(data_dir: &Path) -> Result<LauncherSettings> {
+    crate::migration::migrate(data_dir)?;
     let path = data_dir.join("settings.json");
     match fs::read(path) {
         Ok(bytes) => {

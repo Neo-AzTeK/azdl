@@ -36,20 +36,8 @@ const MAX_CONCURRENT_METADATA_LOOKUPS: usize = 8;
 const MAX_METADATA_CACHE_ENTRIES: usize = 2048;
 const FIX_STATUS_CACHE_TTL: Duration = Duration::from_secs(15);
 
-fn steam_dlc_provider_status(
-    data_dir: &Path,
-    source: Option<&str>,
-    app_id: u32,
-) -> Result<(), String> {
-    let source_id = source.ok_or("This game has no selected download source")?;
-    if source_id != "steamidra"
-        && (!azdl::plugins::plugin_has_capability(data_dir, source_id, "steam_depot_download")
-            || !azdl::plugins::plugin_has_capability(data_dir, source_id, "manifest_provider"))
-    {
-        return Err("This game's source does not provide Steam depot DLC".to_string());
-    }
-    azdl::plugins::manifest_download_url_for_plugin(data_dir, source_id, app_id)
-        .map_err(|error| error.to_string())?;
+fn steam_dlc_provider_status(data_dir: &Path, app_id: u32) -> Result<(), String> {
+    azdl::steam_access::manifest_url(app_id).map_err(|error| error.to_string())?;
     azdl::steam_depot::find_depotkit_library(data_dir)
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -597,8 +585,6 @@ pub enum Action {
     SteamInstall {
         id: String,
         #[serde(default)]
-        plugin_id: Option<String>,
-        #[serde(default)]
         title: Option<String>,
         #[serde(default)]
         banner_url: Option<String>,
@@ -611,19 +597,6 @@ pub enum Action {
         id: String,
     },
     PatchRollback {
-        id: String,
-    },
-    PluginRemove {
-        id: String,
-    },
-    PluginFavoriteSet {
-        id: Option<String>,
-    },
-    PluginStoreRefresh,
-    PluginStoreAdd {
-        location: String,
-    },
-    PluginStoreInstall {
         id: String,
     },
     SettingsUpdate {
@@ -660,9 +633,8 @@ pub enum Action {
 pub type ActionRequest = Action;
 
 fn resolve_install_game(
-    data_dir: &Path,
+    _data_dir: &Path,
     qualified_id: &str,
-    plugin_id: Option<&str>,
     title: Option<&str>,
     banner_url: Option<&str>,
     cover_url: Option<&str>,
@@ -671,12 +643,11 @@ fn resolve_install_game(
         .strip_prefix("steam:")
         .and_then(|value| value.parse::<u32>().ok())
     {
-        let plugin_id = plugin_id.ok_or("choose an installed download plugin")?;
         let title = title
             .map(str::trim)
             .filter(|title| !title.is_empty())
             .ok_or("Steam game title is missing")?;
-        let mut game = azdl::plugins::game_for_steam_app(data_dir, plugin_id, app_id, title)?;
+        let mut game = azdl::steam_install::game_for_app(app_id, title)?;
         if let Some(url) = banner_url.filter(|url| url.starts_with("https://")) {
             game.banner_url = Some(url.to_string());
         }
@@ -722,8 +693,6 @@ mod commands {
     use azdl::jobs::list_jobs;
     use azdl::overlay::{overlay_status, set_overlay_enabled};
     use azdl::patch::{active_patch, disable_patch, enable_patch, rollback_patch};
-    use azdl::plugin_store::cached_store;
-    use azdl::plugins::list_plugins;
     use azdl::setup::scan_setup;
     use azdl::{
         Library, Runner, add_game, add_launch_option, load_library, remove_launch_option,
@@ -956,18 +925,6 @@ mod commands {
     fn progress_jobs(state: &AppState, download_jobs: Vec<azdl::jobs::DownloadJob>) -> Vec<Value> {
         let mut jobs_list: Vec<Value> = download_jobs
             .into_iter()
-            .filter_map(|j| {
-                if j.kind == azdl::jobs::JobKind::PluginPackage
-                    && matches!(
-                        j.effective_status(),
-                        azdl::jobs::JobStatus::Complete | azdl::jobs::JobStatus::Cancelled
-                    )
-                {
-                    let _ = azdl::jobs::clear_job(&state.data_dir, &j.id);
-                    return None;
-                }
-                Some(j)
-            })
             .take(100)
             .map(|j| {
                 let status_str = match j.effective_status() {
@@ -1367,21 +1324,6 @@ mod commands {
             })
             .collect();
 
-        let plugins_list: Vec<Value> = list_plugins(&state.data_dir)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|p| {
-                json!({
-                    "id": p.id,
-                    "name": p.name,
-                    "version": p.version,
-                    "catalog_url": p.catalog_url,
-                })
-            })
-            .collect();
-
-        let store = cached_store(&state.data_dir).unwrap_or_default();
-
         let jobs_list = progress_jobs(state, download_jobs);
         let running_map: HashMap<String, RunningGameInfo> = running;
         let tasks_list: Vec<TaskInfo> = tasks;
@@ -1403,8 +1345,6 @@ mod commands {
 
         Ok(json!({
             "library": games,
-            "plugins": plugins_list,
-            "plugin_store": store,
             "jobs": jobs_list,
             "running_games": running_map,
             "tasks": tasks_list,
@@ -1416,7 +1356,7 @@ mod commands {
         }))
     }
 
-    /// Transfer updates exclude library scans, plugin catalogs, settings, and diagnostics.
+    /// Transfer updates exclude library scans, settings, and diagnostics.
     pub fn handle_get_progress(state: &AppState) -> Result<Value, String> {
         let jobs = list_jobs(&state.data_dir).map_err(|error| error.to_string())?;
         let tasks = state
@@ -2203,7 +2143,7 @@ mod commands {
                     .find(|addon| addon.id == dlc_id && addon.content_available);
                 let steam_dlc_id = dlc_id.parse::<u32>().ok();
                 if addon.is_none() && steam_dlc_id.is_none() {
-                    return Err("DLC is not offered by this game's source plugin".into());
+                    return Err("DLC is not offered by this game's content source".into());
                 }
                 if let Some(job_id) = &resume_job_id {
                     if addon.is_none() {
@@ -2765,7 +2705,6 @@ mod commands {
             }
             Action::SteamInstall {
                 id,
-                plugin_id,
                 title,
                 banner_url,
                 cover_url,
@@ -2775,7 +2714,6 @@ mod commands {
                 let cat_game = resolve_install_game(
                     data_dir,
                     &id,
-                    plugin_id.as_deref(),
                     title.as_deref(),
                     banner_url.as_deref(),
                     cover_url.as_deref(),
@@ -2846,7 +2784,6 @@ mod commands {
                     match azdl::clean_command(&current_exe)
                         .arg("worker-install")
                         .arg(&qualified_id)
-                        .arg(plugin_id.as_deref().unwrap_or(""))
                         .arg(title.as_deref().unwrap_or(""))
                         .arg(cat_game.banner_url.as_deref().unwrap_or(""))
                         .arg(cat_game.cover_url.as_deref().unwrap_or(""))
@@ -2999,101 +2936,6 @@ mod commands {
                     cache.remove(&id);
                 }
                 Ok(json!({ "success": true }))
-            }
-            Action::PluginRemove { id } => {
-                azdl::plugins::remove_plugin(data_dir, &id).map_err(|e| e.to_string())?;
-                let mut settings = azdl::settings::load_settings(data_dir)?;
-                if settings.favorite_plugin_id.as_deref() == Some(&id) {
-                    settings.favorite_plugin_id = None;
-                    azdl::settings::save_settings(data_dir, &settings)?;
-                }
-                Ok(json!({ "success": true, "removed": id }))
-            }
-            Action::PluginFavoriteSet { id } => {
-                if let Some(ref id) = id
-                    && !azdl::plugins::list_plugins(data_dir)?
-                        .iter()
-                        .any(|plugin| &plugin.id == id)
-                {
-                    return Err(LauncherError::plugin_not_found(id));
-                }
-                let mut settings = azdl::settings::load_settings(data_dir)?;
-                settings.favorite_plugin_id = id.clone();
-                azdl::settings::save_settings(data_dir, &settings)?;
-                Ok(json!({ "success": true, "favorite_plugin_id": id }))
-            }
-            Action::PluginStoreRefresh => {
-                let task_id = "refresh-plugin-store".to_string();
-                {
-                    let mut tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
-                    if tasks
-                        .iter()
-                        .any(|t| t.id == task_id && t.status == "running")
-                    {
-                        return Ok(json!({ "success": true, "already_working": true }));
-                    }
-                    tasks.retain(|t| t.id != task_id);
-                    tasks.push(TaskInfo {
-                        id: task_id.clone(),
-                        label: "Refreshing plugin store".into(),
-                        status: "running".into(),
-                        pid: None,
-                        game_id: None,
-                        log_tail: String::new(),
-                    });
-                }
-                let state_clone = state.clone();
-                let task_id_clone = task_id.clone();
-                std::thread::Builder::new()
-                    .name("azdl-store-refresh".into())
-                    .spawn(move || {
-                        let data_dir = &state_clone.data_dir;
-                        let _ = azdl::plugin_store::refresh_store(data_dir);
-                        if let Ok(mut tasks) = state_clone.tasks.lock() {
-                            tasks.retain(|t| t.id != task_id_clone);
-                        }
-                    })
-                    .map_err(|e| e.to_string())?;
-                Ok(json!({ "success": true, "started": true }))
-            }
-            Action::PluginStoreAdd { location } => {
-                let count = azdl::plugin_store::add_store(data_dir, &location)
-                    .map_err(|e| e.to_string())?;
-                Ok(json!({ "success": true, "store": location, "count": count }))
-            }
-            Action::PluginStoreInstall { id } => {
-                let task_id = format!("install-plugin-{id}");
-                {
-                    let mut tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
-                    tasks.retain(|t| t.id != task_id);
-                    tasks.push(TaskInfo {
-                        id: task_id.clone(),
-                        label: format!("Installing plugin {id}"),
-                        status: "running".into(),
-                        pid: None,
-                        game_id: None,
-                        log_tail: String::new(),
-                    });
-                }
-                let state_clone = state.clone();
-                let id_clone = id.clone();
-                let task_id_clone = task_id.clone();
-                std::thread::Builder::new()
-                    .name(format!("azdl-plug-{id}"))
-                    .spawn(move || {
-                        let data_dir = &state_clone.data_dir;
-                        let result = azdl::plugin_store::install_store_plugin(data_dir, &id_clone)
-                            .and_then(|_| {
-                                azdl::plugins::refresh_plugin_catalog(data_dir, &id_clone)
-                            });
-                        finish_install_task(
-                            &state_clone,
-                            &task_id_clone,
-                            result.err().map(|e| e.to_string()),
-                        );
-                    })
-                    .map_err(|e| e.to_string())?;
-                Ok(json!({ "success": true, "started": true, "plugin": id }))
             }
             Action::SettingsUpdate { settings } => {
                 azdl::settings::save_settings(data_dir, &settings).map_err(|e| e.to_string())?;
@@ -3579,12 +3421,7 @@ mod commands {
                     store_ids.as_ref().ok().map(Vec::as_slice),
                     candidate_dlc_id,
                 );
-                let source = game
-                    .origin
-                    .as_ref()
-                    .and_then(|origin| origin.qualified_id.split_once(':'))
-                    .map(|(source, _)| source);
-                let provider_status = super::steam_dlc_provider_status(&data_dir, source, app_id);
+                let provider_status = super::steam_dlc_provider_status(&data_dir, app_id);
                 let base_receipt = azdl::steam_content::load_base_receipt(&data_dir, &game.id);
                 let needs_existing_check = provider_status.is_ok() && matches!(&base_receipt, Ok(None));
                 let receipt_error = base_receipt.is_err();
@@ -3939,7 +3776,6 @@ fn ensure_desktop_integration() {
 
 fn run_worker_install(
     qualified_id: &str,
-    plugin_id: Option<&str>,
     title: Option<&str>,
     banner_url: Option<&str>,
     cover_url: Option<&str>,
@@ -3952,14 +3788,8 @@ fn run_worker_install(
             std::process::exit(1);
         }
     };
-    let cat_game = match resolve_install_game(
-        &data_dir,
-        qualified_id,
-        plugin_id,
-        title,
-        banner_url,
-        cover_url,
-    ) {
+    let cat_game = match resolve_install_game(&data_dir, qualified_id, title, banner_url, cover_url)
+    {
         Ok(g) => g,
         Err(e) => {
             eprintln!("Worker error: failed to find game '{qualified_id}': {e}");
@@ -4019,7 +3849,6 @@ fn main() {
             args.get(4).map(String::as_str),
             args.get(5).map(String::as_str),
             args.get(6).map(String::as_str),
-            args.get(7).map(String::as_str),
         );
         return;
     }
@@ -4031,6 +3860,7 @@ fn main() {
     ensure_desktop_integration();
 
     let data_dir = data_dir().expect("Failed to resolve azdl data directory");
+    azdl::migration::migrate(&data_dir).expect("Failed to migrate launcher data");
     let metadata_cache = load_metadata_cache(&data_dir);
     let dir_size_cache = Arc::new(sizes::SizeCache::new(&data_dir));
     let state = AppState {
@@ -4202,7 +4032,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn steam_dlc_requires_its_installed_download_provider() {
+    fn steam_dlc_reports_missing_bundled_engine() {
         let root = std::env::temp_dir().join(format!(
             "azdl-dlc-provider-{}-{}",
             std::process::id(),
@@ -4211,11 +4041,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let wrong_source = steam_dlc_provider_status(&root, Some("other"), 100).unwrap_err();
-        assert!(wrong_source.contains("does not provide Steam depot DLC"));
-        let missing_provider =
-            steam_dlc_provider_status(&root, Some("steamidra"), 100).unwrap_err();
-        assert!(missing_provider.contains("missing or has an invalid manifest"));
+        let missing_engine = steam_dlc_provider_status(&root, 100).unwrap_err();
+        assert!(missing_engine.contains("engine"));
         assert!(!root.exists());
     }
 
@@ -4657,33 +4484,6 @@ mod tests {
             val["platform"],
             if cfg!(windows) { "windows" } else { "linux" }
         );
-    }
-
-    #[test]
-    fn test_handle_get_state_with_plugin_store_cache() {
-        let root = scratch();
-        let cache_path = root.join("plugin-store.json");
-        let sample = serde_json::json!([
-            {
-                "id": "steamidra",
-                "name": "Steamidra",
-                "description": "Depot downloader plugin",
-                "version": "1.0.0",
-                "url": "https://example.com/steamidra.arach",
-                "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                "filename": "steamidra.arach",
-                "recommended": true
-            }
-        ]);
-        std::fs::write(&cache_path, serde_json::to_vec(&sample).unwrap()).unwrap();
-        let state = test_state(&root);
-        let val = handle_get_state(&state).unwrap();
-        let store = val["plugin_store"]
-            .as_array()
-            .expect("plugin_store should be array");
-        assert_eq!(store.len(), 1);
-        assert_eq!(store[0]["id"], "steamidra");
-        assert_eq!(store[0]["name"], "Steamidra");
     }
 
     #[test]
@@ -5397,56 +5197,6 @@ mod tests {
     }
 
     #[test]
-    fn favorite_plugin_persists_and_is_cleared_on_removal() {
-        let root = scratch();
-        let plugin = root.join("plugins/provider-a");
-        fs::create_dir_all(&plugin).unwrap();
-        fs::write(
-            plugin.join("plugin.json"),
-            br#"{"id":"provider-a","name":"Provider A","version":"1","apiVersion":4,"library":"provider.so"}"#,
-        )
-        .unwrap();
-        let state = test_state(&root);
-        handle_run_action(
-            &state,
-            Action::PluginFavoriteSet {
-                id: Some("provider-a".into()),
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            azdl::settings::load_settings(&root)
-                .unwrap()
-                .favorite_plugin_id
-                .as_deref(),
-            Some("provider-a")
-        );
-        assert!(
-            handle_run_action(
-                &state,
-                Action::PluginFavoriteSet {
-                    id: Some("missing".into()),
-                },
-            )
-            .is_err()
-        );
-        handle_run_action(
-            &state,
-            Action::PluginRemove {
-                id: "provider-a".into(),
-            },
-        )
-        .unwrap();
-        assert!(
-            azdl::settings::load_settings(&root)
-                .unwrap()
-                .favorite_plugin_id
-                .is_none()
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn test_legacy_source_actions_are_not_exposed() {
         let result: Result<Action, _> = serde_json::from_value(serde_json::json!({
             "action": "source-add",
@@ -5652,13 +5402,6 @@ mod tests {
     fn test_steam_install_background_spawning_and_deduplication() {
         let root = scratch();
         let state = test_state(&root);
-        let provider = root.join("plugins/steamidra");
-        fs::create_dir_all(&provider).unwrap();
-        fs::write(
-            provider.join("plugin.json"),
-            br#"{"id":"steamidra","name":"SteaMidra","version":"1","apiVersion":4,"library":"plugin"}"#,
-        )
-        .unwrap();
         let cached = root.join("downloads/steam-620/620.zip");
         fs::create_dir_all(cached.parent().unwrap()).unwrap();
         fs::write(&cached, b"invalid archive").unwrap();
@@ -5669,7 +5412,6 @@ mod tests {
             Action::SteamInstall {
                 id: "steam:620".into(),
                 title: Some("Portal 2".into()),
-                plugin_id: Some("steamidra".into()),
                 banner_url: None,
                 cover_url: None,
                 location: None,
@@ -5701,7 +5443,6 @@ mod tests {
             Action::SteamInstall {
                 id: "steam:480".into(),
                 title: Some("Spacewar".into()),
-                plugin_id: Some("steamidra".into()),
                 banner_url: None,
                 cover_url: None,
                 location: None,

@@ -5,3 +5,5 @@
 /frontend/dist
 /.cargo/config.toml
 /src-tauri/tauri.windows.conf.json
+
+/src-tauri/tauri.linux.conf.json

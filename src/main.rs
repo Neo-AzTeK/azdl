@@ -17,8 +17,6 @@ use azdl::patch::{
     active_patch, apply_patch, apply_patch_archive_with_root, disable_patch, enable_patch,
     fetch_patch_archive, fetch_patch_archive_parts, rollback_patch,
 };
-use azdl::plugin_store::{cached_store, install_store_plugin, refresh_store};
-use azdl::plugins::{game_for_steam_app, install_bundle, list_plugins};
 use azdl::runtime::discover_proton;
 use azdl::setup::{
     SetupOutcome, fetch_setup, fetch_setup_archive, import_setup, run_setup, run_setup_archive,
@@ -42,7 +40,7 @@ use std::fs;
 use std::path::Path;
 
 fn usage() -> &'static str {
-    "Usage:\n  azdl list\n  azdl runners\n  azdl shortcut create|status|remove <id> [desktop-directory]\n  azdl steam shortcut create|status|remove <id> [shortcuts.vdf]\n  azdl jobs fetch <https-url> <relative-destination> [sha256]\n  azdl jobs fetch-install <id> <title> <file|archive|setup|setup-archive> <https-url> <filename> [sha256]\n  azdl jobs list|show <job-id>|retry <job-id>\n  azdl jobs pause|resume|cancel <job-id>\n  azdl plugins install <package.arach>|list|store|store-refresh\n  azdl plugins store-install <plugin-id>\n  azdl scan <title> <install-dir>\n  azdl import <id> <title> <install-dir>\n  azdl add <id> <title> <install-dir> <executable>\n  azdl fetch <id> <title> <https-url> <filename>\n  azdl fetch-magnet <id> <title> <magnet-uri>\n  azdl install-file <id> <title> <file-path>\n  azdl install-archive <id> <title> <archive-path>\n  azdl fetch-archive <id> <title> <https-url> <archive-filename>\n  azdl fetch-archive-parts <id> <title> <first-part-filename> <part1-https-url> <part2-https-url> [...]\n  azdl setup run <id> <title> <installer.exe|installer.msi> [installer args...]\n  azdl setup fetch <id> <title> <https-url> <installer-filename> [installer args...]\n  azdl setup archive <id> <title> <archive-path> [installer args...]\n  azdl setup fetch-archive <id> <title> <https-url> <archive-filename> [installer args...]\n  azdl setup scan|import <id> <title>\n  azdl setup add <id> <title> <install-dir> <executable>\n  azdl pending add <id> <title> <portable|setup> <install-dir> <executable>\n  azdl steam featured|search <query>\n  azdl steam install <appid> <plugin-id>\n  azdl steam scan|import <appid>\n  azdl patch apply <id> <extracted-patch-dir>\n  azdl patch archive <id> <archive-path> [archive-root]\n  azdl patch fetch <id> <https-url> <archive-filename>\n  azdl patch fetch-parts <id> <first-part-filename> <part1-https-url> <part2-https-url> [...]\n  azdl patch status|enable|disable|rollback <id>\n  azdl overlay status|enable|disable <id>\n  azdl fix-status <id>\n  azdl doctor <id>\n  azdl executable <id> <path-inside-install-dir>\n  azdl runner <id> <auto|native|wine|proton:auto|proton:/path/to/proton>\n  azdl option list <id>\n  azdl option add <id> <option-id> <title> <executable> <working-dir|-> [arguments...]\n  azdl option select <id> <option-id|default>\n  azdl option remove <id> <option-id>\n  azdl args <id> [launch arguments...]\n  azdl env <id> <name> <value>\n  azdl env-remove <id> <name>\n  azdl launch <id> [extra arguments...]\n  azdl download <id> <https-url> <relative-destination>\n  azdl steamstub status|unpack|rollback <id>\n  azdl goldberg sync|status|rollback <id>\n  azdl dependencies <id> [status|install-vcredist|install-directx]\n  azdl installscript scan|apply <id>\n  azdl fixes ea-heal|ea-rollback|provision-steam-api|patch-dlc-installed|patch-dlc-installed-rollback <id> [dlc-ids...]\n  azdl remove <id>\n\nUse AZDL_DATA_DIR to choose a library and prefix directory."
+    "Usage:\n  azdl list\n  azdl runners\n  azdl shortcut create|status|remove <id> [desktop-directory]\n  azdl steam shortcut create|status|remove <id> [shortcuts.vdf]\n  azdl jobs fetch <https-url> <relative-destination> [sha256]\n  azdl jobs fetch-install <id> <title> <file|archive|setup|setup-archive> <https-url> <filename> [sha256]\n  azdl jobs list|show <job-id>|retry <job-id>\n  azdl jobs pause|resume|cancel <job-id>\n  azdl scan <title> <install-dir>\n  azdl import <id> <title> <install-dir>\n  azdl add <id> <title> <install-dir> <executable>\n  azdl fetch <id> <title> <https-url> <filename>\n  azdl fetch-magnet <id> <title> <magnet-uri>\n  azdl install-file <id> <title> <file-path>\n  azdl install-archive <id> <title> <archive-path>\n  azdl fetch-archive <id> <title> <https-url> <archive-filename>\n  azdl fetch-archive-parts <id> <title> <first-part-filename> <part1-https-url> <part2-https-url> [...]\n  azdl setup run <id> <title> <installer.exe|installer.msi> [installer args...]\n  azdl setup fetch <id> <title> <https-url> <installer-filename> [installer args...]\n  azdl setup archive <id> <title> <archive-path> [installer args...]\n  azdl setup fetch-archive <id> <title> <https-url> <archive-filename> [installer args...]\n  azdl setup scan|import <id> <title>\n  azdl setup add <id> <title> <install-dir> <executable>\n  azdl pending add <id> <title> <portable|setup> <install-dir> <executable>\n  azdl steam featured|search <query>\n  azdl steam install <appid>\n  azdl steam scan|import <appid>\n  azdl patch apply <id> <extracted-patch-dir>\n  azdl patch archive <id> <archive-path> [archive-root]\n  azdl patch fetch <id> <https-url> <archive-filename>\n  azdl patch fetch-parts <id> <first-part-filename> <part1-https-url> <part2-https-url> [...]\n  azdl patch status|enable|disable|rollback <id>\n  azdl overlay status|enable|disable <id>\n  azdl fix-status <id>\n  azdl doctor <id>\n  azdl executable <id> <path-inside-install-dir>\n  azdl runner <id> <auto|native|wine|proton:auto|proton:/path/to/proton>\n  azdl option list <id>\n  azdl option add <id> <option-id> <title> <executable> <working-dir|-> [arguments...]\n  azdl option select <id> <option-id|default>\n  azdl option remove <id> <option-id>\n  azdl args <id> [launch arguments...]\n  azdl env <id> <name> <value>\n  azdl env-remove <id> <name>\n  azdl launch <id> [extra arguments...]\n  azdl download <id> <https-url> <relative-destination>\n  azdl steamstub status|unpack|rollback <id>\n  azdl goldberg sync|status|rollback <id>\n  azdl dependencies <id> [status|install-vcredist|install-directx]\n  azdl installscript scan|apply <id>\n  azdl fixes ea-heal|ea-rollback|provision-steam-api|patch-dlc-installed|patch-dlc-installed-rollback <id> [dlc-ids...]\n  azdl remove <id>\n\nUse AZDL_DATA_DIR to choose a library and prefix directory."
 }
 
 fn report_setup(outcome: SetupOutcome, id: &str) {
@@ -261,37 +259,6 @@ fn run() -> Result<()> {
         Some("jobs") if args.len() == 3 && args[1] == "cancel" => {
             cancel_job(&data, &args[2])?;
             println!("Cancellation requested for download job {}", args[2]);
-        }
-        Some("plugins") if args.len() == 2 && args[1] == "list" => {
-            for plugin in list_plugins(&data)? {
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    plugin.id,
-                    plugin.version,
-                    plugin.name,
-                    plugin.catalog_url.unwrap_or_default()
-                );
-            }
-        }
-        Some("plugins") if args.len() == 3 && args[1] == "install" => {
-            let plugin = install_bundle(&data, Path::new(&args[2]))?;
-            println!("Installed plugin {} ({})", plugin.id, plugin.name);
-        }
-        Some("plugins") if args.len() == 2 && args[1] == "store-refresh" => {
-            let entries = refresh_store(&data)?;
-            println!("Cached {} API 4 plugin builds", entries.len());
-        }
-        Some("plugins") if args.len() == 2 && args[1] == "store" => {
-            for entry in cached_store(&data)? {
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    entry.id, entry.version, entry.name, entry.url
-                );
-            }
-        }
-        Some("plugins") if args.len() == 3 && args[1] == "store-install" => {
-            let plugin = install_store_plugin(&data, &args[2])?;
-            println!("Installed plugin {} ({})", plugin.id, plugin.name);
         }
         Some("runners") if args.len() == 1 => {
             for entry in discover_proton(&data)? {
@@ -747,14 +714,14 @@ fn run() -> Result<()> {
                 );
             }
         }
-        Some("steam") if args.len() == 4 && args[1] == "install" => {
+        Some("steam") if args.len() == 3 && args[1] == "install" => {
             let app_id: u32 = args[2].parse()?;
             let title = discover_games(&args[2])?
                 .into_iter()
                 .find(|game| game.app_id == app_id)
                 .map(|game| game.title)
                 .ok_or("Steam App ID was not found in the Store")?;
-            let game = game_for_steam_app(&data, &args[3], app_id, &title)?;
+            let game = azdl::steam_install::game_for_app(app_id, &title)?;
             match install_game(&mut library, &data, &game)? {
                 InstallOutcome::Installed(id) => {
                     save_library(&data, &library)?;

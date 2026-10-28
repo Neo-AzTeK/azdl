@@ -9,7 +9,6 @@ use std::process::{Child, ExitStatus};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod archive;
-pub mod bundled_fix;
 pub mod catalog;
 pub mod cmd;
 pub mod dependencies;
@@ -21,21 +20,22 @@ pub mod fixes;
 pub mod goldberg;
 pub mod installscript;
 pub mod jobs;
+pub mod migration;
 pub mod multiplayer;
 pub mod overlay;
 pub mod patch;
-pub mod plugin_store;
-pub mod plugins;
 pub mod runtime;
 pub mod settings;
 pub mod setup;
 mod sha256;
 pub mod shortcuts;
 pub mod steam;
+pub mod steam_access;
 pub mod steam_content;
 pub mod steam_depot;
 pub mod steam_discovery;
 mod steam_engine;
+pub mod steam_install;
 pub mod steam_manifest;
 pub mod steam_metadata;
 pub mod steam_shortcuts;
@@ -133,6 +133,7 @@ pub fn data_dir() -> Result<PathBuf> {
 }
 
 pub fn load_library(dir: &Path) -> Result<Library> {
+    migration::migrate(dir)?;
     let path = dir.join("library.json");
     match fs::read(path) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
@@ -321,26 +322,8 @@ pub fn cleanup_leftovers(data_dir: &Path, specific_id: Option<&str>) -> Result<(
         }
     }
 
-    // 2. Clean plugin downloads
-    let plugin_dl = data_dir.join("plugin-downloads");
-    if plugin_dl.is_dir() {
-        if let Some(id) = specific_id {
-            let target = plugin_dl.join(id);
-            if target.is_dir() {
-                let _ = fs::remove_dir_all(target);
-            }
-        } else if let Ok(plugins) = plugins::list_plugins(data_dir) {
-            for p in plugins {
-                let target = plugin_dl.join(&p.id);
-                if target.is_dir() {
-                    let _ = fs::remove_dir_all(target);
-                }
-            }
-        }
-    }
-
-    // 3. Clean stale staging directories (prefixed with '.') in games and plugins
-    for folder in ["games", "plugins"] {
+    // Clean stale staging directories in managed games.
+    for folder in ["games"] {
         let base = data_dir.join(folder);
         if let Ok(entries) = fs::read_dir(&base) {
             for entry in entries.flatten() {
@@ -735,7 +718,7 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
     let runner = runtime::resolve_runner(&game.runner, executable, data_dir)?;
     let mut effective_game = game.clone();
     effective_game.executable = executable.to_path_buf();
-    bundled_fix::ensure_steamidra_fix(&effective_game, data_dir)?;
+    let core_steam = game.steam_app_id.is_some();
     let mut cmd = match runner {
         Runner::Native => clean_command(executable),
         Runner::Wine => {
@@ -767,21 +750,22 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
         Runner::Steam(_) => unreachable!(),
         Runner::Auto | Runner::ProtonAuto => unreachable!(),
     };
-    if let Ok(Some(msg)) =
-        fixes::ensure_steam_api_dll(&effective_game.install_dir, &effective_game.executable)
+    if !core_steam
+        && let Ok(Some(msg)) =
+            fixes::ensure_steam_api_dll(&effective_game.install_dir, &effective_game.executable)
     {
         eprintln!("{msg}");
     }
     let launcher_settings = settings::load_settings(data_dir)
         .unwrap_or_else(|_| settings::LauncherSettings::default_for(data_dir));
-    if launcher_settings.auto_ea_heal {
+    if !core_steam && launcher_settings.auto_ea_heal {
         let _ = fixes::heal_ea_activation(&effective_game.install_dir);
     }
-    if launcher_settings.auto_goldberg_sync {
+    if !core_steam && launcher_settings.auto_goldberg_sync {
         let _ = goldberg::prepare_goldberg_for_game(&effective_game, data_dir);
     }
     // Apply DLC installed patches when the game has entitlements or target DLLs are present
-    if launcher_settings.auto_dlc_patch {
+    if !core_steam && launcher_settings.auto_dlc_patch {
         let installed_dlc =
             crate::dlc::list_installed(&effective_game, data_dir).unwrap_or_default();
         let dlc_ids: Vec<u32> = installed_dlc
@@ -811,7 +795,8 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
             eprintln!("Dependency provisioning: {action}");
         }
     }
-    if launcher_settings.auto_steamless_unpack
+    if !core_steam
+        && launcher_settings.auto_steamless_unpack
         && steamless::scan_game_steamstub(&effective_game).stub_present
     {
         match steamless::unpack_game(&effective_game, data_dir) {
@@ -837,12 +822,16 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
     if let Ok(true) = installscript::apply_installscript_for_game(&effective_game, &prefix_dir) {
         eprintln!("Applied Steamworks installscript & registry configuration");
     }
-    if installscript::is_ubisoft_game(&effective_game.install_dir) {
+    if !core_steam && installscript::is_ubisoft_game(&effective_game.install_dir) {
         cmd.arg("-uplay_steam_mode");
     }
     let fix = if let Some(launch) = &launch {
         cmd.current_dir(&launch.working_directory);
-        multiplayer::prepare_game_launch(&effective_game, &runner, &launch.working_directory)?
+        if core_steam {
+            multiplayer::LaunchFixPreparation::default()
+        } else {
+            multiplayer::prepare_game_launch(&effective_game, &runner, &launch.working_directory)?
+        }
     } else {
         multiplayer::LaunchFixPreparation::default()
     };
@@ -1343,10 +1332,6 @@ mod tests {
         fs::create_dir_all(&games_staging).unwrap();
         fs::write(games_staging.join("temp.txt"), b"temp").unwrap();
 
-        let plugins_staging = root.join("plugins").join(".extract-999");
-        fs::create_dir_all(&plugins_staging).unwrap();
-        fs::write(plugins_staging.join("temp.txt"), b"temp").unwrap();
-
         let dl = root.join("downloads").join("my-game");
         fs::create_dir_all(&dl).unwrap();
         fs::write(dl.join("archive.zip"), b"archive").unwrap();
@@ -1368,7 +1353,6 @@ mod tests {
         cleanup_leftovers(&root, None).unwrap();
 
         assert!(!games_staging.exists());
-        assert!(!plugins_staging.exists());
         assert!(!dl.exists());
         assert!(install_dir.exists());
 

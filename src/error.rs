@@ -28,10 +28,6 @@ pub enum LauncherError {
     },
     /// Game ID format validation failed.
     InvalidId { id: String, message: String },
-    /// Requested plugin is not installed.
-    PluginNotFound { id: String, message: String },
-    /// No download provider plugin installed (e.g. steamidra).
-    NoPluginAvailable { message: String },
     /// Archive file is corrupted or unsupported.
     CorruptedArchive { path: String, message: String },
     /// External process returned non-zero exit code or failed to launch.
@@ -111,20 +107,6 @@ impl LauncherError {
         }
     }
 
-    pub fn plugin_not_found(id: impl Into<String>) -> Self {
-        let id = id.into();
-        Self::PluginNotFound {
-            message: format!("Plugin '{id}' is not installed"),
-            id,
-        }
-    }
-
-    pub fn no_plugin_available(msg: impl Into<String>) -> Self {
-        Self::NoPluginAvailable {
-            message: msg.into(),
-        }
-    }
-
     pub fn corrupted_archive(path: impl Into<String>, msg: impl Into<String>) -> Self {
         let path = path.into();
         let msg = msg.into();
@@ -167,8 +149,6 @@ impl fmt::Display for LauncherError {
             | Self::DriveNotFound { message, .. }
             | Self::DriveFull { message, .. }
             | Self::InvalidId { message, .. }
-            | Self::PluginNotFound { message, .. }
-            | Self::NoPluginAvailable { message }
             | Self::CorruptedArchive { message, .. }
             | Self::ProcessFailed { message, .. }
             | Self::LockPoisoned { message }
