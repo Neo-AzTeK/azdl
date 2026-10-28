@@ -82,6 +82,12 @@ describe('API - Desktop Mode IPC Bridge', () => {
     delete global.window;
   });
 
+  it('reads fresh management controls through IPC', async () => {
+    const api = await import('./api.js');
+    await api.getGameControls('fixture');
+    expect(mockInvoke).toHaveBeenCalledWith('get_game_controls', { id: 'fixture' });
+  });
+
   it('detects isDesktop as true when Tauri internals exist', () => {
     expect(api.isDesktop()).toBe(true);
   });

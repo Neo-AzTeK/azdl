@@ -2565,10 +2565,13 @@ mod commands {
                     .games
                     .get(&id)
                     .ok_or_else(|| format!("Game {id} not found"))?;
-                let prefix_dir = data_dir.join("prefixes").join(&game.id);
-                let ok =
-                    azdl::dependencies::install_vcredist(&prefix_dir, &game.runner, data_dir, true)
-                        .map_err(|e| e.to_string())?;
+                let launch = azdl::resolve_launch(game)?;
+                let runner =
+                    azdl::runtime::resolve_runner(&game.runner, &launch.executable, data_dir)?;
+                let (prefix_dir, _) = azdl::dependencies::prefix_paths(data_dir, &game.id, &runner)
+                    .ok_or("Runtime dependencies are managed by the native host")?;
+                let ok = azdl::dependencies::install_vcredist(&prefix_dir, &runner, data_dir, true)
+                    .map_err(|e| e.to_string())?;
                 Ok(json!({ "success": true, "installed": ok }))
             }
             Action::InstallDirectx { id } => {
@@ -2577,10 +2580,14 @@ mod commands {
                     .games
                     .get(&id)
                     .ok_or_else(|| format!("Game {id} not found"))?;
-                let prefix_dir = data_dir.join("prefixes").join(&game.id);
+                let launch = azdl::resolve_launch(game)?;
+                let runner =
+                    azdl::runtime::resolve_runner(&game.runner, &launch.executable, data_dir)?;
+                let (prefix_dir, _) = azdl::dependencies::prefix_paths(data_dir, &game.id, &runner)
+                    .ok_or("Runtime dependencies are managed by the native host")?;
                 let ok = azdl::dependencies::install_directx(
                     &prefix_dir,
-                    &game.runner,
+                    &runner,
                     data_dir,
                     &game.install_dir,
                 )
@@ -3378,6 +3385,31 @@ mod commands {
             .map_err(|e| e.to_string())?
     }
 
+    pub fn handle_get_game_controls(state: &AppState, id: &str) -> Result<Value, String> {
+        let library = load_library(&state.data_dir).map_err(|error| error.to_string())?;
+        let game = library.games.get(id).ok_or("Game is not installed")?;
+        let controls = azdl::game_controls::inspect(game, &state.data_dir)
+            .map_err(|error| error.to_string())?;
+        if let Ok(mut cache) = state.steamstub_cache.lock() {
+            cache.insert(id.into(), (controls.steamstub.clone(), Instant::now()));
+        }
+        if let Ok(mut cache) = state.fix_status_cache.lock() {
+            cache.remove(id);
+        }
+        serde_json::to_value(controls).map_err(|error| error.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn get_game_controls(
+        state: State<'_, AppState>,
+        id: String,
+    ) -> Result<Value, String> {
+        let state = state.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || handle_get_game_controls(&state, &id))
+            .await
+            .map_err(|error| error.to_string())?
+    }
+
     #[tauri::command]
     pub async fn get_game_dlc(
         state: State<'_, AppState>,
@@ -4021,6 +4053,7 @@ fn main() {
             commands::get_runners,
             commands::get_steam_details,
             commands::get_game_dlc,
+            commands::get_game_controls,
             commands::search_steam_games,
             commands::resolve_game_artwork,
             commands::diagnose,

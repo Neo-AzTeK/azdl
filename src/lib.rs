@@ -17,6 +17,7 @@ pub mod dlc;
 pub mod doctor;
 pub mod error;
 pub mod fixes;
+pub mod game_controls;
 pub mod goldberg;
 pub mod installscript;
 pub mod jobs;

@@ -150,6 +150,63 @@ pub fn diagnose_prefix_dependencies(prefix_dir: &Path) -> DependencyStatus {
     }
 }
 
+/// The prefix and observed runtime state for the game's resolved launch runner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GameDependencies {
+    pub available: bool,
+    pub managed: bool,
+    pub prefix: Option<PathBuf>,
+    pub status: Option<DependencyStatus>,
+    pub reason: Option<String>,
+}
+
+/// Return the runner's installation root and the directory containing its registry.
+pub fn prefix_paths(data_dir: &Path, game_id: &str, runner: &Runner) -> Option<(PathBuf, PathBuf)> {
+    match runner {
+        Runner::Proton(_) => {
+            let root = data_dir.join("compatdata").join(game_id);
+            Some((root.clone(), root.join("pfx")))
+        }
+        Runner::Wine => {
+            let root = data_dir.join("prefixes").join(game_id);
+            Some((root.clone(), root))
+        }
+        _ => None,
+    }
+}
+
+/// Inspect the same isolated prefix used by the selected executable at launch.
+pub fn game_dependencies(game: &Game, data_dir: &Path) -> GameDependencies {
+    let resolved = crate::resolve_launch(game).and_then(|launch| {
+        crate::runtime::resolve_runner(&game.runner, &launch.executable, data_dir)
+    });
+    match resolved {
+        Ok(runner) => match prefix_paths(data_dir, &game.id, &runner) {
+            Some((_, prefix)) => GameDependencies {
+                available: true,
+                managed: true,
+                status: Some(diagnose_prefix_dependencies(&prefix)),
+                prefix: Some(prefix),
+                reason: None,
+            },
+            None => GameDependencies {
+                available: true,
+                managed: false,
+                prefix: None,
+                status: None,
+                reason: Some("Runtime dependencies are managed by the native host".into()),
+            },
+        },
+        Err(error) => GameDependencies {
+            available: false,
+            managed: false,
+            prefix: None,
+            status: None,
+            reason: Some(format!("Cannot inspect the selected runner: {error}")),
+        },
+    }
+}
+
 /// Searches a game directory for a bundled `DXSETUP.exe`.
 pub fn find_dxsetup_in_game(game_dir: &Path) -> Option<PathBuf> {
     if !game_dir.is_dir() {
@@ -372,19 +429,21 @@ pub fn ensure_game_dependencies(
         return Ok(Vec::new());
     }
 
-    let prefix_dir = data_dir.join("prefixes").join(&game.id);
+    let Some((install_root, prefix_dir)) = prefix_paths(data_dir, &game.id, runner) else {
+        return Ok(Vec::new());
+    };
     let mut installed_actions = Vec::new();
 
     // Check VC++ x64
     if !check_vcredist_installed(&prefix_dir, true)
-        && let Ok(true) = install_vcredist(&prefix_dir, runner, data_dir, true)
+        && let Ok(true) = install_vcredist(&install_root, runner, data_dir, true)
     {
         installed_actions.push("Installed Visual C++ 2015-2022 (x64)".into());
     }
 
     // Check DirectX
     if !check_directx_installed(&prefix_dir)
-        && let Ok(true) = install_directx(&prefix_dir, runner, data_dir, &game.install_dir)
+        && let Ok(true) = install_directx(&install_root, runner, data_dir, &game.install_dir)
     {
         installed_actions.push("Installed DirectX runtimes via DXSETUP".into());
     }
@@ -402,6 +461,51 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn proton_runtime_status_uses_the_launch_prefix_instead_of_wine() {
+        let root = test_dir("proton-control-prefix");
+        let install = root.join("game");
+        fs::create_dir_all(&install).unwrap();
+        fs::write(install.join("game.exe"), b"fixture").unwrap();
+        let mut library = crate::Library::default();
+        crate::add_game(
+            &mut library,
+            "fixture",
+            "Fixture",
+            &install,
+            Path::new("game.exe"),
+        )
+        .unwrap();
+        let game = library.games.get_mut("fixture").unwrap();
+        game.runner = Runner::Proton(root.join("proton"));
+        let (install_root, prefix) = prefix_paths(&root, &game.id, &game.runner).unwrap();
+        assert_eq!(install_root, root.join("compatdata/fixture"));
+        assert_eq!(prefix, root.join("compatdata/fixture/pfx"));
+        let system = prefix.join("drive_c/windows/system32");
+        fs::create_dir_all(&system).unwrap();
+        for name in ["vcruntime140.dll", "msvcp140.dll", "vcruntime140_1.dll"] {
+            fs::write(
+                system.join(name),
+                vec![0_u8; (MIN_REAL_CRT_BYTES + 1) as usize],
+            )
+            .unwrap();
+        }
+        let report = game_dependencies(game, &root);
+        assert!(report.available);
+        assert!(report.managed);
+        assert!(report.status.unwrap().vcredist_x64);
+        assert!(!check_vcredist_installed(
+            &root.join("prefixes/fixture"),
+            true
+        ));
+        game.runner = Runner::Native;
+        let native = game_dependencies(game, &root);
+        assert!(native.available);
+        assert!(!native.managed);
+        assert!(native.status.is_none());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -140,6 +140,11 @@ export async function getState() {
   };
 }
 
+export async function getGameControls(id) {
+  if (!isDesktop()) throw new Error('Game controls require the desktop launcher.');
+  return await withBusy(() => invoke('get_game_controls', { id }));
+}
+
 export async function getGameDlc(id, candidateDlcId = null) {
   if (!isDesktop()) return { available: [], installed: [] };
   return await withBusy(() => invoke('get_game_dlc', { id, candidateDlcId }));
