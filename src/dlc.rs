@@ -442,6 +442,8 @@ fn move_staged_file_with(
         mode & 0o200 == 0
     };
     #[cfg(windows)]
+    // Clearing the Windows read-only attribute preserves the file's ACL.
+    #[allow(clippy::permissions_set_readonly_false)]
     let needs_write = {
         let readonly = permissions.readonly();
         permissions.set_readonly(false);

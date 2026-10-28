@@ -266,10 +266,9 @@ pub fn run_installer_in_prefix(
         if status.success() || allowed_exit_codes.contains(&code) {
             return Ok(true);
         }
-        return Err(Error::new(
-            ErrorKind::Other,
-            format!("Installer exited with status {status}"),
-        ));
+        Err(Error::other(format!(
+            "Installer exited with status {status}"
+        )))
     }
 
     #[cfg(not(windows))]
