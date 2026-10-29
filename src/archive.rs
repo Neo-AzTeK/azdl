@@ -1,6 +1,7 @@
 //! Checked extraction of Steam manifest bundles and Windows path normalization.
 use crate::{Result, clean_command};
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path};
 
 fn tar_command() -> std::process::Command {
@@ -93,6 +94,158 @@ pub fn extract_checked(archive: &Path, destination: &Path) -> Result<()> {
         return Err(format!("archive extraction failed ({status})").into());
     }
     normalize_windows_paths(destination)?;
+    Ok(())
+}
+
+/// Extract a validated archive that may be protected by `passphrase`.
+///
+/// Password-protected RAR patch bundles with encrypted headers cannot be
+/// listed ahead of time, so on Linux they are unpacked inside a bubblewrap
+/// sandbox and the resulting tree is validated after the fact. All other
+/// archives are validated before extraction exactly like [`extract_checked`].
+pub fn extract_checked_with_passphrase(
+    archive: &Path,
+    destination: &Path,
+    passphrase: Option<&str>,
+) -> Result<()> {
+    if !destination.is_dir() {
+        return Err("archive destination is not a directory".into());
+    }
+    let mut signature = [0u8; 8];
+    let length = fs::File::open(archive)?.read(&mut signature)?;
+    let rar = length >= 7 && signature.starts_with(b"Rar!\x1a\x07");
+    if let Err(error) = validate_archive(archive) {
+        if rar && let Some(passphrase) = passphrase {
+            #[cfg(target_os = "linux")]
+            {
+                extract_unlistable_rar(archive, destination, passphrase)?;
+                normalize_windows_paths(destination)?;
+                return Ok(());
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = passphrase;
+                return Err("encrypted-header RAR extraction requires Linux bubblewrap".into());
+            }
+        }
+        return Err(error);
+    }
+    if rar && let Some(passphrase) = passphrase {
+        let output = clean_command("unrar")
+            .args(["x", "-o-", "-idq", "-y"])
+            .arg(format!("-p{passphrase}"))
+            .arg(archive)
+            .arg(destination)
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "RAR extraction failed ({}): {} {}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+            .into());
+        }
+        normalize_windows_paths(destination)?;
+        return Ok(());
+    }
+    let mut command = tar_command();
+    command
+        .args(["-x", "-f"])
+        .arg(archive)
+        .arg("-C")
+        .arg(destination);
+    if let Some(passphrase) = passphrase {
+        command.arg("--passphrase").arg(passphrase);
+    }
+    #[cfg(unix)]
+    command.args([
+        "--no-same-owner",
+        "--no-same-permissions",
+        "--no-xattrs",
+        "--no-acls",
+    ]);
+    #[cfg(not(unix))]
+    command.args(["--no-same-owner", "--no-same-permissions"]);
+    let status = command.status()?;
+    if !status.success() {
+        return Err(format!("archive extraction failed ({status})").into());
+    }
+    normalize_windows_paths(destination)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn extract_unlistable_rar(archive: &Path, destination: &Path, passphrase: &str) -> Result<()> {
+    if fs::symlink_metadata(destination)?.file_type().is_symlink()
+        || fs::read_dir(destination)?.next().is_some()
+    {
+        return Err("encrypted-header RAR extraction needs an empty real directory".into());
+    }
+    let destination = fs::canonicalize(destination)?;
+    let archive = fs::canonicalize(archive)?;
+    let output = clean_command("bwrap")
+        .args(["--ro-bind", "/", "/", "--bind"])
+        .arg(&destination)
+        .arg(&destination)
+        .args(["--die-with-parent", "--", "unrar", "x", "-o-", "-idq", "-y"])
+        .arg(format!("-p{passphrase}"))
+        .arg(&archive)
+        .arg(&destination)
+        .output()
+        .map_err(|error| format!("safe RAR extraction requires bubblewrap: {error}"))?;
+    let result = if output.status.success() {
+        validate_extracted_tree(&destination)
+    } else {
+        Err(format!(
+            "sandboxed RAR extraction failed ({}): {} {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into())
+    };
+    if result.is_ok() {
+        normalize_windows_paths(&destination)?;
+    } else {
+        for entry in fs::read_dir(&destination)? {
+            let path = entry?.path();
+            if fs::symlink_metadata(&path)?.is_dir() {
+                fs::remove_dir_all(path)?;
+            } else {
+                fs::remove_file(path)?;
+            }
+        }
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn validate_extracted_tree(destination: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let mut stack = vec![(destination.to_path_buf(), 0usize)];
+    let mut entries = 0usize;
+    while let Some((directory, depth)) = stack.pop() {
+        if depth > 64 {
+            return Err("archive contains too many nested folders".into());
+        }
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            entries += 1;
+            if entries > 1_000_000 {
+                return Err("archive contains too many files".into());
+            }
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.is_dir() {
+                stack.push((path, depth + 1));
+            } else if !metadata.is_file() || metadata.nlink() != 1 {
+                return Err("archive contains a link or unsupported entry".into());
+            }
+        }
+    }
+    if entries == 0 {
+        return Err("archive is empty".into());
+    }
     Ok(())
 }
 
