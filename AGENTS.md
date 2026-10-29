@@ -10,7 +10,7 @@ For workspace-wide context and the relationship between `azdl` and `arachnel`, s
 
 `azdl` is a Steam game launcher and runtime orchestrator written in **Rust (edition 2024)**, with a CLI and a Tauri desktop app. It ports the relevant parts of the C++/Qt reference implementation `arachnel`.
 
-**Scope: Steam games from Steam only.** azdl discovers games through the Steam Store, downloads depots from Steam's CDN, installs and removes Steam DLC, imports games installed by the official Steam client, and launches games natively or through isolated Wine/Proton prefixes. It does **not** install from archives, torrents, setup installers, catalogs or arbitrary folders, and it does **not** apply DRM removal, entitlement, emulator, activation or multiplayer-fix patches. Do not reintroduce any of these.
+**Scope: Steam games from Steam only.** azdl discovers games through the Steam Store, downloads depots from Steam's CDN, installs and removes Steam DLC, imports games installed by the official Steam client, and launches games natively or through isolated Wine/Proton prefixes. It does **not** install from archives, torrents, setup installers, catalogs or arbitrary folders. Do not reintroduce these install sources.
 
 ---
 
@@ -54,8 +54,8 @@ When extending or modifying `azdl`, you must strictly maintain the following inv
    - Depot manifests and staged payloads containing symbolic links are rejected before any file is written.
 4. **Exact Content Verification:**
    - Installed files must match the selected manifest revisions (paths, sizes, SHA-1) before atomic publication; never silently substitute another manifest revision.
-5. **Game Files Stay Unmodified:**
-   - azdl never patches game binaries or injects DRM, entitlement, emulator or multiplayer fix files. Only DLC transactions change a base game's files, and they record backups for exact rollback.
+5. **Reversible DLC:**
+   - DLC transactions record backups for exact rollback.
 
 ---
 
@@ -64,7 +64,6 @@ When extending or modifying `azdl`, you must strictly maintain the following inv
 ### Linux Launch Pipeline
 - Resolve Native, Wine or Proton and honor the selected executable, arguments and environment.
 - Keep Wine prefixes at `AZDL_DATA_DIR/prefixes/<game-id>` and Proton data at `compatdata/<game-id>`.
-- Launches never apply DRM removal, ownership-check patches, activation repairs, emulator configuration or fix kits.
 - Never start the official Steam client; unsupported account/client requirements remain explicit limitations.
 
 ### Windows Launch Pipeline
@@ -198,7 +197,7 @@ The `azdl` frontend is built with **Svelte 5** and strict adherence to **Materia
 | Download recovery | Steam game and DLC jobs persist progress; other job kinds no longer exist and unreadable legacy records are skipped. Base transfer revision journals pin IDs and manifest SHA-256 before cache reuse. Engine pause produces a typed stopped result; Resume/Retry returns through the core Steam installer, and the CLI `jobs work` worker resumes Steam jobs. Live Linux base pause/resume passed. | Process interruption and DLC retry on both hosts; Windows pause/resume |
 | DLC lifecycle | Steam DLC only: atomic additive installation from staged depots, shared ownership, collision rejection, removal, recovery journals and game moves have offline regressions. Archive DLC sources were removed; migration archives old `content-sources`. | Live DLC addition/removal against an authorized compatible base |
 | Installation and storage | Steam installs only, into configured drives, with exact file-set verification before atomic publication, safe moves and complete removal. Installs needing an executable choice stay pending and keep their Steam origin when finished from the CLI or desktop. Archive, setup, torrent, HTTPS and folder-import installs were removed. | Native Windows and Linux game installs and failure recovery |
-| Launch and runtime | Native Windows and isolated Linux Wine/Proton launches retain explicit arguments, environment and runner settings. Windows games on `auto` use the `default_runner` setting (validated on save, covered by `runtime::tests::auto_windows_game_uses_configured_default_runner`). Launches never patch game files; DRM, entitlement, emulator, activation and multiplayer-fix tooling was removed. Steam `installscript.vdf` registry entries and VC++/DirectX are provisioned into prefixes. | Per-game runtime acceptance |
+| Launch and runtime | Native Windows and isolated Linux Wine/Proton launches retain explicit arguments, environment and runner settings. Windows games on `auto` use the `default_runner` setting (validated on save, covered by `runtime::tests::auto_windows_game_uses_configured_default_runner`). Steam `installscript.vdf` registry entries and VC++/DirectX are provisioned into prefixes. | Per-game runtime acceptance |
 | Game management controls | Launch & Runner holds full-width runner dropdown, executable, launch options, arguments, environment, runtime dependencies and diagnostics. Runtime installs are confirmed by fresh read-back and stay disabled during commands. The Patches tab and per-game patch switches were removed. | Native Microsoft runtime installation acceptance and broader accessibility checks |
 | CLI/API/UI | Settings → Compatibility Runners has a default-runner dropdown listing the same runners as the game page (excluding Native) with confirmed read-back. CLI, desktop actions and UI expose only Steam install, DLC, launch, configuration, storage, shortcuts and diagnostics. Plugin, catalog, archive, setup, torrent, import, drive-scan, patch, overlay and Steam-running surfaces were removed, as were settings nothing read (global launch arguments, auto-patch toggles, download limits). Icons come only from Material Symbols (outlined), enforced by `icons.test.js`. | Live desktop interactions and accessibility acceptance |
 | Packaging | Manual/tag-only release workflow; no cache restoration or automatic Verify workflow. Depot downloads are compiled in; no native engine is fetched, built or bundled. Local Linux `.deb`/`.AppImage` builds passed before the engine change. | Native Windows NSIS/MSI execution and distribution-host installation acceptance |
