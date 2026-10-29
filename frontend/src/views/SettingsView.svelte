@@ -10,6 +10,7 @@
   import iconFolderOpen from '@ktibow/iconset-material-symbols/folder-open-outline';
   import iconInfo from '@ktibow/iconset-material-symbols/info-outline';
   import iconInfoOutline from '@ktibow/iconset-material-symbols/info-outline';
+  import iconLock from '@ktibow/iconset-material-symbols/lock-open-outline';
   import iconPalette from '@ktibow/iconset-material-symbols/palette-outline';
   import iconPlayCircle from '@ktibow/iconset-material-symbols/play-circle-outline';
   import iconStar from '@ktibow/iconset-material-symbols/star-outline';
@@ -17,7 +18,7 @@
   import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset-outline';
   import { PRESET_SEEDS } from '../theme.js';
   import { displayPath } from '../paths.js';
-  import { Icon } from 'm3-svelte';
+  import { Icon, Switch } from 'm3-svelte';
   import Modal from '../components/Modal.svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import SectionCard from '../components/SectionCard.svelte';
@@ -36,7 +37,7 @@
   let {
     seedColor = $bindable('#10B981'),
     themeMode = $bindable('dark'), // 'system' | 'dark' | 'light' | 'amoled'
-    activeCategory = $bindable('storage'), // 'storage' | 'launch' | 'appearance' | 'about'
+    activeCategory = $bindable('storage'), // 'storage' | 'launch' | 'appearance' | 'patches' | 'about'
     runners = [],
     dataDir = '',
     platform = 'linux',
@@ -56,6 +57,12 @@
     seed_color: seedColor,
     theme_mode: themeMode,
     default_runner: 'auto',
+    auto_steamless_unpack: true,
+    auto_online_fix_overlay: true,
+    auto_goldberg_sync: true,
+    auto_dlc_patch: true,
+    auto_ea_heal: true,
+    auto_game_patch: true,
   });
 
   $effect(() => {
@@ -81,6 +88,7 @@
       ? [{ id: 'launch', label: 'Compatibility Runners', icon: iconPlayCircle, keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'prefix'] }]
       : []),
     { id: 'appearance', label: 'Material You Theming', icon: iconPalette, keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light'] },
+    { id: 'patches', label: 'Patches', icon: iconLock, keywords: ['patch', 'patches', 'steamless', 'onlinefix', 'overlay', 'drm', 'steamstub', 'fix', 'goldberg', 'dlc', 'ea'] },
     { id: 'about', label: 'About & Diagnostics', icon: iconInfo, keywords: ['about', 'diagnostics', 'doctor', 'version', 'system', 'bsdtar', 'curl'] },
   ]);
 
@@ -597,6 +605,78 @@
       </SectionCard>
 
     <!-- 8. ABOUT & DIAGNOSTICS -->
+    {:else if activeCategory === 'patches'}
+      <div class="panel-header">
+        <h2>Patches</h2>
+        <span class="subtext">Configure global automated patching, DRM stripping, and runtime hooks.</span>
+      </div>
+
+      <SectionCard
+        title="Automated Runtime Patches & DRM Stripping"
+        icon={iconLock}
+        description="Global automated patching rules executed during the game launch lifecycle for non-Steam-origin games:"
+      >
+        <div class="switch-row">
+          <div>
+            <strong>SteamStub Auto-Unpack (Steamless)</strong>
+            <p class="desc">Strip SteamStub DRM wrappers before launch, preserving <code>.steamstub.bak</code> backups.</p>
+          </div>
+          <label class="switch-container" aria-label="SteamStub Auto-Unpack">
+            <Switch bind:checked={localSettings.auto_steamless_unpack} onchange={saveLocalSettings} />
+          </label>
+        </div>
+
+        <div class="switch-row">
+          <div>
+            <strong>Auto-Enable Online-Fix / SteamFix Overlays</strong>
+            <p class="desc">Stage multiplayer fix DLLs and Wine DLL overrides (<code>WINEDLLOVERRIDES</code>) at launch, preserving clean states.</p>
+          </div>
+          <label class="switch-container" aria-label="Auto-Enable Online-Fix Overlays">
+            <Switch bind:checked={localSettings.auto_online_fix_overlay} onchange={saveLocalSettings} />
+          </label>
+        </div>
+
+        <div class="switch-row">
+          <div>
+            <strong>Goldberg Steam Emulator Auto-Sync</strong>
+            <p class="desc">Generate <code>steam_settings/</code> configuration and deploy emulator binaries for compatible games.</p>
+          </div>
+          <label class="switch-container" aria-label="Goldberg Steam Emulator Auto-Sync">
+            <Switch bind:checked={localSettings.auto_goldberg_sync} onchange={saveLocalSettings} />
+          </label>
+        </div>
+
+        <div class="switch-row">
+          <div>
+            <strong>Steamworks DLC Entitlement Auto-Bypass</strong>
+            <p class="desc">Patch Steamworks <code>BIsDlcInstalled</code> entitlement checks in <code>steam_api64.dll</code> and GodotSteam DLLs on launch.</p>
+          </div>
+          <label class="switch-container" aria-label="Steamworks DLC Entitlement Auto-Bypass">
+            <Switch bind:checked={localSettings.auto_dlc_patch} onchange={saveLocalSettings} />
+          </label>
+        </div>
+
+        <div class="switch-row">
+          <div>
+            <strong>EA Desktop / Origin Activation Repair</strong>
+            <p class="desc">Heal EA Desktop / Origin activation state in Frostbite and EA game binaries on launch.</p>
+          </div>
+          <label class="switch-container" aria-label="EA Desktop / Origin Activation Repair">
+            <Switch bind:checked={localSettings.auto_ea_heal} onchange={saveLocalSettings} />
+          </label>
+        </div>
+
+        <div class="switch-row">
+          <div>
+            <strong>Standalone Game Patch Auto-Mount</strong>
+            <p class="desc">Enable and mount staged standalone game patches and community modifications on launch.</p>
+          </div>
+          <label class="switch-container" aria-label="Standalone Game Patch Auto-Mount">
+            <Switch bind:checked={localSettings.auto_game_patch} onchange={saveLocalSettings} />
+          </label>
+        </div>
+      </SectionCard>
+
     {:else if activeCategory === 'about'}
       <div class="panel-header">
         <h2>About & System Diagnostics</h2>
@@ -788,6 +868,27 @@
     font-size: 0.82rem;
     color: var(--md-sys-color-on-surface-variant);
     line-height: 1.45;
+  }
+
+  .switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--md-sys-color-outline-variant);
+    gap: 16px;
+  }
+
+  .switch-row:last-child {
+    border-bottom: none;
+  }
+
+  .switch-container {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
   }
 
   /* FORMS & INPUTS */
