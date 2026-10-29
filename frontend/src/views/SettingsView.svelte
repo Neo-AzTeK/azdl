@@ -89,11 +89,11 @@
   let individualTargetDrives = $state({});
 
   let settingsCategories = $derived([
-    { id: 'storage', label: 'Storage & Drives', icon: {iconStorage}, keywords: ['storage', 'drive', 'disk', 'folder', 'migrate', 'path', 'games'] },
-    { id: 'launch', label: platform === 'windows' ? 'Launch Options' : 'Launch & Runners', icon: {iconPlayCircle}, keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'arguments', 'dxvk', 'prefix'] },
-    { id: 'appearance', label: 'Material You Theming', icon: {iconPalette}, keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light'] },
-    { id: 'patches', label: 'Patches', icon: {iconLock}, keywords: ['patch', 'patches', 'steamless', 'onlinefix', 'overlay', 'drm', 'steamstub', 'fix', 'goldberg', 'dlc', 'ea'] },
-    { id: 'about', label: 'About & Diagnostics', icon: {iconInfo}, keywords: ['about', 'diagnostics', 'doctor', 'version', 'system', 'bwrap', 'unrar', 'bsdtar'] },
+    { id: 'storage', label: 'Storage & Drives', icon: iconStorage, keywords: ['storage', 'drive', 'disk', 'folder', 'migrate', 'path', 'games'] },
+    { id: 'launch', label: platform === 'windows' ? 'Launch Options' : 'Launch & Runners', icon: iconPlayCircle, keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'arguments', 'dxvk', 'prefix'] },
+    { id: 'appearance', label: 'Material You Theming', icon: iconPalette, keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light'] },
+    { id: 'patches', label: 'Patches', icon: iconLock, keywords: ['patch', 'patches', 'steamless', 'onlinefix', 'overlay', 'drm', 'steamstub', 'fix', 'goldberg', 'dlc', 'ea'] },
+    { id: 'about', label: 'About & Diagnostics', icon: iconInfo, keywords: ['about', 'diagnostics', 'doctor', 'version', 'system', 'bwrap', 'unrar', 'bsdtar'] },
   ]);
 
   function doesCategoryMatch(cat, query) {

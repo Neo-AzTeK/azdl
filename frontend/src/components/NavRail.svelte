@@ -9,17 +9,17 @@
     {
       id: 'library',
       label: 'Library',
-      icon: {iconVideogameAsset},
+      icon: iconVideogameAsset,
     },
     {
       id: 'catalog',
       label: 'Discover',
-      icon: {iconLibraryAdd},
+      icon: iconLibraryAdd,
     },
     {
       id: 'settings',
       label: 'Settings',
-      icon: {iconSettings},
+      icon: iconSettings,
     },
   ];
 </script>
