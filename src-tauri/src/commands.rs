@@ -2397,6 +2397,12 @@ pub fn handle_get_game_controls(state: &AppState, id: &str) -> Result<Value, Str
     let game = library.games.get(id).ok_or("Game is not installed")?;
     let controls =
         azdl::game_controls::inspect(game, &state.data_dir).map_err(|error| error.to_string())?;
+    if let Ok(mut cache) = state.steamstub_cache.lock() {
+        cache.insert(id.into(), (controls.steamstub.clone(), Instant::now()));
+    }
+    if let Ok(mut cache) = state.fix_status_cache.lock() {
+        cache.remove(id);
+    }
     serde_json::to_value(controls).map_err(|error| error.to_string())
 }
 

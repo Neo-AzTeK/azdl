@@ -16,6 +16,13 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import { Button, Tabs, FAB, LinearProgress, LinearProgressEstimate, Icon } from 'm3-svelte';
   import SectionCard from '../components/SectionCard.svelte';
+  import ActionSwitch from '../components/ActionSwitch.svelte';
+  import iconGroups from '@ktibow/iconset-material-symbols/groups-outline';
+  import iconLockOpen from '@ktibow/iconset-material-symbols/lock-open-outline';
+  import iconExtension from '@ktibow/iconset-material-symbols/extension-outline';
+  import iconMemory from '@ktibow/iconset-material-symbols/memory-outline';
+  import iconKey from '@ktibow/iconset-material-symbols/key-outline';
+  import iconBuild from '@ktibow/iconset-material-symbols/build-outline';
   import { dlcTransfer, dlcTransferActive, dlcTransferStatus, dlcTransferInstalling, isDlcTransferJob, dlcProgress, filterDlc } from '../dlc.js';
   import iconPlay from '@ktibow/iconset-material-symbols/play-arrow-outline';
   import iconStop from '@ktibow/iconset-material-symbols/stop-outline';
@@ -425,7 +432,7 @@
   let exeCandidates = $state([]);
 
   // Sub-tabs for installed game management
-  let activeDetailTab = $state('overview'); // 'overview' | 'dlc' | 'config'
+  let activeDetailTab = $state('overview'); // 'overview' | 'dlc' | 'patches' | 'config'
 
   let controlsSnapshot = $state(null);
   let controlsLoading = $state(false);
@@ -434,6 +441,19 @@
   let pendingAction = $state(null);
   let runtimeReport = $derived(controlsSnapshot?.runtime);
   let controlsDisabled = $derived(isRunning || !!pendingAction || controlsLoading || !controlsSnapshot);
+
+  // Reversible patch/fix controls, read back from the live game-controls snapshot.
+  let observedControls = $derived(controlsSnapshot || installedRecord || {});
+  let effectiveSteamStub = $derived(observedControls.steamstub);
+  let effectiveDlcPatchApplied = $derived(!!observedControls.dlc_patch_applied);
+  let effectiveGoldbergHasSettings = $derived(!!observedControls.goldberg_has_settings);
+  let hasFix = $derived(!!controlsSnapshot?.overlay?.enabled);
+  let isFixRelevant = $derived(!!controlsSnapshot?.overlay?.can_toggle);
+  let isSteamStubRelevant = $derived(!!(effectiveSteamStub?.stub_present || effectiveSteamStub?.applied));
+  let isEaRelevant = $derived(!!(observedControls.ea_heal_available || observedControls.ea_heal_applied));
+  let isDlcBypassRelevant = $derived(!!(observedControls.dlc_patch_available || effectiveDlcPatchApplied));
+  let isGoldbergRelevant = $derived(!!(observedControls.goldberg_compatible || effectiveGoldbergHasSettings));
+  let isPatchRelevant = $derived(!!observedControls.patch);
 
   async function refreshControls(id) {
     if (id !== installedGameId) return false;
@@ -464,7 +484,7 @@
       controlsSnapshot = null;
       controlsError = '';
       controlsLoading = false;
-      if (id && tab === 'config') void refreshControls(id);
+      if (id && ['patches', 'config'].includes(tab)) void refreshControls(id);
     });
   });
 
@@ -925,6 +945,9 @@
     showMoreMenu = false;
     detailTabTouched = true;
     activeDetailTab = tabName;
+    if (tabName === 'patches') {
+      void refreshControls(installedGameId);
+    }
     if (targetId === 'section-diagnostics') {
       refreshDiagnostics();
     }
@@ -936,7 +959,7 @@
 
   function handleDetailTabChange(event) {
     const nextTab = event.target?.value;
-    if (!['overview', 'dlc', 'config'].includes(nextTab)) return;
+    if (!['overview', 'dlc', 'patches', 'config'].includes(nextTab)) return;
     detailTabTouched = true;
     activeDetailTab = nextTab;
   }
@@ -1094,6 +1117,10 @@
                       <Icon icon={iconFolder} size={18} />
                       <span>Move to Another Drive</span>
                     </button>
+                    <button class="menu-item" onclick={() => navigateToDetailTab('patches', 'section-patches')}>
+                      <Icon icon={iconLockOpen} size={18} />
+                      <span>Patches</span>
+                    </button>
                     <button class="menu-item" onclick={() => navigateToDetailTab('config')}>
                       <Icon icon={iconSettings} size={18} />
                       <span>Launch Options & Config</span>
@@ -1169,6 +1196,7 @@
               items={[
                 { name: 'Overview', value: 'overview' },
                 { name: `DLC${dlcInfo.available.length ? ` (${dlcInfo.available.length})` : ''}`, value: 'dlc' },
+                { name: 'Patches', value: 'patches' },
                 { name: 'Launch & Runner', value: 'config' },
               ]}
             />
@@ -1248,6 +1276,157 @@
             </SectionCard>
             </div>
           {/if}
+
+        <!-- TAB: PATCHES (INSTALLED) -->
+        {#if isInstalled && activeDetailTab === 'patches'}
+          <section id="section-patches" class="steam-section-card" aria-busy={!!pendingAction || controlsLoading}>
+            <h3 class="section-heading">Patches & Runtime Overlays</h3>
+            <p class="section-subtext">
+              Reversible SteamFix, Online-Fix, and SteamStub DRM stripping overlays.
+            </p>
+
+            {#if pendingAction || controlsLoading}
+              <p class="section-subtext" role="status">{pendingAction ? 'Updating game state…' : 'Reading current state…'}</p>
+            {:else if controlsError}
+              <p class="section-subtext" role="status">State unavailable: {controlsError}</p>
+            {/if}
+
+            <div class="tools-grid">
+              <!-- 1. Overlay DLLs -->
+              <div class="tool-card" class:irrelevant={!isFixRelevant}>
+                <div class="tool-header">
+                  <div class="tool-header-left">
+                    <Icon icon={iconGroups} class="tool-header-icon" />
+                    <h4>Online-Fix / SteamFix Overlay</h4>
+                  </div>
+                  <label class="switch-container" aria-label="Toggle Online-Fix or SteamFix overlay">
+                    <ActionSwitch
+                      checked={hasFix}
+                      disabled={controlsDisabled || !isFixRelevant}
+                      onToggle={() => handleAction({ action: 'overlay-toggle' }, 'Toggled DLL overlay')}
+                    />
+                  </label>
+                </div>
+                <p class="tool-desc">
+                  Toggle multiplayer fix DLLs and FakeAppId via reversible <code>.arachnel-off</code> renames.
+                </p>
+                {#if controlsSnapshot?.overlay?.mixed}<span class="tool-pill warning">Partially enabled</span>{/if}
+              </div>
+
+              <!-- 2. Steamless DRM -->
+              <div class="tool-card" class:irrelevant={!isSteamStubRelevant}>
+                <div class="tool-header">
+                  <div class="tool-header-left">
+                    <Icon icon={iconLockOpen} class="tool-header-icon" />
+                    <h4>Steamless DRM Stripper</h4>
+                  </div>
+                  <label class="switch-container" aria-label="Toggle Steamless DRM unpack">
+                    <ActionSwitch
+                      checked={!!effectiveSteamStub?.applied}
+                      disabled={controlsDisabled || !isSteamStubRelevant}
+                      onToggle={() => handleAction(
+                        { action: effectiveSteamStub?.applied ? 'steamstub-rollback' : 'steamstub-unpack' },
+                        effectiveSteamStub?.applied ? 'Restored original SteamStub executable' : 'SteamStub DRM unpacked'
+                      )}
+                    />
+                  </label>
+                </div>
+                <p class="tool-desc">
+                  Strip SteamStub DRM from PE binaries with automated <code>.steamstub.bak</code> backups.
+                </p>
+              </div>
+
+              <!-- 3. DLC License Bypass -->
+              <div class="tool-card" class:irrelevant={!isDlcBypassRelevant}>
+                <div class="tool-header">
+                  <div class="tool-header-left">
+                    <Icon icon={iconExtension} class="tool-header-icon" />
+                    <h4>DLC License Bypass</h4>
+                  </div>
+                  <label class="switch-container" aria-label="Toggle DLC license bypass">
+                    <ActionSwitch
+                      checked={effectiveDlcPatchApplied}
+                      disabled={controlsDisabled || !isDlcBypassRelevant}
+                      onToggle={() => handleAction(
+                        { action: effectiveDlcPatchApplied ? 'dlc-license-rollback' : 'dlc-license-patch' },
+                        effectiveDlcPatchApplied ? 'DLC license patch rolled back' : 'DLC license patch applied'
+                      )}
+                    />
+                  </label>
+                </div>
+                <p class="tool-desc">
+                  Bypasses Steamworks <code>BIsDlcInstalled</code> entitlement checks in <code>steam_api64.dll</code> and GodotSteam.
+                </p>
+              </div>
+
+              <!-- 4. Goldberg Steam Emulator Hook -->
+              <div class="tool-card" class:irrelevant={!isGoldbergRelevant}>
+                <div class="tool-header">
+                  <div class="tool-header-left">
+                    <Icon icon={iconMemory} class="tool-header-icon" />
+                    <h4>Goldberg Emulator Settings</h4>
+                  </div>
+                  <label class="switch-container" aria-label="Toggle Goldberg emulator settings">
+                    <ActionSwitch
+                      checked={effectiveGoldbergHasSettings}
+                      disabled={controlsDisabled || !isGoldbergRelevant}
+                      onToggle={() => handleAction(
+                        { action: effectiveGoldbergHasSettings ? 'goldberg-rollback' : 'goldberg-sync' },
+                        effectiveGoldbergHasSettings ? 'Goldberg configuration removed' : 'Goldberg DLC configuration generated'
+                      )}
+                    />
+                  </label>
+                </div>
+                <p class="tool-desc">
+                  Auto-provisions <code>steam_settings/DLC.txt</code> and offline AppID entitlements for games using the Goldberg emulator.
+                </p>
+              </div>
+
+              <!-- 5. EA Activation Patch -->
+              <div class="tool-card" class:irrelevant={!isEaRelevant}>
+                <div class="tool-header">
+                  <div class="tool-header-left">
+                    <Icon icon={iconKey} class="tool-header-icon" />
+                    <h4>EA Activation Patch</h4>
+                  </div>
+                  <label class="switch-container" aria-label="Toggle EA activation patch">
+                    <ActionSwitch
+                      checked={!!observedControls.ea_heal_applied}
+                      disabled={controlsDisabled || !isEaRelevant}
+                      onToggle={() => handleAction(
+                        { action: observedControls.ea_heal_applied ? 'ea-rollback' : 'ea-heal' },
+                        observedControls.ea_heal_applied ? 'EA activation restored' : 'EA activation patched'
+                      )}
+                    />
+                  </label>
+                </div>
+                <p class="tool-desc">
+                  Bypasses EA Desktop / Origin activation checks and restores original entitlement binaries.
+                </p>
+              </div>
+
+              <!-- 6. Standalone Game Patch -->
+              <div class="tool-card" class:irrelevant={!isPatchRelevant}>
+                <div class="tool-header">
+                  <div class="tool-header-left">
+                    <Icon icon={iconBuild} class="tool-header-icon" />
+                    <h4>Standalone Game Patch</h4>
+                  </div>
+                  <label class="switch-container" aria-label="Toggle standalone game patch">
+                    <ActionSwitch
+                      checked={observedControls.patch === 'enabled'}
+                      disabled={controlsDisabled || !isPatchRelevant}
+                      onToggle={() => handleAction({ action: 'patch-toggle' }, 'Toggled game patch')}
+                    />
+                  </label>
+                </div>
+                <p class="tool-desc">
+                  Toggle standalone game patch files and mod payloads staged in this game directory.
+                </p>
+              </div>
+            </div>
+          </section>
+        {/if}
 
         <!-- TAB: LAUNCH & RUNNER CONFIG (INSTALLED) -->
         {#if isInstalled && activeDetailTab === 'config'}
@@ -2505,5 +2684,87 @@
     .steam-content-grid {
       grid-template-columns: 1fr;
     }
+  }
+
+  /* Patches tab */
+  .tools-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+  }
+
+  .tool-card {
+    background: var(--md-sys-color-surface-container);
+    border-radius: var(--md-sys-shape-medium);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 12px;
+    border: 1px solid var(--md-sys-color-outline-variant);
+    transition: background-color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
+  }
+
+  .tool-card:hover:not(.irrelevant) {
+    background: var(--md-sys-color-surface-container-high);
+    border-color: var(--md-sys-color-outline);
+  }
+
+  .tool-card.irrelevant {
+    opacity: 0.65;
+    background: var(--md-sys-color-surface-container-low);
+  }
+
+  .tool-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .tool-header-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  :global(.tool-header-icon) {
+    width: 20px;
+    height: 20px;
+    color: var(--md-sys-color-primary);
+    flex-shrink: 0;
+  }
+
+  .tool-header h4 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--md-sys-color-on-surface);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .tool-desc {
+    font-size: 12px;
+    color: var(--md-sys-color-on-surface-variant);
+    line-height: 1.5;
+    margin: 0;
+    flex: 1;
+  }
+
+  .switch-container {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  :global(.switch-container:has(input:disabled)) {
+    cursor: not-allowed;
+    opacity: 0.38;
+    pointer-events: none;
   }
 </style>
