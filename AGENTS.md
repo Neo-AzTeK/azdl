@@ -8,14 +8,9 @@ For workspace-wide context and the relationship between `azdl` and `arachnel`, s
 
 ## 1. Project Overview
 
-`azdl` is a modern, lightweight game launcher and runtime orchestrator written in **Rust (edition 2024)**. It ports and expands the capabilities of the C++/Qt reference implementation `arachnel`, featuring:
-- Headless CLI and local loopback Web UI (`127.0.0.1`).
-- Multi-source game downloads (HTTPS resumable jobs, BitTorrent magnets via aria2c).
-- Safe archive extraction (bsdtar, unrar, and Linux Bubblewrap sandboxing for encrypted-header RARs).
-- Reversible patch management and multiplayer fix overlays (Online-Fix, SteamFix, `.arachnel-off` toggles).
-- Wine and Proton prefix isolation with automated DLL overrides and FakeAppId generation.
-- Steam ecosystem integration (manifest imports, binary `shortcuts.vdf` modification).
-- Built-in Steam discovery and exact manifest downloads with an internal Qt-free engine.
+`azdl` is a Steam game launcher and runtime orchestrator written in **Rust (edition 2024)**, with a CLI and a Tauri desktop app. It ports the relevant parts of the C++/Qt reference implementation `arachnel`.
+
+**Scope: Steam games from Steam only.** azdl discovers games through the Steam Store, downloads depots from Steam's CDN, installs and removes Steam DLC, imports games installed by the official Steam client, and launches games natively or through isolated Wine/Proton prefixes. It does **not** install from archives, torrents, setup installers, catalogs or arbitrary folders, and it does **not** apply DRM removal, entitlement, emulator, activation or multiplayer-fix patches. Do not reintroduce any of these.
 
 ---
 
@@ -25,48 +20,42 @@ All core source code resides in [`src/`](file:///home/mixcraftio/Code/Repos/Crac
 
 | Module | Core Responsibilities | Key Functions / Types |
 | :--- | :--- | :--- |
-| [`lib.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/lib.rs) | Domain types, library persistence (`library.json`), runner resolution, process launch. | `Game`, `Library`, `Runner`, `LaunchOption`, `launch_game` |
-| [`main.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/main.rs) | CLI entry point, argument parsing, command dispatching. | `run_command`, CLI subcommands |
-| [`archive.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/archive.rs) | Archive extraction (ZIP, TAR, 7z, RAR), multi-part RARs, password support, Bubblewrap sandbox. | `extract_archive`, `extract_rar_in_bwrap`, `validate_archive_members` |
-| [`catalog.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/catalog.rs) | Install package descriptions, source receipts, multi-part download caching. | `CatalogGame`, `install_game_in`, `stamp_origin` |
-| [`discovery.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/discovery.rs) | Executable detection heuristics; filtering uninstaller, crash handler, redistributable noise. | `discover_candidates`, `find_likely_executable` |
-| [`doctor.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/doctor.rs) | Runtime environment diagnosis (Wine, Proton, bwrap, unrar, bsdtar, permissions). | `diagnose_game`, `check_environment` |
-| [`jobs.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/jobs.rs) | Persistent background HTTPS downloads, `.part` chunking, SHA-256 validation, install plans. | `DownloadJob`, `JobStatus`, `fetch_install_job`, `resume_job` |
-| [`multiplayer.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/multiplayer.rs) | Fix detection (`OnlineFix64.dll`, `SteamFix`, `winmm.dll`), `FakeAppId`, Wine DLL overrides. | `detect_fix_markers`, `prepare_fix_environment`, `winmm_setup` |
-| [`overlay.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/overlay.rs) | Reversible `.arachnel-off` file renaming for fix DLLs and AppID files. | `toggle_overlay`, `get_overlay_status` |
-| [`patch.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/patch.rs) | File patches, staged patch rollbacks, multi-part patch archives, manifest backups. | `apply_patch`, `rollback_patch`, `toggle_patch` |
-| [`runtime.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/runtime.rs) | Host runner discovery (GE-Proton, Valve Proton, Wine), prefix directories. | `discover_proton_runners`, `resolve_runner` |
-| [`setup.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/setup.rs) | Running Windows setup installers (`setup.exe`, `.msi`) in isolated Wine prefixes. | `run_wine_setup`, `import_from_prefix` |
-| [`sha256.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/sha256.rs) | Pure streaming SHA-256 implementation (zero external crypto dependencies). | `compute_sha256`, `verify_file_digest` |
-| [`shortcuts.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/shortcuts.rs) | FreeDesktop `.desktop` shortcut creation, validation, and deletion. | `create_desktop_shortcut`, `remove_desktop_shortcut` |
-| [`steam.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/steam.rs) | Steam library scanning, VDF parsing (`libraryfolders.vdf`, `appmanifest_*.acf`). | `scan_steam_libraries`, `parse_vdf` |
-| `steam_access.rs`, `steam_install.rs` | Externally authorized manifest access, direct install requests and recorded-job resumption | `manifest_url`, `fetch_manifest_bundle`, `game_for_app`, `resume_job` |
-| `steam_engine.rs` (private) | In-process `steamroom` CDN transfers: anonymous session, CDN auth tokens, manifest entry checks, progress and pause/cancel markers | Internal adapter |
-| `steam_metadata.rs`, `steam_content.rs`, `steam_manifest.rs` | Depot relationships, exact revision planning, receipts and verified file sets | Base/DLC compatibility and manifest validation |
-| `dlc.rs`, `migration.rs` | Reversible content lifecycle and versioned legacy-data migration | Atomic transactions, shared ownership, `migrate` |
-| [`steam_shortcuts.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/steam_shortcuts.rs) | Steam binary `shortcuts.vdf` reader/writer, atomic backup preservation. | `add_steam_shortcut`, `remove_steam_shortcut` |
-| [`torrent.rs`](file:///home/mixcraftio/Code/Repos/Crack/azdl/src/torrent.rs) | Magnet URI validation, aria2c background download coordination. | `download_magnet`, `validate_magnet_uri` |
+| `lib.rs` | Domain types, library persistence (`library.json`), launch options, process launch, game removal. | `Game`, `Library`, `Runner`, `spawn_game`, `remove_game` |
+| `main.rs` | CLI entry point and command dispatch. | `run` |
+| `archive.rs` | Checked `bsdtar` extraction of manifest bundles; Windows path normalization. | `extract_checked`, `normalize_windows_paths` |
+| `discovery.rs` | Executable detection heuristics for installed depots. | `discover_executables`, `import_game` |
+| `doctor.rs` | Per-game launch diagnostics and host tool checks. | `diagnose_game`, `system_diagnostics` |
+| `jobs.rs` | Steam game and DLC job records, pause/cancel markers, background workers. | `DownloadJob`, `retry_job`, `start_background` |
+| `runtime.rs` | Proton/Wine discovery and Proton-GE download. | `discover_proton`, `resolve_runner` |
+| `dependencies.rs`, `installscript.rs` | VC++/DirectX provisioning and Steam `installscript.vdf` registry application in prefixes. | `ensure_game_dependencies`, `apply_installscript_for_game` |
+| `settings.rs` | Storage drives, game moves, theming. | `LauncherSettings`, `move_game_to_drive` |
+| `shortcuts.rs`, `steam_shortcuts.rs` | Desktop shortcuts and non-Steam shortcuts in the Steam client. | `create_shortcut` |
+| `steam.rs` | Local Steam library scanning and import. | `scan_steam`, `import_steam`, `steam_root` |
+| `steam_discovery.rs`, `steam_metadata.rs` | Store search/featured lists, appinfo and DLC metadata. | `discover_games`, `fetch_appinfo` |
+| `steam_access.rs`, `steam_install.rs` | Relay manifest bundles, install requests, pending-executable origins, job resumption. | `SteamGame`, `install_game_in`, `resume_job` |
+| `steam_depot.rs`, `steam_content.rs`, `steam_manifest.rs` | Depot planning, exact revisions, receipts, manifest and file verification. | `install_steam_manifest_game_in`, `install_steam_dlc` |
+| `steam_engine.rs` (private) | In-process `steamroom` CDN transfers: anonymous session, auth tokens, progress, pause/cancel. | Internal adapter |
+| `dlc.rs` | Atomic, reversible DLC file transactions with shared-file ownership. | `install_staged_with_guard`, `remove_with_guard` |
+| `migration.rs` | Versioned migration of legacy data. | `migrate` |
+| `http.rs` (private) | Shared HTTPS client for small JSON lookups. | `get_bytes` |
 
 ---
 
-## 3. Critical Security & Sandboxing Invariants
+## 3. Critical Security Invariants
 
-When extending or modifying `azdl`, you must strictly maintain the following security invariants:
+When extending or modifying `azdl`, you must strictly maintain the following invariants:
 
 1. **No Arbitrary Shell Execution (`sh -c` / `cmd.exe /C`):**
    - Always spawn child processes using `std::process::Command::new(binary).arg(...)`.
    - Never construct shell string commands. Arguments must be passed as distinct vector elements.
-2. **Path Traversal & Zip-Slip Protection:**
-   - Any archive extraction or patch application must validate that target paths resolve within the designated destination directory.
-   - Any relative paths containing `..` or leading `/` must be rejected (`rejects_archive_path_escape`).
+2. **Path Traversal Protection:**
+   - Manifest bundles, depot manifests and DLC payloads must only write inside their destination directory; reject `..`, absolute paths and Windows drive prefixes (`rejects_archive_path_escape`, `manifest_entries_reject_links_and_escaping_paths`).
 3. **Strict Symlink Rejection:**
-   - Symlinks in untrusted archives (game archives or patch packages) are forbidden (`rejects_symlinked_patch_paths`, `sandboxed_rar_tree_rejects_links`). Reject archives containing symlinks immediately to prevent file hijack attacks.
-4. **Bubblewrap (`bwrap`) Sandboxing on Linux:**
-   - Encrypted-header RAR files must be inspected/extracted inside an unprivileged Bubblewrap sandbox with a read-only view of the root filesystem and a confined temporary write directory.
-5. **Reversibility of Patches and Overlays:**
-   - Staged patches must record all modified and newly created files in their manifest.
-   - When disabling or rolling back, newly created files must be removed, and modified files must be restored from backup.
-   - Only **one** patch may be active per game at any time.
+   - Depot manifests and staged payloads containing symbolic links are rejected before any file is written.
+4. **Exact Content Verification:**
+   - Installed files must match the selected manifest revisions (paths, sizes, SHA-1) before atomic publication; never silently substitute another manifest revision.
+5. **Game Files Stay Unmodified:**
+   - azdl never patches game binaries or injects DRM, entitlement, emulator or multiplayer fix files. Only DLC transactions change a base game's files, and they record backups for exact rollback.
 
 ---
 
@@ -75,7 +64,7 @@ When extending or modifying `azdl`, you must strictly maintain the following sec
 ### Linux Launch Pipeline
 - Resolve Native, Wine or Proton and honor the selected executable, arguments and environment.
 - Keep Wine prefixes at `AZDL_DATA_DIR/prefixes/<game-id>` and Proton data at `compatdata/<game-id>`.
-- Built-in Steam launches do not apply DRM removal, ownership-check patches, activation repairs, emulator configuration or source-supplied fix kits.
+- Launches never apply DRM removal, ownership-check patches, activation repairs, emulator configuration or fix kits.
 - Never start the official Steam client; unsupported account/client requirements remain explicit limitations.
 
 ### Windows Launch Pipeline
@@ -158,13 +147,13 @@ The `azdl` frontend is built with **Svelte 5** and strict adherence to **Materia
 - Modals provide standard MD3 scrim blur, elevation shadows, title/subtitle headers, focus trap, Escape key handling, and separated body and action snippets.
 
 ### 7.6. Elimination of UI Bloat & Duplicate Actions
-- **Clean Layouts:** Remove unneeded, redundant explanatory banners. Host architecture auto-detection is displayed as a single platform icon chip (`Linux` or `Windows`) in the header; Wine prefix isolation notes are integrated directly under the runner selector.
+- **Clean Layouts:** Remove unneeded, redundant explanatory banners. Settings show only controls the backend actually reads; never add a setting that nothing consumes.
 - **No Duplicate Quick Actions:** On game pages, secondary actions ("Open Installation Folder", "Move to Another Drive", "Sync with Steam", "Launch Options", "Diagnostics", "Uninstall Game") belong in a consolidated Material You burger/more dropdown menu (`⋮`) in the play bar. Never duplicate these actions across sidebar cards.
 - **Open Game Folder:** Every installed game card/row must provide a direct action to open its installation directory using safe native system file managers (`xdg-open` on Linux, `explorer` on Windows).
 
 ### 7.7. Launcher Autonomy & Steam Invariant
 - `azdl` is a self-contained game launcher and prefix orchestrator.
-- **Never spawn external Steam:** Catalog downloads, manifests, and local game launches must NEVER invoke `steam steam://install/...` or `steam steam://rungameid/...`. All game depots, manifests, and fix overlays are staged locally within the `azdl` workspace and executed under isolated Wine/Proton prefixes.
+- **Never spawn external Steam:** Downloads, manifests, and local game launches must NEVER invoke `steam steam://install/...` or `steam steam://rungameid/...`. All game depots and manifests are staged locally within the `azdl` workspace and executed under isolated Wine/Proton prefixes.
 
 ### 7.8. Never Remake Library Components (Mandatory `m3-svelte` Usage)
 - Never create homemade HTML/CSS remakes of Material Design 3 components when official components exist in `m3-svelte`.
@@ -178,11 +167,11 @@ The `azdl` frontend is built with **Svelte 5** and strict adherence to **Materia
 - Prioritize landscape headers and banners (`banner_url`, `header_image`) over portrait covers to avoid distortion and letterboxing.
 
 ### 7.10. Game Page Cleanliness
-- **Game Page:** Game title is rendered in the topbar header (no Steam ID pill, no redundant status badges). The topbar is transparent when scrolled to the top (`scrollTop === 0`) and transitions to a surface container backdrop on scroll. The return button uses a discrete `m3-svelte` text button (`variant="text" size="s"`). Do NOT show "Ready to play" placeholder strings or blinking status indicator dots in the action bar. Tags (genres, sources, versions) belong in the sidebar "Game Information" card formatted with left-aligned label and right-wrapped tags, not directly beneath the title. Quick actions in the more menu (`⋮`) must smoothly scroll to their target sections.
+- **Game Page:** Tabs are Overview, DLC and Launch & Runner (which also holds diagnostics). Game title is rendered in the topbar header (no Steam ID pill, no redundant status badges). The topbar is transparent when scrolled to the top (`scrollTop === 0`) and transitions to a surface container backdrop on scroll. The return button uses a discrete `m3-svelte` text button (`variant="text" size="s"`). Do NOT show "Ready to play" placeholder strings or blinking status indicator dots in the action bar. Tags (genres, sources, versions) belong in the sidebar "Game Information" card formatted with left-aligned label and right-wrapped tags, not directly beneath the title. Quick actions in the more menu (`⋮`) must smoothly scroll to their target sections.
 
 ### 7.11. Mandatory Error Palette & Universal Confirmation Modal (`ConfirmModal.svelte`)
 - **Zero Native Browser Dialogs:** Never use `window.confirm()`, `window.alert()`, or `prompt()` anywhere in the application.
-- **Universal Reusable Component:** All confirmation flows (game uninstallation, drive removal, catalog source removal) must reuse [`ConfirmModal.svelte`](file:///home/mixcraftio/Code/Repos/Crack/azdl/frontend/src/components/ConfirmModal.svelte).
+- **Universal Reusable Component:** All confirmation flows (game uninstallation, drive removal, DLC removal) must reuse [`ConfirmModal.svelte`](file:///home/mixcraftio/Code/Repos/Crack/azdl/frontend/src/components/ConfirmModal.svelte).
 - **Error Palette Styling:** All destructive actions and error events must use the Material Design 3 error palette tokens (`--md-sys-color-error`, `--md-sys-color-on-error`, `--md-sys-color-error-container`, `--md-sys-color-on-error-container`, `.md3-btn.danger`, `.icon-btn.danger`).
 
 ### 7.12. Unified Notification Architecture
@@ -193,7 +182,7 @@ The `azdl` frontend is built with **Svelte 5** and strict adherence to **Materia
 ### 7.13. Complete Uninstallation & Leftover State Cleanup
 - **Complete Disk Removal:** Uninstalling a game (`azdl::remove_game`) must recursively delete the game files on disk, Wine/Proton prefixes (`prefixes/<id>`), desktop and Steam shortcuts, and active transfer jobs.
 - **Library Synchronization & Ghost Pruning:** The library state must never keep ghost records pointing to non-existent directories.
-- **Post-Operation Leftovers Cleanup:** After every game installation, archive extraction, setup installer execution, all temporary download archives (`.zip`, `.rar`), installer binaries, and staging folders must be purged (`cleanup_leftovers`).
+- **Post-Operation Leftovers Cleanup:** After every game installation, manifest bundles, transfer caches and staging folders must be purged (`cleanup_leftovers`).
 
 ---
 
@@ -206,13 +195,13 @@ The `azdl` frontend is built with **Svelte 5** and strict adherence to **Materia
 | Depot engine | Private `steam_engine` drives `steamroom-client` in-process; no native library, FFI or bundled runtime. Manifests pass `steam_manifest` validation plus link/path checks before transfer. One anonymous session (local Steam cell) serves every depot group of an install; 32 concurrent chunks. Offline tests cover cancel and pause markers on a stalled transfer, unsafe entries, cell parsing and key parsing. Live on Linux: App 5335510 (1.1 GB) installed and verified in about 40 s; paused at 30% and resumed to a byte-identical install through `azdl jobs resume`. | DLC downloads, auth-token-gated depots and Windows execution |
 | Revision planning and receipts | `steam_content`, `steam_metadata`, `steam_manifest` and `steam_depot` retain source-pinned fresh-base revisions, exact depot/manifest checks, DLC/base compatibility and shared-depot content-App grouping. Offline corruption, missing-manifest, revision mismatch, path and symlink regressions pass. | Live base and shared-depot DLC combinations |
 | Migration | Version 1 in `migration.rs`, OS file locking, original JSON/resource backups and marker-last publication. Repeated/concurrent migration, resource roots containing installed games, and linked metadata rejection have tests. IDs, launch configuration, game `Plugins`, prefixes, receipts, rollback records and content jobs survive. Obsolete launcher resources are archived, never loaded. | Migration acceptance against representative user library copies |
-| Download recovery | HTTPS jobs and native depot transfers persist progress. Base transfer revision journals pin IDs and manifest SHA-256 before cache reuse. Engine pause produces a typed stopped result; Resume/Retry returns through the core Steam installer, and the CLI `jobs work` worker dispatches both HTTPS and Steam jobs. Live Linux base pause/resume passed. DLC chunk-cache revision and recovery tests remain. | Process interruption and DLC retry on both hosts; Windows pause/resume |
-| DLC lifecycle | Atomic additive installation, shared ownership, collision rejection, reversible archive overlays, removal, game moves and recovery journals have offline regressions. Legacy archive sources are inert migrated JSON, independent of executable extensions. | Live DLC addition/removal against an authorized compatible base |
-| Installation and storage | Checked archives, native/Wine setup, executable selection, configured drives, safe moves and complete removal remain core. Exact Steam file-set verification precedes atomic publication. | Native Windows and Linux game installs and failure recovery |
-| Launch and runtime | Native Windows and isolated Linux Wine/Proton launches retain explicit arguments, environment and runner settings. Steam core does not automatically apply DRM/ownership/activation patches or fix kits. Existing patch/overlay journals remain for rollback. | Per-game account, runtime and service acceptance |
-| Game management controls | Runtime dependencies live under Launch & Runner, with one switch per patch action. Fresh per-game control snapshots replace optimistic guesses; switches remain disabled through command/read-back, reject duplicate interactions, and retain confirmed state on failure. Browser regression passes 11 mouse/keyboard/drag, failure, placement and game-switch checks. Prefix detection/provisioning shares resolved Wine/Proton paths. | Native Microsoft runtime installation acceptance and broader accessibility checks |
-| CLI/API/UI | Removed plugin commands, actions, state fields, settings, callbacks, store/favorite UI and prerequisites. Tauri uses blocking workers behind async commands; lightweight progress stays independent of library scans. Shared MD3 components and central notifications remain. | Live desktop interactions and accessibility acceptance |
+| Download recovery | Steam game and DLC jobs persist progress; other job kinds no longer exist and unreadable legacy records are skipped. Base transfer revision journals pin IDs and manifest SHA-256 before cache reuse. Engine pause produces a typed stopped result; Resume/Retry returns through the core Steam installer, and the CLI `jobs work` worker resumes Steam jobs. Live Linux base pause/resume passed. | Process interruption and DLC retry on both hosts; Windows pause/resume |
+| DLC lifecycle | Steam DLC only: atomic additive installation from staged depots, shared ownership, collision rejection, removal, recovery journals and game moves have offline regressions. Archive DLC sources were removed; migration archives old `content-sources`. | Live DLC addition/removal against an authorized compatible base |
+| Installation and storage | Steam installs only, into configured drives, with exact file-set verification before atomic publication, safe moves and complete removal. Installs needing an executable choice stay pending and keep their Steam origin when finished from the CLI or desktop. Archive, setup, torrent, HTTPS and folder-import installs were removed. | Native Windows and Linux game installs and failure recovery |
+| Launch and runtime | Native Windows and isolated Linux Wine/Proton launches retain explicit arguments, environment and runner settings. Launches never patch game files; DRM, entitlement, emulator, activation and multiplayer-fix tooling was removed. Steam `installscript.vdf` registry entries and VC++/DirectX are provisioned into prefixes. | Per-game runtime acceptance |
+| Game management controls | Launch & Runner holds runner, executable, launch options, arguments, environment, runtime dependencies and diagnostics. Runtime installs are confirmed by fresh read-back and stay disabled during commands. The Patches tab and per-game patch switches were removed. | Native Microsoft runtime installation acceptance and broader accessibility checks |
+| CLI/API/UI | CLI, desktop actions and UI expose only Steam install, DLC, launch, configuration, storage, shortcuts and diagnostics. Plugin, catalog, archive, setup, torrent, import, drive-scan, patch, overlay and Steam-running surfaces were removed, as were settings nothing read (default runner, global launch arguments, auto-patch toggles, download limits). Icons come only from Material Symbols (outlined), enforced by `icons.test.js`. | Live desktop interactions and accessibility acceptance |
 | Packaging | Manual/tag-only release workflow; no cache restoration or automatic Verify workflow. Depot downloads are compiled in; no native engine is fetched, built or bundled. Local Linux `.deb`/`.AppImage` builds passed before the engine change. | Native Windows NSIS/MSI execution and distribution-host installation acceptance |
-| Existing generic tools | Archive safety, HTTP/torrent transport, reversible local patches, dependency provisioning, shortcuts and diagnostics remain. Vite/Svelte build plugins and a standalone utility's own `Plugins` dependency directory are unrelated to launcher extensions. | Broader platform and transport acceptance |
+| Supporting tools | Manifest-bundle extraction (`bsdtar`), HTTPS for runtimes and redistributables (`curl`), shortcuts and diagnostics remain. `unrar`, `aria2c` and Bubblewrap are no longer used. | Broader platform acceptance |
 
 No offline suite establishes account authorization, successful live installation or multiplayer. Verify each supported game and service with authorized content and a real runtime session.
