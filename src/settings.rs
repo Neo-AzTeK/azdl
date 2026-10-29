@@ -25,6 +25,28 @@ pub struct LauncherSettings {
     /// Runner identifier (see [`crate::parse_runner`]) used by Windows games left on `auto`.
     #[serde(default = "default_runner_id")]
     pub default_runner: String,
+    /// Strip SteamStub DRM wrappers with Steamless when a game is launched.
+    #[serde(default = "default_true")]
+    pub auto_steamless_unpack: bool,
+    /// Stage Online-Fix / SteamFix overlay DLLs and overrides at launch.
+    #[serde(default = "default_true")]
+    pub auto_online_fix_overlay: bool,
+    /// Provision and synchronize the Goldberg Steam emulator at launch.
+    #[serde(default = "default_true")]
+    pub auto_goldberg_sync: bool,
+    /// Apply the DLC-entitlement (`BIsDlcInstalled`) patch at launch.
+    #[serde(default = "default_true")]
+    pub auto_dlc_patch: bool,
+    /// Heal EA/Origin activation state at launch.
+    #[serde(default = "default_true")]
+    pub auto_ea_heal: bool,
+    /// Re-enable any applied standalone game patch at launch.
+    #[serde(default = "default_true")]
+    pub auto_game_patch: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_seed_color() -> String {
@@ -61,6 +83,12 @@ impl LauncherSettings {
             seed_color: "#10B981".into(),
             theme_mode: "dark".into(),
             default_runner: default_runner_id(),
+            auto_steamless_unpack: true,
+            auto_online_fix_overlay: true,
+            auto_goldberg_sync: true,
+            auto_dlc_patch: true,
+            auto_ea_heal: true,
+            auto_game_patch: true,
         }
     }
 
@@ -350,6 +378,12 @@ mod tests {
         assert_eq!(s1.storage_drives.len(), 1);
         assert_eq!(s1.storage_drives[0].id, "default");
         assert_eq!(s1.seed_color, "#10B981");
+        assert!(s1.auto_steamless_unpack);
+        assert!(s1.auto_online_fix_overlay);
+        assert!(s1.auto_goldberg_sync);
+        assert!(s1.auto_dlc_patch);
+        assert!(s1.auto_ea_heal);
+        assert!(s1.auto_game_patch);
 
         fs::write(
             temp.join("settings.json"),

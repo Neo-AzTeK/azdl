@@ -522,6 +522,9 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
     let runner = runtime::resolve_runner(&game.runner, executable, data_dir)?;
     let mut effective_game = game.clone();
     effective_game.executable = executable.to_path_buf();
+    // Games installed from Steam already carry a genuine Steamworks runtime, so
+    // the emulator, DRM and entitlement patches only apply to other sources.
+    let core_steam = game.steam_app_id.is_some();
     let mut cmd = match runner {
         Runner::Native => clean_command(executable),
         Runner::Wine => {
@@ -553,11 +556,58 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
         Runner::Steam(_) => unreachable!(),
         Runner::Auto | Runner::ProtonAuto => unreachable!(),
     };
+    if !core_steam
+        && let Ok(Some(msg)) =
+            fixes::ensure_steam_api_dll(&effective_game.install_dir, &effective_game.executable)
+    {
+        eprintln!("{msg}");
+    }
+    let launcher_settings = settings::load_settings(data_dir)
+        .unwrap_or_else(|_| settings::LauncherSettings::default_for(data_dir));
+    if !core_steam && launcher_settings.auto_ea_heal {
+        let _ = fixes::heal_ea_activation(&effective_game.install_dir);
+    }
+    if !core_steam && launcher_settings.auto_goldberg_sync {
+        let _ = goldberg::prepare_goldberg_for_game(&effective_game, data_dir);
+    }
+    if !core_steam && launcher_settings.auto_dlc_patch {
+        let installed_dlc =
+            crate::dlc::list_installed(&effective_game, data_dir).unwrap_or_default();
+        let dlc_ids: Vec<u32> = installed_dlc
+            .iter()
+            .filter_map(|id| id.parse().ok())
+            .collect();
+        if (!dlc_ids.is_empty() || fixes::has_dlc_installed_target(&effective_game.install_dir))
+            && let Ok(true) = fixes::patch_dlc_installed_ids(&effective_game.install_dir, &dlc_ids)
+        {
+            if dlc_ids.is_empty() {
+                eprintln!("Applied generic DLC installed patches for base game");
+            } else {
+                eprintln!(
+                    "Applied DLC installed patches for {} entitlement(s)",
+                    dlc_ids.len()
+                );
+            }
+        }
+    }
+    if launcher_settings.auto_game_patch {
+        let _ = patch::enable_patch(&effective_game, data_dir);
+    }
     if let Ok(installed_deps) =
         dependencies::ensure_game_dependencies(&effective_game, &runner, data_dir)
     {
         for action in installed_deps {
             eprintln!("Dependency provisioning: {action}");
+        }
+    }
+    if !core_steam
+        && launcher_settings.auto_steamless_unpack
+        && steamless::scan_game_steamstub(&effective_game).stub_present
+    {
+        match steamless::unpack_game(&effective_game, data_dir) {
+            Ok(count) if count > 0 => eprintln!("Steamless unpacked {count} executable(s)"),
+            Ok(_) => {}
+            Err(e) => eprintln!("Steamless unpacking failed: {e}"),
         }
     }
     let prefix_dir = match &runner {
@@ -577,13 +627,27 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
     if let Ok(true) = installscript::apply_installscript_for_game(&effective_game, &prefix_dir) {
         eprintln!("Applied Steamworks installscript & registry configuration");
     }
-    if let Some(launch) = &launch {
+    let fix = if let Some(launch) = &launch {
         cmd.current_dir(&launch.working_directory);
+        if core_steam || !launcher_settings.auto_online_fix_overlay {
+            multiplayer::LaunchFixPreparation::default()
+        } else {
+            multiplayer::prepare_game_launch(&effective_game, &runner, &launch.working_directory)?
+        }
+    } else {
+        multiplayer::LaunchFixPreparation::default()
+    };
+    for warning in &fix.warnings {
+        eprintln!("Fix preparation: {warning}");
+    }
+    if let Some(notice) = &fix.notice {
+        eprintln!("{notice}");
     }
     cmd.args(launch.as_ref().map_or(game.arguments.as_slice(), |launch| {
         launch.arguments.as_slice()
     }))
     .args(extra_args);
+    cmd.envs(&fix.environment);
     cmd.envs(&game.environment);
     let mut attempts = 0;
     let child = loop {
