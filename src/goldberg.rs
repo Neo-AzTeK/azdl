@@ -157,6 +157,67 @@ pub fn ensure_goldberg_binaries(data_dir: &Path) -> Result<(PathBuf, PathBuf)> {
 }
 
 /// Provisions Goldberg emulator binaries for a game directory, backing up untouched original binaries.
+/// Collect every `steam_api(64).dll` the game might load, anywhere under its
+/// install directory. The flag is `true` for the 64-bit `steam_api64.dll`.
+///
+/// Engines rarely keep the Steamworks DLL at the install root: Unity loads it
+/// from `<Game>_Data/Plugins/x86_64/`, and other engines nest it under `Binaries`
+/// or `bin` folders that hold no executable. Replacing only the root and
+/// executable-adjacent copies leaves the genuine Steamworks DLL in place, so the
+/// game binds to a real Steam client at launch and crashes under an isolated
+/// prefix. A bounded, symlink-rejecting walk covers every copy instead.
+fn collect_steam_api_targets(game_dir: &Path) -> Vec<(PathBuf, bool)> {
+    let mut targets = Vec::new();
+    fn walk(current: &Path, depth: usize, out: &mut Vec<(PathBuf, bool)>) {
+        if depth > 8 || out.len() >= 64 {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(current) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= 64 {
+                return;
+            }
+            let path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_file() {
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if name == "steam_api64.dll" {
+                    out.push((path, true));
+                } else if name == "steam_api.dll" {
+                    out.push((path, false));
+                }
+            } else if meta.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                // Skip our own managed/runtime folders and VCS metadata; none hold
+                // a Steamworks DLL the game loads.
+                if matches!(
+                    name.as_str(),
+                    ".depotdownloader"
+                        | "staging"
+                        | "intermediate"
+                        | "saved"
+                        | ".git"
+                        | "compatdata"
+                        | "prefixes"
+                        | "steam_settings"
+                ) {
+                    continue;
+                }
+                walk(&path, depth + 1, out);
+            }
+        }
+    }
+    walk(game_dir, 0, &mut targets);
+    targets
+}
+
 pub fn provision_goldberg_binaries(game_dir: &Path, data_dir: &Path) -> Result<bool> {
     let Ok((emu_x64, emu_x86)) = ensure_goldberg_binaries(data_dir) else {
         return Ok(false);
@@ -175,29 +236,24 @@ pub fn provision_goldberg_binaries(game_dir: &Path, data_dir: &Path) -> Result<b
         }
     };
 
-    let mut targets = Vec::new();
-    if game_dir.join("steam_api64.dll").is_file() {
-        targets.push((game_dir.join("steam_api64.dll"), true));
-    }
-    if game_dir.join("steam_api.dll").is_file() {
-        targets.push((game_dir.join("steam_api.dll"), false));
-    }
-    for exe in crate::steamless::collect_exe_candidates(game_dir) {
-        if let Some(parent) = exe.parent() {
-            let p64 = parent.join("steam_api64.dll");
-            if p64.is_file() && !targets.iter().any(|(p, _)| p == &p64) {
-                targets.push((p64, true));
-            }
-            let p32 = parent.join("steam_api.dll");
-            if p32.is_file() && !targets.iter().any(|(p, _)| p == &p32) {
-                targets.push((p32, false));
-            }
-        }
-    }
+    let targets = collect_steam_api_targets(game_dir);
+
+    // Capture the genuine Steamworks DLL before it is overwritten so Goldberg can
+    // be told the exact interface versions the game negotiates.
+    let mut original_dll: Option<Vec<u8>> = None;
 
     for (target_path, is_x64) in targets {
+        let backup = target_path.with_extension("dll.goldberg.bak");
+        // Source the genuine DLL for interface extraction from the live file on a
+        // first provision, or from the backup when it was already replaced.
+        if original_dll.is_none() {
+            if !is_goldberg_dll(&target_path) {
+                original_dll = fs::read(&target_path).ok();
+            } else if backup.is_file() && !is_goldberg_dll(&backup) {
+                original_dll = fs::read(&backup).ok();
+            }
+        }
         if !is_goldberg_dll(&target_path) {
-            let backup = target_path.with_extension("dll.goldberg.bak");
             if !backup.is_file() {
                 let _ = fs::copy(&target_path, &backup);
             }
@@ -208,7 +264,59 @@ pub fn provision_goldberg_binaries(game_dir: &Path, data_dir: &Path) -> Result<b
         }
     }
 
+    // Goldberg reads `steam_interfaces.txt` to answer `SteamInternal_CreateInterface`
+    // with the versions the game asks for. Without it, interface lookups can fail and
+    // the game crashes during Steamworks init. Generate it from the original DLL.
+    if let Some(bytes) = original_dll {
+        let interfaces = extract_steam_interfaces(&bytes);
+        if !interfaces.is_empty() {
+            let settings_dir = find_settings_directory(game_dir);
+            if fs::create_dir_all(&settings_dir).is_ok() {
+                let path = settings_dir.join("steam_interfaces.txt");
+                if !path.is_file() {
+                    let content = interfaces.join("\n") + "\n";
+                    if fs::write(&path, content).is_ok() {
+                        modified = true;
+                    }
+                }
+            }
+        }
+    }
+
     Ok(modified)
+}
+
+/// Scan a genuine `steam_api(64).dll` for the Steamworks interface version
+/// identifiers it exports (`SteamClient020`, `SteamUser023`, the
+/// `STEAM*_INTERFACE_VERSION###` aliases, …) for Goldberg's `steam_interfaces.txt`.
+///
+/// Interface tokens are ASCII runs that begin with `Steam`/`STEAM` and end in
+/// three digits not preceded by another digit. Results are de-duplicated and
+/// sorted for a stable file.
+fn extract_steam_interfaces(bytes: &[u8]) -> Vec<String> {
+    let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut token = Vec::new();
+    let is_token_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    for &b in bytes.iter().chain(std::iter::once(&0u8)) {
+        if is_token_byte(b) {
+            token.push(b);
+            continue;
+        }
+        if token.len() >= 8 && token.len() <= 64 {
+            let text = String::from_utf8_lossy(&token);
+            let upper = text.to_ascii_uppercase();
+            let ends_in_three_digits = text.len() >= 4
+                && text.as_bytes()[text.len() - 3..]
+                    .iter()
+                    .all(|c| c.is_ascii_digit())
+                && !text.as_bytes()[text.len() - 4].is_ascii_digit();
+            if (upper.starts_with("STEAM")) && ends_in_three_digits {
+                found.insert(text.into_owned());
+            }
+        }
+        token.clear();
+    }
+    found.into_iter().collect()
 }
 
 /// Synchronizes Goldberg configuration files (`DLC.txt`, `configs.app.ini`, `steam_appid.txt`, etc.).
@@ -529,6 +637,52 @@ mod tests {
         assert!(!has_goldberg_settings(&dir));
         assert!(!settings.join("DLC.txt").exists());
         assert!(!settings.join("configs.app.ini").exists());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn extracts_steam_interface_versions_from_dll_bytes() {
+        // Interface identifiers are NUL-delimited inside the real DLL.
+        let blob = b"junk\0SteamClient020\0SteamUser023\0\
+            STEAMAPPS_INTERFACE_VERSION008\0noise123more\0Steam12\0lowercaseclient017\0";
+        let found = extract_steam_interfaces(blob);
+        assert!(found.contains(&"SteamClient020".to_string()));
+        assert!(found.contains(&"SteamUser023".to_string()));
+        assert!(found.contains(&"STEAMAPPS_INTERFACE_VERSION008".to_string()));
+        // Not an interface: digits in the middle, too short, or not Steam-prefixed.
+        assert!(!found.iter().any(|s| s == "noise123more"));
+        assert!(!found.iter().any(|s| s == "Steam12"));
+        assert!(!found.iter().any(|s| s == "lowercaseclient017"));
+    }
+
+    #[test]
+    fn collects_steam_api_dlls_in_nested_engine_folders() {
+        let dir = test_dir("nested-api");
+        // A Unity layout keeps the real Steamworks DLL under <Game>_Data/Plugins,
+        // away from any executable; excluded runtime folders must be skipped.
+        let plugins = dir.join("MoonSweepers_Data").join("Plugins").join("x86_64");
+        fs::create_dir_all(&plugins).unwrap();
+        fs::create_dir_all(dir.join("compatdata").join("pfx")).unwrap();
+        fs::write(dir.join("steam_api64.dll"), b"root64").unwrap();
+        fs::write(dir.join("steam_api.dll"), b"root32").unwrap();
+        fs::write(plugins.join("steam_api64.dll"), b"nested64").unwrap();
+        fs::write(
+            dir.join("compatdata").join("pfx").join("steam_api64.dll"),
+            b"prefix-copy",
+        )
+        .unwrap();
+
+        let targets = collect_steam_api_targets(&dir);
+        assert!(targets.contains(&(dir.join("steam_api64.dll"), true)));
+        assert!(targets.contains(&(dir.join("steam_api.dll"), false)));
+        assert!(targets.contains(&(plugins.join("steam_api64.dll"), true)));
+        // The prefix copy lives under an excluded folder and must not be touched.
+        assert!(
+            !targets
+                .iter()
+                .any(|(path, _)| path.starts_with(dir.join("compatdata")))
+        );
 
         let _ = fs::remove_dir_all(dir);
     }

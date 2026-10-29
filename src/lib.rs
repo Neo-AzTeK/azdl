@@ -507,6 +507,26 @@ pub fn resolve_launch(game: &Game) -> Result<ResolvedLaunch> {
     })
 }
 
+/// Detect a Unity engine install by its runtime (`UnityPlayer.dll`) or a
+/// `<Game>_Data/globalgamemanagers` data folder.
+fn is_unity_game(install_dir: &Path) -> bool {
+    if install_dir.join("UnityPlayer.dll").is_file() {
+        return true;
+    }
+    let Ok(entries) = fs::read_dir(install_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().ends_with("_Data")
+            && entry.path().join("globalgamemanagers").is_file()
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Result<Child> {
     if matches!(game.runner, Runner::Steam(_)) {
         return Err("Steam client launches are outside this standalone launcher; choose a local executable and runner".into());
@@ -644,6 +664,33 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
     .args(extra_args);
     cmd.envs(&fix.environment);
     cmd.envs(&game.environment);
+    // Unity titles abort under Wine/Proton the moment they touch the
+    // `uiautomationcore` stub (`UiaDisconnectAllProviders`). Disable that DLL so
+    // the accessibility path is skipped. Applied last and only when no override
+    // already names `uiautomationcore`, so a user or fix setting is preserved.
+    if matches!(runner, Runner::Wine | Runner::Proton(_))
+        && is_unity_game(&effective_game.install_dir)
+    {
+        let existing = game
+            .environment
+            .get("WINEDLLOVERRIDES")
+            .cloned()
+            .or_else(|| fix.environment.get("WINEDLLOVERRIDES").cloned())
+            .or_else(|| env::var("WINEDLLOVERRIDES").ok())
+            .unwrap_or_default();
+        if !existing.split(';').any(|entry| {
+            entry
+                .split_once('=')
+                .is_some_and(|(name, _)| name.eq_ignore_ascii_case("uiautomationcore"))
+        }) {
+            let mut merged = existing;
+            if !merged.is_empty() && !merged.ends_with(';') {
+                merged.push(';');
+            }
+            merged.push_str("uiautomationcore=d");
+            cmd.env("WINEDLLOVERRIDES", merged);
+        }
+    }
     let mut attempts = 0;
     let child = loop {
         match cmd.spawn() {
