@@ -1,8 +1,8 @@
 <script>
   import { Icon } from 'm3-svelte';
-  import iconCloudDownload from '@ktibow/iconset-material-symbols/cloud-download';
+  import iconCloudDownload from '@ktibow/iconset-material-symbols/cloud-download-outline';
   import iconExpandLess from '@ktibow/iconset-material-symbols/expand-less';
-  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset';
+  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset-outline';
   import { onDestroy } from 'svelte';
   import { runAction } from '../api.js';
   import { dlcArchiveIdentity } from '../dlc.js';

@@ -1,10 +1,10 @@
 <script>
-  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset';
+  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset-outline';
   import { FAB, Icon } from 'm3-svelte';
-  import iconPlay from '@ktibow/iconset-material-symbols/play-arrow';
-  import iconStop from '@ktibow/iconset-material-symbols/stop';
+  import iconPlay from '@ktibow/iconset-material-symbols/play-arrow-outline';
+  import iconStop from '@ktibow/iconset-material-symbols/stop-outline';
   import iconDownload from '@ktibow/iconset-material-symbols/download';
-  import iconInfo from '@ktibow/iconset-material-symbols/info';
+  import iconInfo from '@ktibow/iconset-material-symbols/info-outline';
   import { launchGame, stopGame } from '../api.js';
   import { getGameCardMetadataTags, normalizeGameCard } from '../game_card.js';
   import { getSteamStorageSize } from '../steam_storage.js';

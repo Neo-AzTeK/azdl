@@ -1,10 +1,10 @@
 <script>
   import { Icon } from 'm3-svelte';
   import iconClose from '@ktibow/iconset-material-symbols/close';
-  import iconCropSquare from '@ktibow/iconset-material-symbols/crop-square';
+  import iconCropSquare from '@ktibow/iconset-material-symbols/crop-square-outline';
   import iconRemove from '@ktibow/iconset-material-symbols/remove';
   import iconSearch from '@ktibow/iconset-material-symbols/search';
-  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset';
+  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset-outline';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { windowMinimize, windowToggleMaximize, windowClose, stopGame, isDesktop } from '../api.js';
 

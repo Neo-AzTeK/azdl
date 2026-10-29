@@ -1,22 +1,22 @@
 <script>
   import iconClose from '@ktibow/iconset-material-symbols/close';
-  import iconCheckCircle from '@ktibow/iconset-material-symbols/check-circle';
-  import iconBuild from '@ktibow/iconset-material-symbols/build';
-  import iconKey from '@ktibow/iconset-material-symbols/key';
-  import iconMemory from '@ktibow/iconset-material-symbols/memory';
-  import iconExtension from '@ktibow/iconset-material-symbols/extension';
-  import iconLockOpen from '@ktibow/iconset-material-symbols/lock-open';
-  import iconGroups from '@ktibow/iconset-material-symbols/groups';
+  import iconCheckCircle from '@ktibow/iconset-material-symbols/check-circle-outline';
+  import iconBuild from '@ktibow/iconset-material-symbols/build-outline';
+  import iconKey from '@ktibow/iconset-material-symbols/key-outline';
+  import iconMemory from '@ktibow/iconset-material-symbols/memory-outline';
+  import iconExtension from '@ktibow/iconset-material-symbols/extension-outline';
+  import iconLockOpen from '@ktibow/iconset-material-symbols/lock-open-outline';
+  import iconGroups from '@ktibow/iconset-material-symbols/groups-outline';
   import iconArrowDropDown from '@ktibow/iconset-material-symbols/arrow-drop-down';
   import iconArrowBack from '@ktibow/iconset-material-symbols/arrow-back';
-  import iconCropLandscape from '@ktibow/iconset-material-symbols/crop-landscape';
-  import iconDelete from '@ktibow/iconset-material-symbols/delete';
-  import iconFolder from '@ktibow/iconset-material-symbols/folder';
-  import iconFolderOpen from '@ktibow/iconset-material-symbols/folder-open';
-  import iconLock from '@ktibow/iconset-material-symbols/lock';
+  import iconCropLandscape from '@ktibow/iconset-material-symbols/crop-landscape-outline';
+  import iconDelete from '@ktibow/iconset-material-symbols/delete-outline';
+  import iconFolder from '@ktibow/iconset-material-symbols/folder-outline';
+  import iconFolderOpen from '@ktibow/iconset-material-symbols/folder-open-outline';
+  import iconLock from '@ktibow/iconset-material-symbols/lock-outline';
   import iconMoreVert from '@ktibow/iconset-material-symbols/more-vert';
-  import iconSettings from '@ktibow/iconset-material-symbols/settings';
-  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset';
+  import iconSettings from '@ktibow/iconset-material-symbols/settings-outline';
+  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset-outline';
   import { untrack } from 'svelte';
   import { TRAILER_HLS_CONFIG, STALLS_BEFORE_STEP_DOWN, lowerTrailerLevel, pickTrailerLevel, trailerKey } from '../trailer.js';
   import { controlActionConfirmed } from '../game_controls.js';
@@ -25,8 +25,8 @@
   import { Button, Tabs, FAB, LinearProgress, LinearProgressEstimate, Icon } from 'm3-svelte';
   import SectionCard from '../components/SectionCard.svelte';
   import { dlcTransfer, dlcTransferActive, dlcTransferStatus, dlcTransferInstalling, isDlcTransferJob, dlcProgress, filterDlc } from '../dlc.js';
-  import iconPlay from '@ktibow/iconset-material-symbols/play-arrow';
-  import iconStop from '@ktibow/iconset-material-symbols/stop';
+  import iconPlay from '@ktibow/iconset-material-symbols/play-arrow-outline';
+  import iconStop from '@ktibow/iconset-material-symbols/stop-outline';
   import iconDownload from '@ktibow/iconset-material-symbols/download';
   import {
     launchGame,

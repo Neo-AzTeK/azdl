@@ -1,7 +1,7 @@
 <script>
   import { Icon } from 'm3-svelte';
-  import iconLibraryAdd from '@ktibow/iconset-material-symbols/library-add';
-  import iconStar from '@ktibow/iconset-material-symbols/star';
+  import iconLibraryAdd from '@ktibow/iconset-material-symbols/library-add-outline';
+  import iconStar from '@ktibow/iconset-material-symbols/star-outline';
   import { onMount } from 'svelte';
   import { searchSteamGames, getSteamDetails, runAction } from '../api.js';
   import { notify, notifyError } from '../notifications.js';

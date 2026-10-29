@@ -1,6 +1,6 @@
 <script>
   import { Icon } from 'm3-svelte';
-  import iconError from '@ktibow/iconset-material-symbols/error';
+  import iconError from '@ktibow/iconset-material-symbols/error-outline';
   import iconInfoOutline from '@ktibow/iconset-material-symbols/info-outline';
   import Modal from './Modal.svelte';
 

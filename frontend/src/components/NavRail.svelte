@@ -1,8 +1,8 @@
 <script>
   import { Icon } from 'm3-svelte';
-  import iconLibraryAdd from '@ktibow/iconset-material-symbols/library-add';
-  import iconSettings from '@ktibow/iconset-material-symbols/settings';
-  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset';
+  import iconLibraryAdd from '@ktibow/iconset-material-symbols/library-add-outline';
+  import iconSettings from '@ktibow/iconset-material-symbols/settings-outline';
+  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset-outline';
   let { activeTab = $bindable('library') } = $props();
 
   const tabs = [

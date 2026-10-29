@@ -1,9 +1,9 @@
 <script>
   import { Icon } from 'm3-svelte';
-  import iconDelete from '@ktibow/iconset-material-symbols/delete';
-  import iconError from '@ktibow/iconset-material-symbols/error';
-  import iconLibraryAdd from '@ktibow/iconset-material-symbols/library-add';
-  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset';
+  import iconDelete from '@ktibow/iconset-material-symbols/delete-outline';
+  import iconError from '@ktibow/iconset-material-symbols/error-outline';
+  import iconLibraryAdd from '@ktibow/iconset-material-symbols/library-add-outline';
+  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset-outline';
   import GameCard from '../components/GameCard.svelte';
   import ImportGameModal from '../components/ImportGameModal.svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
