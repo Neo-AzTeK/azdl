@@ -1,16 +1,20 @@
 <script>
+  import iconClose from '@ktibow/iconset-material-symbols/close';
+  import iconCheckCircle from '@ktibow/iconset-material-symbols/check-circle';
+  import iconBuild from '@ktibow/iconset-material-symbols/build';
+  import iconKey from '@ktibow/iconset-material-symbols/key';
+  import iconMemory from '@ktibow/iconset-material-symbols/memory';
+  import iconExtension from '@ktibow/iconset-material-symbols/extension';
+  import iconLockOpen from '@ktibow/iconset-material-symbols/lock-open';
+  import iconGroups from '@ktibow/iconset-material-symbols/groups';
   import iconArrowDropDown from '@ktibow/iconset-material-symbols/arrow-drop-down';
   import iconArrowBack from '@ktibow/iconset-material-symbols/arrow-back';
-  import iconCheckBox from '@ktibow/iconset-material-symbols/check-box';
   import iconCropLandscape from '@ktibow/iconset-material-symbols/crop-landscape';
   import iconDelete from '@ktibow/iconset-material-symbols/delete';
-  import iconErrorOutline from '@ktibow/iconset-material-symbols/error-outline';
   import iconFolder from '@ktibow/iconset-material-symbols/folder';
   import iconFolderOpen from '@ktibow/iconset-material-symbols/folder-open';
-  import iconHelp from '@ktibow/iconset-material-symbols/help';
   import iconLock from '@ktibow/iconset-material-symbols/lock';
   import iconMoreVert from '@ktibow/iconset-material-symbols/more-vert';
-  import iconPublic from '@ktibow/iconset-material-symbols/public';
   import iconSettings from '@ktibow/iconset-material-symbols/settings';
   import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset';
   import { untrack } from 'svelte';
@@ -1169,7 +1173,7 @@
                   >
                     <img src={item.thumb} alt="" class="thumb-img" loading="lazy" decoding="async" />
                     {#if item.type === 'video'}
-                      <div class="video-play-indicator">▶</div>
+                      <div class="video-play-indicator"><Icon icon={iconPlay} size={18} /></div>
                     {/if}
                   </button>
                 {/each}
@@ -1292,7 +1296,7 @@
               <div class="tool-card" class:irrelevant={!isFixRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <Icon icon={iconPublic} class="tool-header-icon" />
+                    <Icon icon={iconGroups} class="tool-header-icon" />
                     <h4>Online-Fix / SteamFix Overlay</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle Online-Fix or SteamFix overlay">
@@ -1314,7 +1318,7 @@
               <div class="tool-card" class:irrelevant={!isSteamStubRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <Icon icon={iconLock} class="tool-header-icon" />
+                    <Icon icon={iconLockOpen} class="tool-header-icon" />
                     <h4>Steamless DRM Stripper</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle Steamless DRM unpack">
@@ -1338,7 +1342,7 @@
               <div class="tool-card" class:irrelevant={!isDlcBypassRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <Icon icon={iconDownload} class="tool-header-icon" />
+                    <Icon icon={iconExtension} class="tool-header-icon" />
                     <h4>DLC License Bypass</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle DLC license bypass">
@@ -1362,7 +1366,7 @@
               <div class="tool-card" class:irrelevant={!isGoldbergRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <Icon icon={iconErrorOutline} class="tool-header-icon" />
+                    <Icon icon={iconMemory} class="tool-header-icon" />
                     <h4>Goldberg Emulator Settings</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle Goldberg emulator settings">
@@ -1386,7 +1390,7 @@
               <div class="tool-card" class:irrelevant={!isEaRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <Icon icon={iconHelp} class="tool-header-icon" />
+                    <Icon icon={iconKey} class="tool-header-icon" />
                     <h4>EA Activation Patch</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle EA activation patch">
@@ -1410,7 +1414,7 @@
               <div class="tool-card" class:irrelevant={!isPatchRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <Icon icon={iconCheckBox} class="tool-header-icon" />
+                    <Icon icon={iconBuild} class="tool-header-icon" />
                     <h4>Standalone Game Patch</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle standalone game patch">
@@ -1446,7 +1450,8 @@
               <div class="diag-checks-list">
                 {#if !diagReport.checks || diagReport.checks.length === 0}
                   <div class="diag-check check-success">
-                    <span>✔ All system and runner checks passed. System ready for launch.</span>
+                    <Icon icon={iconCheckCircle} size={18} class="diag-ok-icon" />
+                    <span>All system and runner checks passed. System ready for launch.</span>
                   </div>
                 {:else}
                   {#each diagReport.checks as check}
@@ -1545,7 +1550,7 @@
                         <span class="env-k">{k}</span>
                         <span class="env-eq">=</span>
                         <span class="env-v">{v}</span>
-                        <button class="env-remove-btn" onclick={() => handleRemoveEnv(k)}>✕</button>
+                        <button class="env-remove-btn" onclick={() => handleRemoveEnv(k)} aria-label="Remove variable {k}"><Icon icon={iconClose} size={16} /></button>
                       </div>
                     {/each}
                   </div>
@@ -2281,7 +2286,6 @@
     flex-direction: column;
     justify-content: space-between;
     gap: 12px;
-    min-height: 200px;
     border: 1px solid var(--md-sys-color-outline-variant);
     transition: background-color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
   }

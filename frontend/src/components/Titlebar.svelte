@@ -59,8 +59,8 @@
         bind:value={searchQuery}
       />
       {#if searchQuery}
-        <button class="clear-btn" onclick={() => (searchQuery = '')} title="Clear search">
-          ✕
+        <button class="clear-btn" onclick={() => (searchQuery = '')} title="Clear search" aria-label="Clear search">
+          <Icon icon={iconClose} size={16} />
         </button>
       {/if}
     </div>

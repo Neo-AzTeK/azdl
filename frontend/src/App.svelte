@@ -1,4 +1,6 @@
 <script>
+  import { Icon } from 'm3-svelte';
+  import iconClose from '@ktibow/iconset-material-symbols/close';
   import { isTransferActive } from './transfers.js';
   import { onMount } from 'svelte';
   import Titlebar from './components/Titlebar.svelte';
@@ -516,7 +518,7 @@
               {n.action.label}
             </button>
           {/if}
-          <button onclick={() => dismissNotification(n.id)} class="toast-dismiss" aria-label="Dismiss">✕</button>
+          <button onclick={() => dismissNotification(n.id)} class="toast-dismiss" aria-label="Dismiss"><Icon icon={iconClose} size={18} /></button>
         </div>
       {/each}
     </div>
