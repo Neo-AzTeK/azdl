@@ -1,6 +1,5 @@
 //! Exact Steam depot selection and base content receipts.
 
-use crate::steam_depot::DepotInfo;
 use crate::steam_metadata::{SteamAppMetadata, SteamDepotMetadata};
 use crate::{Result, validate_id};
 use serde::{Deserialize, Serialize};
@@ -123,66 +122,6 @@ pub(crate) fn matches_target(depot: &SteamDepotMetadata, os: &str, language: &st
     matches(depot.os.as_deref(), os) && matches(depot.language.as_deref(), language)
 }
 
-/// Select only known base depots for the game target and installed language.
-pub fn select_base_depots(
-    available: &[DepotInfo],
-    metadata: &SteamAppMetadata,
-    target_os: &str,
-    language: &str,
-) -> Result<Vec<DepotInfo>> {
-    let by_id = metadata
-        .depots
-        .iter()
-        .map(|depot| (depot.depot_id, depot))
-        .collect::<BTreeMap<_, _>>();
-    let mut selected = Vec::new();
-    let mut selected_ids = BTreeSet::new();
-    for depot in available {
-        let Some(info) = by_id.get(&depot.depot_id) else {
-            return Err(format!(
-                "Provider depot {} is absent from Steam metadata for App ID {}; its base/DLC role is unknown",
-                depot.depot_id, metadata.app_id
-            )
-            .into());
-        };
-        if info.dlc_app_id.is_none() && matches_target(info, target_os, language) {
-            if let Some(expected) = info.public_manifest_id.as_deref()
-                && depot.manifest_id.to_string() != expected
-            {
-                return Err(format!(
-                    "Base depot {} provider revision differs from public manifest {expected}",
-                    depot.depot_id
-                )
-                .into());
-            }
-            selected.push(depot.clone());
-            selected_ids.insert(depot.depot_id);
-        }
-    }
-    for depot in metadata
-        .depots
-        .iter()
-        .filter(|depot| depot.dlc_app_id.is_none())
-        .filter(|depot| matches_target(depot, target_os, language))
-    {
-        if !selected_ids.contains(&depot.depot_id) {
-            return Err(format!(
-                "The selected source has no provider manifest for required base depot {}",
-                depot.depot_id
-            )
-            .into());
-        }
-    }
-    if selected.is_empty() {
-        return Err(format!(
-            "No matching base depots for Steam App ID {}",
-            metadata.app_id
-        )
-        .into());
-    }
-    Ok(selected)
-}
-
 /// Check that an installed base still matches the public revision used for a DLC plan.
 pub fn validate_base_revision(
     receipt: &BaseContentReceipt,
@@ -245,102 +184,6 @@ fn validate_base_revision_with(
         }
     }
     Ok(())
-}
-
-/// Resolve the exact DLC depot subset from a provider bundle and public appinfo.
-pub fn select_dlc_depots(
-    available: &[DepotInfo],
-    metadata: &SteamAppMetadata,
-    dlc_id: u32,
-    target_os: &str,
-    language: &str,
-) -> Result<Vec<DepotInfo>> {
-    let desired = metadata
-        .depots
-        .iter()
-        .filter(|depot| depot.dlc_app_id == Some(dlc_id))
-        .filter(|depot| matches_target(depot, target_os, language))
-        .collect::<Vec<_>>();
-    if desired.is_empty() {
-        return Err(format!("No separate depot is identified for DLC {dlc_id}").into());
-    }
-    let bundle = available
-        .iter()
-        .map(|depot| (depot.depot_id, depot))
-        .collect::<BTreeMap<_, _>>();
-    let mut selected = Vec::new();
-    let mut seen = BTreeSet::new();
-    for depot in desired {
-        let Some(expected) = depot.public_manifest_id.as_deref() else {
-            return Err(format!("DLC depot {} has no public manifest", depot.depot_id).into());
-        };
-        let Some(artifact) = bundle.get(&depot.depot_id) else {
-            return Err(format!(
-                "The selected source has no provider manifest for DLC {dlc_id}, depot {}",
-                depot.depot_id
-            )
-            .into());
-        };
-        if artifact.manifest_id.to_string() != expected {
-            return Err(format!(
-                "DLC depot {} provider revision differs from public manifest {expected}",
-                depot.depot_id
-            )
-            .into());
-        }
-        if seen.insert(depot.depot_id) {
-            selected.push((*artifact).clone());
-        }
-    }
-    Ok(selected)
-}
-
-/// Select depots managed beneath a separate DLC App ID.
-pub fn select_separate_dlc_depots(
-    available: &[DepotInfo],
-    metadata: &SteamAppMetadata,
-    parent_app_id: u32,
-    target_os: &str,
-    language: &str,
-) -> Result<Vec<DepotInfo>> {
-    if metadata.parent_app_id != Some(parent_app_id) {
-        return Err("DLC metadata does not identify the installed parent game".into());
-    }
-    let desired = metadata
-        .depots
-        .iter()
-        .filter(|depot| depot.dlc_app_id.is_none_or(|id| id == metadata.app_id))
-        .filter(|depot| matches_target(depot, target_os, language))
-        .collect::<Vec<_>>();
-    if desired.is_empty() {
-        return Err(format!("No matching depots for DLC App ID {}", metadata.app_id).into());
-    }
-    let bundle = available
-        .iter()
-        .map(|depot| (depot.depot_id, depot))
-        .collect::<BTreeMap<_, _>>();
-    let mut selected = Vec::new();
-    for depot in desired {
-        let artifact = bundle.get(&depot.depot_id).ok_or_else(|| {
-            format!(
-                "The selected source has no provider manifest for DLC depot {}",
-                depot.depot_id
-            )
-        })?;
-        let expected = depot
-            .public_manifest_id
-            .as_deref()
-            .ok_or_else(|| format!("DLC depot {} has no public manifest", depot.depot_id))?;
-        if artifact.manifest_id.to_string() != expected {
-            return Err(format!(
-                "DLC depot {} provider revision differs from public manifest {expected}",
-                artifact.depot_id
-            )
-            .into());
-        }
-        selected.push((*artifact).clone());
-    }
-    Ok(selected)
 }
 
 fn receipt_path(data_dir: &Path, game_id: &str) -> Result<std::path::PathBuf> {
@@ -489,7 +332,6 @@ pub fn clear_observation(data_dir: &Path, game_id: &str, dlc_id: u32) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn dlc_availability_distinguishes_separate_files_from_store_membership() {
@@ -563,59 +405,6 @@ mod tests {
             dlc_depot_availability(Some(&parent), Some(&linux_only), 100, 205),
             DlcDepotAvailability::Unavailable(reason) if reason.contains("Windows/English")
         ));
-    }
-
-    fn artifact(id: u32, revision: u64) -> DepotInfo {
-        DepotInfo {
-            depot_id: id,
-            manifest_id: revision,
-            manifest_path: PathBuf::from(format!("{id}_{revision}.manifest")),
-            depot_key: "key".into(),
-        }
-    }
-
-    #[test]
-    fn base_selection_excludes_dlc_and_dlc_requires_exact_revision() {
-        let metadata = crate::steam_metadata::parse_appinfo(
-            br#"{"data":{"100":{"depots":{"101":{"manifests":{"public":{"gid":"1"}}},"200":{"dlcappid":"300","manifests":{"public":{"gid":"2"}},"config":{"oslist":"windows"}},"201":{"dlcappid":"300","manifests":{"public":{"gid":"3"}},"config":{"oslist":"linux"}}}}}}"#,
-            100,
-        )
-        .unwrap();
-        let bundle = vec![artifact(101, 1), artifact(200, 2), artifact(201, 3)];
-        let base = select_base_depots(&bundle, &metadata, "windows", "english").unwrap();
-        assert_eq!(
-            base.iter().map(|d| d.depot_id).collect::<Vec<_>>(),
-            vec![101]
-        );
-        let dlc = select_dlc_depots(&bundle, &metadata, 300, "windows", "english").unwrap();
-        assert_eq!(
-            dlc.iter().map(|d| d.depot_id).collect::<Vec<_>>(),
-            vec![200]
-        );
-        let wrong = vec![artifact(200, 4)];
-        assert!(select_dlc_depots(&wrong, &metadata, 300, "windows", "english").is_err());
-    }
-
-    #[test]
-    fn base_selection_rejects_missing_required_provider_depot() {
-        let metadata = crate::steam_metadata::parse_appinfo(
-            br#"{"data":{"100":{"depots":{"101":{"manifests":{"public":{"gid":"1"}}},"102":{"manifests":{"public":{"gid":"2"}},"config":{"oslist":"windows"}},"103":{"manifests":{"public":{"gid":"3"}},"config":{"oslist":"linux"}},"200":{"dlcappid":"300","manifests":{"public":{"gid":"4"}}}}}}}"#,
-            100,
-        )
-        .unwrap();
-        let bundle = vec![artifact(101, 1), artifact(200, 4)];
-        let error = select_base_depots(&bundle, &metadata, "windows", "english")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("required base depot 102"), "{error}");
-        let base = select_base_depots(
-            &[artifact(101, 1), artifact(102, 2)],
-            &metadata,
-            "windows",
-            "english",
-        )
-        .unwrap();
-        assert_eq!(base.len(), 2);
     }
 
     #[test]

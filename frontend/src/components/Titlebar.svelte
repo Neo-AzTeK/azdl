@@ -1,4 +1,10 @@
 <script>
+  import { Icon } from 'm3-svelte';
+  import iconClose from '@ktibow/iconset-material-symbols/close';
+  import iconCropSquare from '@ktibow/iconset-material-symbols/crop-square-outline';
+  import iconRemove from '@ktibow/iconset-material-symbols/remove';
+  import iconSearch from '@ktibow/iconset-material-symbols/search';
+  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset-outline';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { windowMinimize, windowToggleMaximize, windowClose, stopGame, isDesktop } from '../api.js';
 
@@ -38,9 +44,7 @@
   <!-- Window Drag / Branding Section -->
   <div class="brand" data-tauri-drag-region>
     <div class="brand-icon">
-      <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
-        <path d="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm4-3c-.83 0-1.5-.67-1.5-1.5S18.67 9 19.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/>
-      </svg>
+      <Icon icon={iconVideogameAsset} size={18} />
     </div>
     <span class="brand-title" data-tauri-drag-region>azdl</span>
   </div>
@@ -48,17 +52,15 @@
   <!-- Center Area: Global Search & Active Game Pill -->
   <div class="center-area" data-tauri-drag-region>
     <div class="search-box">
-      <svg class="search-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-        <path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
-      </svg>
+      <Icon icon={iconSearch} size={16} class="search-icon" />
       <input
         type="text"
         placeholder={searchPlaceholder}
         bind:value={searchQuery}
       />
       {#if searchQuery}
-        <button class="clear-btn" onclick={() => (searchQuery = '')} title="Clear search">
-          ✕
+        <button class="clear-btn" onclick={() => (searchQuery = '')} title="Clear search" aria-label="Clear search">
+          <Icon icon={iconClose} size={16} />
         </button>
       {/if}
     </div>
@@ -68,20 +70,13 @@
   <!-- Right Area: Window Controls (Minimize, Maximize, Close) -->
   <div class="window-controls">
     <button class="win-btn win-minimize" onclick={windowMinimize} title="Minimize">
-      <svg viewBox="0 0 12 12" width="10" height="10" stroke="currentColor" stroke-width="1.2">
-        <line x1="1" y1="6" x2="11" y2="6" />
-      </svg>
+      <Icon icon={iconRemove} size={10} />
     </button>
     <button class="win-btn win-maximize" onclick={windowToggleMaximize} title="Maximize">
-      <svg viewBox="0 0 12 12" width="10" height="10" stroke="currentColor" stroke-width="1.2" fill="none">
-        <rect x="2" y="2" width="8" height="8" rx="1" />
-      </svg>
+      <Icon icon={iconCropSquare} size={10} />
     </button>
     <button class="win-btn win-close" onclick={windowClose} title="Close">
-      <svg viewBox="0 0 12 12" width="10" height="10" stroke="currentColor" stroke-width="1.2">
-        <line x1="2" y1="2" x2="10" y2="10" />
-        <line x1="10" y1="2" x2="2" y2="10" />
-      </svg>
+      <Icon icon={iconClose} size={10} />
     </button>
   </div>
 </header>
@@ -150,7 +145,7 @@
     box-shadow: none;
   }
 
-  .search-icon {
+  :global(.search-icon) {
     color: var(--md-sys-color-on-surface-variant);
     margin-right: 6px;
     flex-shrink: 0;

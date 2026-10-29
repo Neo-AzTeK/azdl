@@ -1,5 +1,4 @@
-use crate::discovery::discover_executables;
-use crate::{Game, Library, Result, Runner, save_library, validate_id};
+use crate::{Library, Result, save_library};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Write;
@@ -14,58 +13,36 @@ pub struct StorageDrive {
     pub is_default: bool,
 }
 
+/// Persisted launcher preferences. Unknown fields from older versions are ignored on load.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherSettings {
     #[serde(default)]
     pub storage_drives: Vec<StorageDrive>,
-    #[serde(default)]
-    pub downloads_dir: Option<PathBuf>,
-
-    #[serde(default = "default_runner_str")]
-    pub default_runner: String,
-    #[serde(default)]
-    pub global_launch_args: String,
-    #[serde(default)]
-    pub default_proton_id: Option<String>,
-    #[serde(default)]
-    pub proton_priority: Vec<String>,
-
-    #[serde(default = "default_max_downloads")]
-    pub max_concurrent_downloads: u32,
-    #[serde(default)]
-    pub speed_limit_bytes_per_sec: Option<u64>,
-    #[serde(default)]
-    pub auto_clean_completed: bool,
-
-    #[serde(default)]
-    pub auto_steam_shortcut_sync: bool,
-    #[serde(default = "default_true")]
-    pub auto_steam_grid_artwork: bool,
-    #[serde(default = "default_true")]
-    pub auto_steamless_unpack: bool,
-    #[serde(default = "default_true")]
-    pub auto_online_fix_overlay: bool,
-    #[serde(default = "default_true")]
-    pub auto_goldberg_sync: bool,
-    #[serde(default = "default_true")]
-    pub auto_dlc_patch: bool,
-    #[serde(default = "default_true")]
-    pub auto_ea_heal: bool,
-    #[serde(default = "default_true")]
-    pub auto_game_patch: bool,
-
     #[serde(default = "default_seed_color")]
     pub seed_color: String,
     #[serde(default = "default_theme_mode")]
     pub theme_mode: String,
-}
-
-fn default_runner_str() -> String {
-    "auto".into()
-}
-
-fn default_max_downloads() -> u32 {
-    3
+    /// Runner identifier (see [`crate::parse_runner`]) used by Windows games left on `auto`.
+    #[serde(default = "default_runner_id")]
+    pub default_runner: String,
+    /// Strip SteamStub DRM wrappers with Steamless when a game is launched.
+    #[serde(default = "default_true")]
+    pub auto_steamless_unpack: bool,
+    /// Stage Online-Fix / SteamFix overlay DLLs and overrides at launch.
+    #[serde(default = "default_true")]
+    pub auto_online_fix_overlay: bool,
+    /// Provision and synchronize the Goldberg Steam emulator at launch.
+    #[serde(default = "default_true")]
+    pub auto_goldberg_sync: bool,
+    /// Apply the DLC-entitlement (`BIsDlcInstalled`) patch at launch.
+    #[serde(default = "default_true")]
+    pub auto_dlc_patch: bool,
+    /// Heal EA/Origin activation state at launch.
+    #[serde(default = "default_true")]
+    pub auto_ea_heal: bool,
+    /// Re-enable any applied standalone game patch at launch.
+    #[serde(default = "default_true")]
+    pub auto_game_patch: bool,
 }
 
 fn default_true() -> bool {
@@ -80,6 +57,19 @@ fn default_theme_mode() -> String {
     "dark".into()
 }
 
+fn default_runner_id() -> String {
+    "auto".into()
+}
+
+/// Reads the configured default runner without running migrations; falls back to `auto`.
+pub fn default_runner(data_dir: &Path) -> String {
+    fs::read(data_dir.join("settings.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<LauncherSettings>(&bytes).ok())
+        .map(|settings| settings.default_runner)
+        .unwrap_or_else(default_runner_id)
+}
+
 impl LauncherSettings {
     pub fn default_for(data_dir: &Path) -> Self {
         let default_games = data_dir.join("games");
@@ -90,24 +80,15 @@ impl LauncherSettings {
                 path: default_games,
                 is_default: true,
             }],
-            downloads_dir: Some(data_dir.join("downloads")),
-            default_runner: "auto".into(),
-            global_launch_args: String::new(),
-            default_proton_id: None,
-            proton_priority: Vec::new(),
-            max_concurrent_downloads: 3,
-            speed_limit_bytes_per_sec: None,
-            auto_clean_completed: false,
-            auto_steam_shortcut_sync: false,
-            auto_steam_grid_artwork: true,
+            seed_color: "#10B981".into(),
+            theme_mode: "dark".into(),
+            default_runner: default_runner_id(),
             auto_steamless_unpack: true,
             auto_online_fix_overlay: true,
             auto_goldberg_sync: true,
             auto_dlc_patch: true,
             auto_ea_heal: true,
             auto_game_patch: true,
-            seed_color: "#10B981".into(),
-            theme_mode: "dark".into(),
         }
     }
 
@@ -228,77 +209,6 @@ pub fn set_default_drive(data_dir: &Path, drive_id: &str) -> Result<()> {
     }
     save_settings(data_dir, &settings)?;
     Ok(())
-}
-
-pub fn scan_drives_for_games(data_dir: &Path, library: &mut Library) -> Result<usize> {
-    let settings = load_settings(data_dir)?;
-    let mut newly_added = 0;
-
-    for drive in &settings.storage_drives {
-        if !drive.path.is_dir() {
-            continue;
-        }
-        for entry in fs::read_dir(&drive.path)? {
-            let entry = entry?;
-            let folder_path = entry.path();
-            if !folder_path.is_dir() {
-                continue;
-            }
-            let folder_name = entry.file_name().to_string_lossy().to_string();
-            if folder_name.starts_with('.') || folder_name == "prefixes" {
-                continue;
-            }
-
-            let id = folder_name
-                .to_lowercase()
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-                .collect::<String>();
-            if id.is_empty() || validate_id(&id).is_err() || library.games.contains_key(&id) {
-                continue;
-            }
-
-            if let Ok(candidates) = discover_executables(&folder_path, &folder_name)
-                && let Some(first_exe) = candidates.first()
-            {
-                let title = folder_name.clone();
-                let runner = if first_exe
-                    .path
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-                {
-                    Runner::Auto
-                } else {
-                    Runner::Native
-                };
-
-                let game = Game {
-                    id: id.clone(),
-                    title,
-                    install_dir: fs::canonicalize(&folder_path)?,
-                    executable: fs::canonicalize(&first_exe.path)?,
-                    runner,
-                    arguments: Vec::new(),
-                    environment: std::collections::BTreeMap::new(),
-                    last_played_unix: None,
-                    origin: None,
-                    steam_app_id: None,
-                    launch_options: Vec::new(),
-                    selected_launch_option_id: None,
-                    cover_url: None,
-                    banner_url: None,
-                };
-
-                library.games.insert(id, game);
-                newly_added += 1;
-            }
-        }
-    }
-
-    if newly_added > 0 {
-        save_library(data_dir, library)?;
-    }
-    Ok(newly_added)
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
@@ -429,11 +339,9 @@ mod tests {
                 pid: Some(std::process::id()),
                 error: None,
                 updated_unix: 0,
-                expected_sha256: None,
                 install: Some(crate::jobs::InstallPlan {
                     game_id: "game".into(),
                     title: "Game".into(),
-                    kind: crate::jobs::InstallKind::Archive,
                 }),
                 install_state: Some(crate::jobs::InstallState::Pending),
                 install_error: None,
@@ -469,7 +377,6 @@ mod tests {
         let s1 = load_settings(&temp).unwrap();
         assert_eq!(s1.storage_drives.len(), 1);
         assert_eq!(s1.storage_drives[0].id, "default");
-        assert_eq!(s1.default_runner, "auto");
         assert_eq!(s1.seed_color, "#10B981");
         assert!(s1.auto_steamless_unpack);
         assert!(s1.auto_online_fix_overlay);
@@ -477,6 +384,14 @@ mod tests {
         assert!(s1.auto_dlc_patch);
         assert!(s1.auto_ea_heal);
         assert!(s1.auto_game_patch);
+
+        fs::write(
+            temp.join("settings.json"),
+            br##"{"storage_drives":[],"auto_ea_heal":true,"default_runner":"wine","seed_color":"#123456"}"##,
+        )
+        .unwrap();
+        let legacy = load_settings(&temp).unwrap();
+        assert_eq!(legacy.seed_color, "#123456");
 
         let mut s2 = s1.clone();
         s2.seed_color = "#3B82F6".into();

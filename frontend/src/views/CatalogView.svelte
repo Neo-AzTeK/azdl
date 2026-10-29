@@ -1,4 +1,7 @@
 <script>
+  import { Icon } from 'm3-svelte';
+  import iconLibraryAdd from '@ktibow/iconset-material-symbols/library-add-outline';
+  import iconStar from '@ktibow/iconset-material-symbols/star-outline';
   import { onMount } from 'svelte';
   import { searchSteamGames, getSteamDetails, runAction } from '../api.js';
   import { notify, notifyError } from '../notifications.js';
@@ -208,9 +211,7 @@
     </div>
   {:else if catalogGames.length === 0}
     <div class="empty-state">
-      <svg viewBox="0 0 24 24" width="48" height="48" fill="currentColor" opacity="0.4">
-        <path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/>
-      </svg>
+      <Icon icon={iconLibraryAdd} size={48} />
       <h3 class="empty-title">No Steam games found</h3>
       <p class="empty-subtext">Search by game title or Steam App ID.</p>
     </div>
@@ -222,7 +223,7 @@
     {#if featuredGames.length > 0}
       <SectionCard
         title="Featured on Steam"
-        icon="M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"
+        icon={iconStar}
         description="Top sellers, new releases, and current specials."
       >
         <div class="featured-grid">

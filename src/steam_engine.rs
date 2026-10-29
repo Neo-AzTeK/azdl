@@ -1,190 +1,49 @@
-//! Internal adapter for the pinned Qt-free depotkit C ABI.
+//! Steam CDN depot transfers through the pure-Rust `steamroom` pipeline.
+//!
+//! Manifests and depot keys always come from the provider; Steam is only used
+//! anonymously to list CDN servers and to obtain CDN auth tokens on demand.
 
 use crate::Result;
 use crate::jobs::{JobStatus, clear_cancel, load_job, now, save_job};
 use crate::steam_depot::DepotInfo;
-use std::ffi::{CStr, CString, c_char, c_double, c_int, c_void};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use bytes::Bytes;
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Component, Path};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+use steamroom::cdn::{CdnClient, CdnServer, CdnServerPool};
+use steamroom::client::{LoggedIn, SteamClient};
+use steamroom::depot::manifest::DepotManifest;
+use steamroom::depot::{AppId, CellId, ChunkId, DepotId, DepotKey};
+use steamroom::enums::DepotFileFlags;
+use steamroom_client::download::{BoxError, ChunkFetcher, DepotJob};
+use steamroom_client::event::DownloadEvent;
+use steamroom_client::login::LoginBuilder;
+use tokio::sync::{Mutex, mpsc};
 
-#[repr(C)]
-pub struct DepotkitDepot {
-    pub depot_id: u32,
-    pub _pad: u32,
-    pub manifest_path: *const c_char,
-    pub depot_key: *const c_char,
-}
-
-/// Public C request layout for the separately bundled, pinned depotkit engine.
-#[repr(C)]
-pub(crate) struct StandaloneDepotkitRequest {
-    app_id: u32,
-    depots: *const DepotkitDepot,
-    depot_count: usize,
-    target_dir: *const c_char,
-    max_workers: u32,
-    verify_checksums: c_int,
-    cell_id: u32,
-}
-
-#[repr(C)]
-pub struct DepotkitProgress {
-    pub bytes_downloaded: u64,
-    pub total_bytes: u64,
-    pub rate_bytes_sec: c_double,
-    pub files_done: u32,
-    pub files_total: u32,
-    pub depot_index: u32,
-    pub depot_count: u32,
-    pub phase: u32,
-    pub _pad: u32,
-    pub detail: *const c_char,
-}
-
-fn check_depotkit_library(path: &Path) -> Result<()> {
-    unsafe {
-        let library = libloading::Library::new(path)
-            .map_err(|error| format!("Cannot load {}: {error}", path.display()))?;
-        for name in [
-            b"depotkit_download".as_slice(),
-            b"depotkit_control_create",
-            b"depotkit_control_destroy",
-            b"depotkit_cancel",
-            b"depotkit_strerror",
-        ] {
-            library
-                .get::<unsafe extern "C" fn()>(name)
-                .map_err(|error| format!("Invalid Steam engine {}: {error}", path.display()))?;
-        }
-        let version = library
-            .get::<unsafe extern "C" fn() -> *const c_char>(b"depotkit_version")
-            .map_err(|error| format!("Invalid Steam engine {}: {error}", path.display()))?;
-        let pointer = version();
-        if pointer.is_null() || CStr::from_ptr(pointer).to_bytes() != b"0.2.0" {
-            return Err(format!(
-                "Unsupported depotkit ABI in {}. Install the pinned azdl runtime package",
-                path.display()
-            )
-            .into());
-        }
-    }
-    Ok(())
-}
-
-/// Locate only the bundled Qt-free engine; never search user content or extension trees.
-pub fn find_depotkit_library(_data_dir: &Path) -> Result<PathBuf> {
-    let executable = std::env::current_exe()?;
-    find_engine_beside(&executable)
-}
-
-fn find_engine_beside(executable: &Path) -> Result<PathBuf> {
-    let directory = executable
-        .parent()
-        .ok_or("Cannot locate launcher directory")?;
-    let name = if cfg!(windows) {
-        "depotkit.dll"
-    } else {
-        "libdepotkit.so"
-    };
-    let candidates = [
-        directory.join(name),
-        directory.join("../lib/azdl").join(name),
-    ];
-    for path in candidates {
-        if path.is_file() {
-            check_depotkit_library(&path)?;
-            return Ok(path);
-        }
-    }
-    Err(format!("Steam download engine {name} is missing. Reinstall the complete azdl package or place the pinned engine beside the launcher.").into())
-}
-
-struct ProgressContext<'a> {
-    data_dir: &'a Path,
-    job_id: &'a str,
-    ctrl: usize,
-    last_update: Instant,
-    cancel_fn: Option<unsafe extern "C" fn(*mut c_void)>,
-    completed_bytes: u64,
-    overall_bytes: Option<u64>,
-}
-
-extern "C" fn depotkit_progress_cb(prog: *const DepotkitProgress, user_data: *mut c_void) {
-    if prog.is_null() || user_data.is_null() {
-        return;
-    }
-    unsafe {
-        let context = &*(user_data as *const Mutex<ProgressContext>);
-        let mut ctx = context
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let p = &*prog;
-
-        // Throttle progress writes and cancellation checks to every 400ms
-        if ctx.last_update.elapsed() >= Duration::from_millis(400) {
-            ctx.last_update = Instant::now();
-
-            // Check if user requested job cancellation
-            let cancel_marker = ctx
-                .data_dir
-                .join("jobs")
-                .join(format!("{}.cancel", ctx.job_id));
-            let pause_marker = ctx
-                .data_dir
-                .join("jobs")
-                .join(format!("{}.pause", ctx.job_id));
-            let cancel = (cancel_marker.exists() || pause_marker.exists())
-                && ctx.cancel_fn.is_some()
-                && ctx.ctrl != 0;
-            let cancel_fn = ctx.cancel_fn;
-            let ctrl = ctx.ctrl;
-
-            if let Ok(mut job) = load_job(ctx.data_dir, ctx.job_id) {
-                job.updated_unix = now().unwrap_or_default();
-                let bytes = ctx.completed_bytes.saturating_add(p.bytes_downloaded);
-                job.progress_bytes = Some(job.progress_bytes.unwrap_or(0).max(bytes));
-                job.total_bytes = ctx.overall_bytes.or(Some(p.total_bytes));
-                let _ = save_job(ctx.data_dir, &job);
-            }
-            drop(ctx);
-            if cancel && let Some(cancel_fn) = cancel_fn {
-                cancel_fn(ctrl as *mut c_void);
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-fn download_steam_depots(
-    lib_path: &Path,
-    target_dir: &Path,
-    app_id: u32,
-    depots: &[DepotInfo],
-    data_dir: &Path,
-    job_id: &str,
-) -> Result<()> {
-    download_steam_depots_with_progress(
-        lib_path,
-        target_dir,
-        app_id,
-        depots,
-        data_dir,
-        job_id,
-        DownloadProgressSpan {
-            completed_bytes: 0,
-            overall_bytes: None,
-        },
-    )
-}
+const MAX_CONCURRENT_CHUNKS: usize = 32;
+const MAX_CDN_SERVERS: u32 = 40;
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(400);
+/// Bookkeeping directory steamroom creates for atomic staging; never part of a depot.
+const STEAMROOM_STATE_DIR: &str = ".DepotDownloader";
 
 pub(crate) struct DownloadProgressSpan {
     pub(crate) completed_bytes: u64,
     pub(crate) overall_bytes: Option<u64>,
 }
 
+/// One validated depot revision ready for transfer.
+struct DepotPlan {
+    depot_id: DepotId,
+    key: DepotKey,
+    manifest: DepotManifest,
+}
+
+/// Download every depot into `target_dir`, recording progress on the job and
+/// honouring its pause and cancel markers.
 pub(crate) fn download_steam_depots_with_progress(
-    lib_path: &Path,
     target_dir: &Path,
     app_id: u32,
     depots: &[DepotInfo],
@@ -192,95 +51,207 @@ pub(crate) fn download_steam_depots_with_progress(
     job_id: &str,
     span: DownloadProgressSpan,
 ) -> Result<()> {
-    let mut c_depots = Vec::new();
-    let mut c_manifest_paths = Vec::new();
-    let mut c_depot_keys = Vec::new();
-
-    for d in depots {
-        let manifest_str = CString::new(d.manifest_path.to_string_lossy().as_bytes())?;
-        let key_str = CString::new(d.depot_key.as_bytes())?;
-        c_depots.push(DepotkitDepot {
-            depot_id: d.depot_id,
-            _pad: 0,
-            manifest_path: manifest_str.as_ptr(),
-            depot_key: key_str.as_ptr(),
-        });
-        c_manifest_paths.push(manifest_str);
-        c_depot_keys.push(key_str);
+    let plans = depots.iter().map(plan_depot).collect::<Result<Vec<_>>>()?;
+    let mut engine = ENGINE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if engine.is_none() {
+        match Engine::start() {
+            Ok(started) => *engine = Some(started),
+            Err(error) => {
+                return Err(fail_job(
+                    data_dir,
+                    job_id,
+                    format!("Steam CDN unavailable: {error}"),
+                ));
+            }
+        }
     }
-
-    let target_dir_c = CString::new(target_dir.to_string_lossy().as_bytes())?;
-    let standalone_req = StandaloneDepotkitRequest {
-        app_id,
-        depots: c_depots.as_ptr(),
-        depot_count: c_depots.len(),
-        target_dir: target_dir_c.as_ptr(),
-        max_workers: 16,
-        verify_checksums: 1,
-        cell_id: 0,
+    let Some(active) = engine.as_ref() else {
+        return Err("Steam CDN session is unavailable".into());
     };
-    let request = (&standalone_req as *const StandaloneDepotkitRequest).cast::<c_void>();
-
-    check_depotkit_library(lib_path)?;
-    let lib = unsafe { libloading::Library::new(lib_path) }?;
-    type CreateControlFn = unsafe extern "C" fn() -> *mut c_void;
-    type DestroyControlFn = unsafe extern "C" fn(*mut c_void);
-    type CancelControlFn = unsafe extern "C" fn(*mut c_void);
-    type DownloadFn = unsafe extern "C" fn(
-        *const c_void,
-        Option<extern "C" fn(*const DepotkitProgress, *mut c_void)>,
-        *mut c_void,
-        *mut c_void,
-    ) -> c_int;
-    type StrerrorFn = unsafe extern "C" fn(c_int) -> *const c_char;
-
-    let create_ctrl: Option<libloading::Symbol<CreateControlFn>> =
-        unsafe { lib.get(b"depotkit_control_create").ok() };
-    let destroy_ctrl: Option<libloading::Symbol<DestroyControlFn>> =
-        unsafe { lib.get(b"depotkit_control_destroy").ok() };
-    let cancel_ctrl: Option<libloading::Symbol<CancelControlFn>> =
-        unsafe { lib.get(b"depotkit_cancel").ok() };
-    let download: libloading::Symbol<DownloadFn> = unsafe { lib.get(b"depotkit_download")? };
-    let strerror: Option<libloading::Symbol<StrerrorFn>> =
-        unsafe { lib.get(b"depotkit_strerror").ok() };
-
-    let ctrl = if let Some(create) = create_ctrl {
-        unsafe { create() }
-    } else {
-        std::ptr::null_mut()
-    };
-
-    if ctrl.is_null() {
-        return Err("Steam download engine could not allocate cancellation control".into());
-    }
-
-    let cancel_fn_ptr = cancel_ctrl.as_ref().map(|s| **s);
-    let ctx = Mutex::new(ProgressContext {
+    let fetcher = Arc::new(TransferFetcher {
+        cdn: Arc::clone(&active.cdn),
+        app_id: AppId(app_id),
+    });
+    let result = transfer(
+        &active.runtime,
+        &plans,
+        target_dir,
+        fetcher,
         data_dir,
         job_id,
-        ctrl: ctrl as usize,
-        last_update: Instant::now()
-            .checked_sub(Duration::from_millis(400))
-            .unwrap_or_else(Instant::now),
-        cancel_fn: cancel_fn_ptr,
-        completed_bytes: span.completed_bytes,
-        overall_bytes: span.overall_bytes,
-    });
-
-    let res = unsafe {
-        download(
-            request,
-            Some(depotkit_progress_cb),
-            (&ctx as *const Mutex<ProgressContext>).cast_mut().cast(),
-            ctrl,
-        )
-    };
-
-    if !ctrl.is_null()
-        && let Some(destroy) = destroy_ctrl
+        &span,
+    );
+    if result.is_err()
+        && let Some(stopped) = engine.take()
     {
-        unsafe { destroy(ctrl) };
+        // Abandoned chunk tasks must not keep writing after a stop or failure.
+        stopped.runtime.shutdown_background();
     }
+    result
+}
+
+/// Process-wide runtime and CDN session, reused by every depot group of an
+/// install so the anonymous logon and server discovery happen once.
+static ENGINE: std::sync::Mutex<Option<Engine>> = std::sync::Mutex::new(None);
+
+struct Engine {
+    runtime: tokio::runtime::Runtime,
+    cdn: Arc<CdnSession>,
+}
+
+impl Engine {
+    fn start() -> Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let cell = steam_cell_id();
+        let cdn = runtime
+            .block_on(CdnSession::connect(cell))
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            runtime,
+            cdn: Arc::new(cdn),
+        })
+    }
+}
+
+/// Read the content-server cell the local Steam client was assigned, so the
+/// directory returns nearby servers. Falls back to letting Steam choose.
+fn steam_cell_id() -> u32 {
+    crate::steam::steam_root()
+        .ok()
+        .and_then(|root| fs::read_to_string(root.join("config/config.vdf")).ok())
+        .and_then(|config| parse_cell_id(&config))
+        .unwrap_or(0)
+}
+
+fn parse_cell_id(config: &str) -> Option<u32> {
+    [
+        "\"CellIDServerOverride\"",
+        "\"CurrentCellID\"",
+        "\"CellID\"",
+    ]
+    .iter()
+    .find_map(|key| {
+        let rest = &config[config.find(key)? + key.len()..];
+        let value = rest.trim_start().strip_prefix('"')?;
+        value[..value.find('"')?].parse().ok()
+    })
+    .filter(|cell| *cell != 0)
+}
+
+/// Validate a provider manifest with azdl's own parser, then load it for steamroom.
+fn plan_depot(depot: &DepotInfo) -> Result<DepotPlan> {
+    crate::steam_manifest::read_manifest_with_key(
+        &depot.manifest_path,
+        depot.depot_id,
+        depot.manifest_id,
+        &depot.depot_key,
+    )?;
+    let key = parse_depot_key(&depot.depot_key)?;
+    let mut manifest = DepotManifest::parse(&fs::read(&depot.manifest_path)?)
+        .map_err(|error| format!("Invalid depot manifest {}: {error}", depot.depot_id))?;
+    manifest
+        .decrypt_filenames(&key)
+        .map_err(|error| format!("Cannot decrypt depot manifest {}: {error}", depot.depot_id))?;
+    check_manifest_entries(&manifest)?;
+    Ok(DepotPlan {
+        depot_id: DepotId(depot.depot_id),
+        key,
+        manifest,
+    })
+}
+
+fn parse_depot_key(hex: &str) -> Result<DepotKey> {
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Depot key must contain 64 hexadecimal characters".into());
+    }
+    let mut bytes = [0u8; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)?;
+    }
+    Ok(DepotKey(bytes))
+}
+
+/// Reject links and paths that could leave the target directory before any write.
+fn check_manifest_entries(manifest: &DepotManifest) -> Result<()> {
+    for file in &manifest.files {
+        if DepotFileFlags::from_bits_retain(file.flags).is_symlink() || file.link_target.is_some() {
+            return Err("Depot manifest contains a symbolic link".into());
+        }
+        let path = file.normalized_path();
+        let mut components = Path::new(&path).components().peekable();
+        if components.peek().is_none()
+            || !components.all(|component| matches!(component, Component::Normal(_)))
+        {
+            return Err(format!("Depot manifest contains an unsafe path: {path}").into());
+        }
+    }
+    Ok(())
+}
+
+fn transfer<F: ChunkFetcher + 'static>(
+    runtime: &tokio::runtime::Runtime,
+    plans: &[DepotPlan],
+    target_dir: &Path,
+    fetcher: Arc<F>,
+    data_dir: &Path,
+    job_id: &str,
+    span: &DownloadProgressSpan,
+) -> Result<()> {
+    let total_bytes = plans
+        .iter()
+        .flat_map(|plan| &plan.manifest.files)
+        .map(|file| file.size)
+        .sum::<u64>();
+    let progress = Progress {
+        data_dir,
+        job_id,
+        written: AtomicU64::new(0),
+        completed_bytes: span.completed_bytes,
+        overall_bytes: span.overall_bytes.or(Some(total_bytes)),
+    };
+    let (sender, mut events) = mpsc::unbounded_channel();
+    let outcome = runtime.block_on(async {
+        let downloads = async {
+            for plan in plans {
+                let job = DepotJob::builder()
+                    .depot_id(plan.depot_id)
+                    .depot_key(plan.key.clone())
+                    .install_dir(target_dir.to_path_buf())
+                    .max_downloads(MAX_CONCURRENT_CHUNKS)
+                    .verify(true)
+                    .non_atomic(true)
+                    .event_sender(sender.clone())
+                    .build()
+                    .map_err(|error| error.to_string())?;
+                job.download(&plan.manifest, Arc::clone(&fetcher))
+                    .await
+                    .map_err(|error| format!("depot {}: {error}", plan.depot_id))?;
+            }
+            Ok::<_, String>(())
+        };
+        let watch = async {
+            let mut ticker = tokio::time::interval(PROGRESS_INTERVAL);
+            loop {
+                ticker.tick().await;
+                progress.drain(&mut events);
+                progress.record();
+                if progress.stop_requested() {
+                    return;
+                }
+            }
+        };
+        tokio::select! {
+            result = downloads => Some(result),
+            () = watch => None,
+        }
+    });
+    progress.drain(&mut events);
+    progress.record();
+    remove_steamroom_state(target_dir);
 
     let pause_marker = data_dir.join("jobs").join(format!("{job_id}.pause"));
     let cancel_marker = data_dir.join("jobs").join(format!("{job_id}.cancel"));
@@ -294,7 +265,6 @@ pub(crate) fn download_steam_depots_with_progress(
         crate::jobs::clear_pause(data_dir, job_id)?;
         return Err(crate::jobs::TransferStopped::Paused(job_id.into()).into());
     }
-    let cancel_marker = data_dir.join("jobs").join(format!("{job_id}.cancel"));
     if cancel_marker.exists() {
         if let Ok(mut job) = load_job(data_dir, job_id) {
             job.status = JobStatus::Cancelled;
@@ -303,99 +273,229 @@ pub(crate) fn download_steam_depots_with_progress(
         let _ = clear_cancel(data_dir, job_id);
         return Err(crate::jobs::TransferStopped::Cancelled(Some(job_id.into())).into());
     }
+    match outcome {
+        Some(Ok(())) => Ok(()),
+        Some(Err(error)) => Err(fail_job(
+            data_dir,
+            job_id,
+            format!("Depot download error: {error}"),
+        )),
+        None => Err("Depot download stopped without a pause or cancel marker".into()),
+    }
+}
 
-    if res != 0 {
-        let err_desc = if let Some(st_fn) = strerror {
-            unsafe {
-                let ptr = st_fn(res);
-                if !ptr.is_null() {
-                    CStr::from_ptr(ptr).to_string_lossy().to_string()
-                } else {
-                    format!("error code {res}")
-                }
+fn fail_job(data_dir: &Path, job_id: &str, message: String) -> Box<dyn std::error::Error> {
+    if let Ok(mut job) = load_job(data_dir, job_id) {
+        job.status = JobStatus::Failed;
+        job.error = Some(message.clone());
+        let _ = save_job(data_dir, &job);
+    }
+    message.into()
+}
+
+fn remove_steamroom_state(target_dir: &Path) {
+    let state = target_dir.join(STEAMROOM_STATE_DIR);
+    if fs::symlink_metadata(&state).is_ok_and(|metadata| metadata.is_dir()) {
+        let _ = fs::remove_dir_all(state);
+    }
+}
+
+struct Progress<'a> {
+    data_dir: &'a Path,
+    job_id: &'a str,
+    written: AtomicU64,
+    completed_bytes: u64,
+    overall_bytes: Option<u64>,
+}
+
+impl Progress<'_> {
+    fn drain(&self, events: &mut mpsc::UnboundedReceiver<DownloadEvent>) {
+        while let Ok(event) = events.try_recv() {
+            if let DownloadEvent::ChunkCompleted { bytes } = event {
+                self.written.fetch_add(bytes, Ordering::Relaxed);
             }
-        } else {
-            format!("error code {res}")
-        };
-
-        if let Ok(mut job) = load_job(data_dir, job_id) {
-            job.status = JobStatus::Failed;
-            job.error = Some(err_desc.clone());
-            let _ = save_job(data_dir, &job);
         }
-        return Err(format!("Depot download error: {err_desc}").into());
     }
 
-    Ok(())
+    /// Progress never moves backwards, so resumed transfers keep earlier totals.
+    fn record(&self) {
+        if let Ok(mut job) = load_job(self.data_dir, self.job_id) {
+            job.updated_unix = now().unwrap_or_default();
+            let bytes = self
+                .completed_bytes
+                .saturating_add(self.written.load(Ordering::Relaxed));
+            job.progress_bytes = Some(job.progress_bytes.unwrap_or(0).max(bytes));
+            job.total_bytes = self.overall_bytes;
+            let _ = save_job(self.data_dir, &job);
+        }
+    }
+
+    fn stop_requested(&self) -> bool {
+        let jobs = self.data_dir.join("jobs");
+        jobs.join(format!("{}.cancel", self.job_id)).exists()
+            || jobs.join(format!("{}.pause", self.job_id)).exists()
+    }
+}
+
+/// CDN servers plus per-host, per-app auth tokens from an anonymous Steam session.
+struct CdnSession {
+    cdn: CdnClient,
+    pool: CdnServerPool,
+    session: Mutex<Option<SteamClient<LoggedIn>>>,
+    tokens: Mutex<HashMap<(String, AppId), String>>,
+}
+
+impl CdnSession {
+    async fn connect(cell: u32) -> std::result::Result<Self, BoxError> {
+        let session = LoginBuilder::new()
+            .cell_id(cell)
+            .anonymous()
+            .login()
+            .await?;
+        let servers = session
+            .get_cdn_servers(CellId(cell), Some(MAX_CDN_SERVERS))
+            .await?;
+        if servers.is_empty() {
+            return Err("Steam returned no CDN servers".into());
+        }
+        Ok(Self {
+            cdn: CdnClient::new()?,
+            pool: CdnServerPool::new(servers),
+            session: Mutex::new(Some(session)),
+            tokens: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Request a fresh token, reconnecting once if the CM session has dropped.
+    async fn refresh_token(&self, app_id: AppId, depot_id: DepotId, host: &str) -> Option<String> {
+        let mut session = self.session.lock().await;
+        for _ in 0..2 {
+            if session.is_none() {
+                *session = LoginBuilder::new().anonymous().login().await.ok();
+            }
+            let client = session.as_ref()?;
+            match client.get_cdn_auth_token(app_id, depot_id, host).await {
+                Ok(token) => {
+                    let token = token.token.filter(|token| !token.is_empty())?;
+                    self.tokens
+                        .lock()
+                        .await
+                        .insert((host.to_owned(), app_id), token.clone());
+                    return Some(token);
+                }
+                Err(_) => *session = None,
+            }
+        }
+        None
+    }
+
+    async fn fetch_from(
+        &self,
+        server: &CdnServer,
+        app_id: AppId,
+        depot_id: DepotId,
+        chunk_id: &ChunkId,
+    ) -> steamroom::Result<Bytes> {
+        let token = self
+            .tokens
+            .lock()
+            .await
+            .get(&(server.host.clone(), app_id))
+            .cloned();
+        let result = self
+            .cdn
+            .download_chunk(server, depot_id, chunk_id, token.as_deref())
+            .await;
+        if let Err(steamroom::Error::CdnStatus { status, .. }) = &result
+            && matches!(status.as_u16(), 401 | 403)
+            && let Some(token) = self.refresh_token(app_id, depot_id, &server.host).await
+        {
+            return self
+                .cdn
+                .download_chunk(server, depot_id, chunk_id, Some(&token))
+                .await;
+        }
+        result
+    }
+}
+
+/// Chunk source for one content App, sharing the process-wide CDN session.
+struct TransferFetcher {
+    cdn: Arc<CdnSession>,
+    app_id: AppId,
+}
+
+impl ChunkFetcher for TransferFetcher {
+    async fn fetch_chunk(
+        &self,
+        depot_id: DepotId,
+        chunk_id: &ChunkId,
+    ) -> std::result::Result<Bytes, BoxError> {
+        let pool = &self.cdn.pool;
+        let (server, wait) = pool.pick();
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+        match self
+            .cdn
+            .fetch_from(server, self.app_id, depot_id, chunk_id)
+            .await
+        {
+            Ok(bytes) => {
+                pool.report_success(server);
+                Ok(bytes)
+            }
+            Err(error) => {
+                let retry_after = match &error {
+                    steamroom::Error::CdnStatus { retry_after, .. } => {
+                        retry_after.map(Duration::from_secs)
+                    }
+                    _ => None,
+                };
+                pool.report_failure(server, retry_after);
+                Err(Box::new(error))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jobs::{DownloadJob, InstallState, JobKind, job_id_for_target};
-    use std::fs;
-    #[test]
-    fn standalone_request_matches_public_depotkit_layout() {
-        assert_eq!(std::mem::offset_of!(StandaloneDepotkitRequest, app_id), 0);
-        if cfg!(target_pointer_width = "64") {
-            assert_eq!(std::mem::offset_of!(StandaloneDepotkitRequest, depots), 8);
-            assert_eq!(std::mem::offset_of!(StandaloneDepotkitRequest, cell_id), 40);
-            assert_eq!(std::mem::size_of::<StandaloneDepotkitRequest>(), 48);
+    use crate::jobs::{DownloadJob, InstallState, JobKind};
+    use steamroom::depot::manifest::{ManifestChunk, ManifestFile};
+
+    /// Chunk source that never answers, so only a stop marker can end the transfer.
+    struct StalledFetcher;
+
+    impl ChunkFetcher for StalledFetcher {
+        async fn fetch_chunk(
+            &self,
+            _: DepotId,
+            _: &ChunkId,
+        ) -> std::result::Result<Bytes, BoxError> {
+            std::future::pending().await
         }
     }
 
-    #[test]
-    fn depot_loader_errors_retain_library_path_and_loader_diagnostics() {
-        let path = std::env::temp_dir().join("azdl-nonexistent-depot-engine");
-        let error = check_depotkit_library(&path).unwrap_err().to_string();
-        assert!(error.contains(&path.display().to_string()));
-        assert!(error.starts_with("Cannot load "));
-        assert!(error.len() > format!("Cannot load {}: ", path.display()).len());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn bundled_engine_receives_public_request_fields() {
-        use std::process::Command;
-
-        if Command::new("cc").arg("--version").output().is_err() {
-            return;
-        }
+    fn temp_root(name: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "azdl-depot-abi-{}-{}",
+            "azdl-{name}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        fs::create_dir_all(&root).unwrap();
-        let engine = root.join(if cfg!(windows) {
-            "depotkit.dll"
-        } else {
-            "libdepotkit.so"
-        });
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/depotkit_abi.c");
-        assert!(
-            Command::new("cc")
-                .args(["-shared", "-fPIC", "-o"])
-                .arg(&engine)
-                .arg(fixture)
-                .status()
-                .unwrap()
-                .success()
-        );
-        let depot = DepotInfo {
-            depot_id: 381,
-            manifest_id: 42,
-            manifest_path: root.join("manifest-\u{e9}.bin"),
-            depot_key: "test-key".into(),
-        };
-        let job_id = "0000000000000000";
+        fs::create_dir_all(root.join("jobs")).unwrap();
+        root
+    }
+
+    fn running_job(root: &Path, id: &str) {
         save_job(
-            &root,
+            root,
             &DownloadJob {
-                id: job_id.into(),
+                id: id.into(),
                 kind: JobKind::Dlc,
                 url: "steam://480/dlc/381".into(),
                 target: root.join("payload"),
@@ -403,7 +503,6 @@ mod tests {
                 pid: Some(std::process::id()),
                 error: None,
                 updated_unix: now().unwrap(),
-                expected_sha256: None,
                 install: None,
                 install_state: Some(InstallState::Pending),
                 install_error: None,
@@ -412,241 +511,124 @@ mod tests {
             },
         )
         .unwrap();
-        let inspector = unsafe { libloading::Library::new(&engine) }.unwrap();
-        download_steam_depots(
-            &engine,
-            &root,
-            480,
-            std::slice::from_ref(&depot),
-            &root,
-            job_id,
-        )
-        .unwrap();
-        let job = load_job(&root, job_id).unwrap();
-        assert_eq!(job.progress_bytes, Some(256));
-        assert_eq!(job.total_bytes, Some(1024));
-        fs::write(
-            root.join("jobs").join(format!("{job_id}.cancel")),
-            b"cancel",
-        )
-        .unwrap();
-        let error = download_steam_depots(
-            &engine,
-            &root,
-            480,
-            std::slice::from_ref(&depot),
-            &root,
-            job_id,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("cancelled"));
-        assert_eq!(
-            load_job(&root, job_id).unwrap().status,
-            JobStatus::Cancelled
-        );
-        let cancel_count = unsafe {
-            inspector.get::<unsafe extern "C" fn() -> u32>(b"depotkit_fixture_cancel_count")
-        }
-        .unwrap();
-        assert_eq!(unsafe { cancel_count() }, 1);
-        fs::write(root.join("jobs").join(format!("{job_id}.pause")), b"pause").unwrap();
-        let error =
-            download_steam_depots(&engine, &root, 480, &[depot], &root, job_id).unwrap_err();
-        assert!(
-            matches!(error.downcast_ref::<crate::jobs::TransferStopped>(), Some(crate::jobs::TransferStopped::Paused(id)) if id == job_id)
-        );
-        assert_eq!(load_job(&root, job_id).unwrap().status, JobStatus::Paused);
-        assert_eq!(unsafe { cancel_count() }, 2);
-        drop(inspector);
-        let unsupported = root.join("unsupported-engine.so");
-        assert!(
-            Command::new("cc")
-                .args([
-                    "-shared",
-                    "-fPIC",
-                    "-DAZDL_DEPOTKIT_VERSION=\"9.9.9\"",
-                    "-o"
-                ])
-                .arg(&unsupported)
-                .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/depotkit_abi.c"))
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert!(
-            check_depotkit_library(&unsupported)
-                .unwrap_err()
-                .to_string()
-                .contains("Unsupported depotkit ABI")
-        );
-        fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    #[ignore = "requires scripts/build-depotkit.ps1 and AZDL_TEST_DEPOTKIT"]
-    fn bundled_engine_loads_without_qt_and_validates_requests() {
-        let engine = PathBuf::from(std::env::var_os("AZDL_TEST_DEPOTKIT").unwrap());
-        let executable = std::env::current_exe().unwrap();
-        let bundled = executable.parent().unwrap().join(if cfg!(windows) {
-            "depotkit.dll"
-        } else {
-            "libdepotkit.so"
-        });
-        fs::copy(engine, &bundled).unwrap();
-        let root = std::env::temp_dir().join(format!("azdl-windows-engine-{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
-        assert_eq!(find_depotkit_library(&root).unwrap(), bundled);
-        unsafe {
-            let library = libloading::Library::new(&bundled).unwrap();
-            let download = library
-                .get::<unsafe extern "C" fn(
-                    *const StandaloneDepotkitRequest,
-                    *const c_void,
-                    *mut c_void,
-                    *mut c_void,
-                ) -> c_int>(b"depotkit_download")
-                .unwrap();
-            let request = StandaloneDepotkitRequest {
-                app_id: 480,
-                depots: std::ptr::null(),
-                depot_count: 0,
-                target_dir: std::ptr::null(),
-                max_workers: 16,
-                verify_checksums: 1,
-                cell_id: 0,
-            };
-            assert_eq!(
-                download(
-                    &request,
-                    std::ptr::null(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut()
-                ),
-                1
-            );
-            for symbol in [
-                b"depotkit_control_create".as_slice(),
-                b"depotkit_control_destroy",
-                b"depotkit_cancel",
-                b"depotkit_strerror",
-            ] {
-                library.get::<unsafe extern "C" fn()>(symbol).unwrap();
-            }
-        }
-        let error = download_steam_depots(&bundled, &root, 480, &[], &root, "0000000000000000")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("invalid argument"), "{error}");
-        fs::remove_dir_all(root).unwrap();
-        fs::remove_file(bundled).unwrap();
+    fn manifest_file(name: &str, flags: u32) -> ManifestFile {
+        let mut file = ManifestFile::new(name.into(), 1024);
+        file.flags = flags;
+        file.chunks = vec![ManifestChunk::new(ChunkId([7; 20]), 0, 1024)];
+        file
     }
 
-    #[test]
-    fn dlc_progress_accumulates_across_content_app_groups() {
-        let root = std::env::temp_dir().join(format!(
-            "azdl-dlc-progress-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let target = root.join("dlc-downloads/game/200/payload");
-        let id = job_id_for_target(&target);
-        save_job(
-            &root,
-            &DownloadJob {
-                id: id.clone(),
-                kind: JobKind::Dlc,
-                url: "steam://100/dlc/200".into(),
-                target,
-                status: JobStatus::Running,
-                pid: Some(std::process::id()),
-                error: None,
-                updated_unix: now().unwrap(),
-                expected_sha256: None,
-                install: None,
-                install_state: Some(InstallState::Pending),
-                install_error: None,
-                progress_bytes: Some(0),
-                total_bytes: Some(300),
+    fn plan(files: Vec<ManifestFile>) -> DepotPlan {
+        DepotPlan {
+            depot_id: DepotId(381),
+            key: DepotKey([1; 32]),
+            manifest: DepotManifest::new(files),
+        }
+    }
+
+    fn run_stalled(root: &Path, job_id: &str, marker: &str) -> Box<dyn std::error::Error> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        fs::write(root.join("jobs").join(format!("{job_id}.{marker}")), marker).unwrap();
+        let error = transfer(
+            &runtime,
+            &[plan(vec![manifest_file("bin/game.dll", 0)])],
+            &root.join("payload"),
+            Arc::new(StalledFetcher),
+            root,
+            job_id,
+            &DownloadProgressSpan {
+                completed_bytes: 100,
+                overall_bytes: Some(4096),
             },
         )
-        .unwrap();
-        let report = DepotkitProgress {
-            bytes_downloaded: 50,
-            total_bytes: 100,
-            rate_bytes_sec: 0.0,
-            files_done: 0,
-            files_total: 0,
-            depot_index: 0,
-            depot_count: 0,
-            phase: 0,
-            _pad: 0,
-            detail: std::ptr::null(),
-        };
-        let context = Mutex::new(ProgressContext {
-            data_dir: &root,
-            job_id: &id,
-            ctrl: 0,
-            last_update: Instant::now() - Duration::from_secs(1),
-            cancel_fn: None,
-            completed_bytes: 0,
-            overall_bytes: Some(300),
-        });
-        depotkit_progress_cb(
-            &report,
-            (&context as *const Mutex<ProgressContext>)
-                .cast_mut()
-                .cast(),
-        );
-        assert_eq!(load_job(&root, &id).unwrap().progress_bytes, Some(50));
-        {
-            let mut state = context.lock().unwrap();
-            state.completed_bytes = 100;
-            state.last_update = Instant::now() - Duration::from_secs(1);
-        }
-        let second = DepotkitProgress {
-            bytes_downloaded: 10,
-            total_bytes: 200,
-            ..report
-        };
-        depotkit_progress_cb(
-            &second,
-            (&context as *const Mutex<ProgressContext>)
-                .cast_mut()
-                .cast(),
-        );
-        let job = load_job(&root, &id).unwrap();
-        assert_eq!(job.progress_bytes, Some(110));
-        assert_eq!(job.total_bytes, Some(300));
-        context.lock().unwrap().last_update = Instant::now() - Duration::from_secs(1);
-        std::thread::scope(|scope| {
-            for bytes in 11..=16 {
-                let context = &context;
-                scope.spawn(move || {
-                    let report = DepotkitProgress {
-                        bytes_downloaded: bytes,
-                        total_bytes: 200,
-                        rate_bytes_sec: 0.0,
-                        files_done: 0,
-                        files_total: 0,
-                        depot_index: 0,
-                        depot_count: 0,
-                        phase: 0,
-                        _pad: 0,
-                        detail: std::ptr::null(),
-                    };
-                    depotkit_progress_cb(
-                        &report,
-                        (context as *const Mutex<ProgressContext>).cast_mut().cast(),
-                    );
-                });
-            }
-        });
-        let job = load_job(&root, &id).unwrap();
-        assert!(job.progress_bytes.unwrap() >= 111);
-        assert!(job.progress_bytes.unwrap() <= 116);
+        .unwrap_err();
+        runtime.shutdown_background();
+        error
+    }
+
+    #[test]
+    fn cancel_marker_stops_a_stalled_transfer() {
+        let root = temp_root("engine-cancel");
+        let job_id = "0000000000000001";
+        running_job(&root, job_id);
+        let error = run_stalled(&root, job_id, "cancel");
+        assert!(matches!(
+            error.downcast_ref::<crate::jobs::TransferStopped>(),
+            Some(crate::jobs::TransferStopped::Cancelled(Some(id))) if id == job_id
+        ));
+        let job = load_job(&root, job_id).unwrap();
+        assert_eq!(job.status, JobStatus::Cancelled);
+        assert_eq!(job.progress_bytes, Some(100));
+        assert_eq!(job.total_bytes, Some(4096));
+        assert!(!root.join("payload").join(STEAMROOM_STATE_DIR).exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pause_marker_keeps_the_job_resumable() {
+        let root = temp_root("engine-pause");
+        let job_id = "0000000000000002";
+        running_job(&root, job_id);
+        let error = run_stalled(&root, job_id, "pause");
+        assert!(matches!(
+            error.downcast_ref::<crate::jobs::TransferStopped>(),
+            Some(crate::jobs::TransferStopped::Paused(id)) if id == job_id
+        ));
+        let job = load_job(&root, job_id).unwrap();
+        assert_eq!(job.status, JobStatus::Paused);
+        assert_eq!(job.pid, None);
+        assert!(!root.join("jobs").join(format!("{job_id}.pause")).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manifest_entries_reject_links_and_escaping_paths() {
+        let symlink_flag = DepotFileFlags::SYMLINK.bits();
+        for (name, flags) in [
+            ("bin/link", symlink_flag),
+            ("..\\outside.dll", 0),
+            ("/etc/passwd", 0),
+            ("", 0),
+        ] {
+            let manifest = DepotManifest::new(vec![manifest_file(name, flags)]);
+            assert!(check_manifest_entries(&manifest).is_err(), "{name}");
+        }
+        let mut linked = manifest_file("bin/linked", 0);
+        linked.link_target = Some("../../etc".into());
+        assert!(check_manifest_entries(&DepotManifest::new(vec![linked])).is_err());
+        let safe = DepotManifest::new(vec![manifest_file("bin\\game.dll", 0)]);
+        check_manifest_entries(&safe).unwrap();
+    }
+
+    #[test]
+    #[ignore = "contacts live Steam CM and CDN directory services"]
+    fn live_anonymous_session_lists_cdn_servers() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let session = runtime
+            .block_on(CdnSession::connect(steam_cell_id()))
+            .unwrap();
+        assert!(!session.pool.is_empty());
+    }
+
+    #[test]
+    fn steam_cell_prefers_the_override_and_ignores_zero() {
+        let config = "\"InstallConfigStore\"\n{\n\t\"CurrentCellID\"\t\t\"7\"\n\t\"CellIDServerOverride\"\t\t\"15\"\n}";
+        assert_eq!(parse_cell_id(config), Some(15));
+        assert_eq!(parse_cell_id("\"CurrentCellID\"\t\"7\""), Some(7));
+        assert_eq!(parse_cell_id("\"CurrentCellID\"\t\"0\""), None);
+        assert_eq!(parse_cell_id("\"CellID\" \"x\""), None);
+        assert_eq!(parse_cell_id(""), None);
+    }
+
+    #[test]
+    fn depot_keys_must_be_full_hex() {
+        assert_eq!(parse_depot_key(&"0a".repeat(32)).unwrap().0, [10; 32]);
+        assert!(parse_depot_key("0a").is_err());
+        assert!(parse_depot_key(&"zz".repeat(32)).is_err());
     }
 }

@@ -1,7 +1,4 @@
-use crate::archive::{
-    extract_checked_with_passphrase, recorded_multipart_download, validate_archive,
-};
-use crate::jobs::{JobKind, recorded_download};
+use crate::archive::{extract_checked_with_passphrase, validate_archive};
 use crate::{Game, Result, validate_id};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
@@ -348,48 +345,6 @@ pub fn apply_patch_archive_with_root(
         }
         (Err(error), _) => Err(error),
     }
-}
-
-/// Download an HTTPS patch archive, then apply it to an installed game.
-/// The archive remains in patch-downloads so its source can be inspected later.
-pub fn fetch_patch_archive(
-    game: &Game,
-    data_dir: &Path,
-    url: &str,
-    filename: &Path,
-) -> Result<(PathBuf, usize)> {
-    validate_id(&game.id)?;
-    if active_patch(data_dir, &game.id)?.is_some() {
-        return Err("game already has an active patch; roll it back first".into());
-    }
-    let downloads = data_dir.join("patch-downloads").join(&game.id);
-    fs::create_dir_all(&downloads)?;
-    let mut download_game = game.clone();
-    download_game.install_dir = fs::canonicalize(&downloads)?;
-    let archive = recorded_download(data_dir, &download_game, url, filename, JobKind::Patch)?;
-    let count = apply_patch_archive(game, data_dir, &archive)?;
-    Ok((archive, count))
-}
-
-/// Download all volumes of a RAR patch, then apply the first volume.
-pub fn fetch_patch_archive_parts(
-    game: &Game,
-    data_dir: &Path,
-    first_name: &Path,
-    urls: &[String],
-) -> Result<(PathBuf, usize)> {
-    validate_id(&game.id)?;
-    if active_patch(data_dir, &game.id)?.is_some() {
-        return Err("game already has an active patch; roll it back first".into());
-    }
-    let downloads = data_dir.join("patch-downloads").join(&game.id);
-    fs::create_dir_all(&downloads)?;
-    let mut download_game = game.clone();
-    download_game.install_dir = fs::canonicalize(&downloads)?;
-    let archive =
-        recorded_multipart_download(data_dir, &download_game, first_name, urls, JobKind::Patch)?;
-    let count = apply_patch_archive(game, data_dir, &archive)?;
-    Ok((archive, count))
 }
 
 /// Restore overwritten files and remove files introduced by the active patch.

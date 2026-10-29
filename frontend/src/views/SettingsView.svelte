@@ -1,7 +1,24 @@
 <script>
+  import iconArrowDropDown from '@ktibow/iconset-material-symbols/arrow-drop-down';
+  import iconAdd from '@ktibow/iconset-material-symbols/add';
+  import iconAddBox from '@ktibow/iconset-material-symbols/add-box-outline';
+  import iconCheck from '@ktibow/iconset-material-symbols/check';
+  import iconCheckCircle from '@ktibow/iconset-material-symbols/check-circle-outline';
+  import iconDarkMode from '@ktibow/iconset-material-symbols/dark-mode-outline';
+  import iconDelete from '@ktibow/iconset-material-symbols/delete-outline';
+  import iconError from '@ktibow/iconset-material-symbols/error-outline';
+  import iconFolderOpen from '@ktibow/iconset-material-symbols/folder-open-outline';
+  import iconInfo from '@ktibow/iconset-material-symbols/info-outline';
+  import iconInfoOutline from '@ktibow/iconset-material-symbols/info-outline';
+  import iconLock from '@ktibow/iconset-material-symbols/lock-open-outline';
+  import iconPalette from '@ktibow/iconset-material-symbols/palette-outline';
+  import iconPlayCircle from '@ktibow/iconset-material-symbols/play-circle-outline';
+  import iconStar from '@ktibow/iconset-material-symbols/star-outline';
+  import iconStorage from '@ktibow/iconset-material-symbols/storage';
+  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset-outline';
   import { PRESET_SEEDS } from '../theme.js';
   import { displayPath } from '../paths.js';
-  import { Switch } from 'm3-svelte';
+  import { Icon, Switch } from 'm3-svelte';
   import Modal from '../components/Modal.svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
   import SectionCard from '../components/SectionCard.svelte';
@@ -30,25 +47,22 @@
     searchQuery = '',
     onThemeChange,
     onRefresh,
+    onRefreshRunners,
     onShowToast,
   } = $props();
 
   // Local working copy of settings
   let localSettings = $state({
     storage_drives: [],
-    downloads_dir: '',
+    seed_color: seedColor,
+    theme_mode: themeMode,
     default_runner: 'auto',
-    global_launch_args: '',
-    default_proton_id: '',
-    max_concurrent_downloads: 3,
     auto_steamless_unpack: true,
     auto_online_fix_overlay: true,
     auto_goldberg_sync: true,
     auto_dlc_patch: true,
     auto_ea_heal: true,
     auto_game_patch: true,
-    seed_color: seedColor,
-    theme_mode: themeMode,
   });
 
   $effect(() => {
@@ -69,11 +83,13 @@
   let individualTargetDrives = $state({});
 
   let settingsCategories = $derived([
-    { id: 'storage', label: 'Storage & Drives', icon: 'M2 20h20v-4H2v4zm2-3h2v2H4v-2zM2 4v4h20V4H2zm4 3H4V5h2v2zm-4 7h20v-4H2v4zm2-3h2v2H4v-2z', keywords: ['storage', 'drive', 'disk', 'folder', 'migrate', 'path', 'games'] },
-    { id: 'launch', label: platform === 'windows' ? 'Launch Options' : 'Launch & Runners', icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z', keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'arguments', 'dxvk', 'prefix'] },
-    { id: 'appearance', label: 'Material You Theming', icon: 'M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.23 19.64 10.57 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z', keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light'] },
-    { id: 'patches', label: 'Patches', icon: 'M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z', keywords: ['patch', 'patches', 'steamless', 'onlinefix', 'overlay', 'drm', 'steamstub', 'fix', 'goldberg', 'dlc', 'ea'] },
-    { id: 'about', label: 'About & Diagnostics', icon: 'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z', keywords: ['about', 'diagnostics', 'doctor', 'version', 'system', 'bwrap', 'unrar', 'bsdtar'] },
+    { id: 'storage', label: 'Storage & Drives', icon: iconStorage, keywords: ['storage', 'drive', 'disk', 'folder', 'migrate', 'path', 'games'] },
+    ...(platform === 'linux'
+      ? [{ id: 'launch', label: 'Compatibility Runners', icon: iconPlayCircle, keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'prefix'] }]
+      : []),
+    { id: 'appearance', label: 'Material You Theming', icon: iconPalette, keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light'] },
+    { id: 'patches', label: 'Patches', icon: iconLock, keywords: ['patch', 'patches', 'steamless', 'onlinefix', 'overlay', 'drm', 'steamstub', 'fix', 'goldberg', 'dlc', 'ea'] },
+    { id: 'about', label: 'About & Diagnostics', icon: iconInfo, keywords: ['about', 'diagnostics', 'doctor', 'version', 'system', 'bsdtar', 'curl'] },
   ]);
 
   function doesCategoryMatch(cat, query) {
@@ -99,6 +115,9 @@
 
   // Launch UI state
   let isDownloadingProton = $state(false);
+  let savingDefaultRunner = $state(false);
+  let windowsRunners = $derived(runners.filter((r) => r.runner_type !== 'native'));
+  let confirmedDefaultRunner = $derived(settings?.default_runner || 'auto');
 
   // Appearance UI state
   let customHexInput = $state(seedColor);
@@ -218,6 +237,20 @@
   }
 
   // --- Launch Actions ---
+  async function handleSetDefaultRunner(value) {
+    if (savingDefaultRunner || value === confirmedDefaultRunner) return;
+    savingDefaultRunner = true;
+    try {
+      await updateSettings({ ...localSettings, default_runner: value });
+      if (onRefresh) await onRefresh(false);
+      notify('Default runner updated', 'success');
+    } catch (e) {
+      notify(`Failed to set default runner: ${e}`, 'error');
+    } finally {
+      savingDefaultRunner = false;
+    }
+  }
+
   async function handleDownloadProton() {
     isDownloadingProton = true;
     notify('Downloading latest Proton-GE release...', 'info');
@@ -225,6 +258,7 @@
       const res = await downloadProtonGE();
       notify(`Proton-GE installed: ${res?.runner || 'Done'}`, 'info');
       if (onRefresh) await onRefresh();
+      if (onRefreshRunners) await onRefreshRunners();
     } catch (e) {
       notify(`Failed to download Proton-GE: ${e}`, 'error');
     } finally {
@@ -289,7 +323,7 @@
           class:search-matched={isMatch}
           onclick={() => (activeCategory = cat.id)}
         >
-          <svg class="nav-icon" viewBox="0 0 24 24"><path d={cat.icon} /></svg>
+          <Icon icon={cat.icon} class="nav-icon" />
           <span class="nav-label">{cat.label}</span>
           {#if isMatch && searchQuery.trim()}
             <span class="match-dot" title="Matches search query"></span>
@@ -311,7 +345,7 @@
       <!-- CONTAINER 1: DRIVES (TO MANAGE INSTALLATION PATHS) -->
       <SectionCard
         title="Drives (Installation Paths)"
-        icon="M2 20h20v-4H2v4zm2-3h2v2H4v-2zM2 4v4h20V4H2zm4 3H4V5h2v2zm-4 7h20v-4H2v4zm2-3h2v2H4v-2z"
+        icon={iconStorage}
         badge="{localSettings.storage_drives.length} Configured"
         description="Root storage locations where game downloads and prefixes are stored."
       >
@@ -323,7 +357,7 @@
                   <span class="drive-label">{drive.label}</span>
                   {#if drive.is_default}
                     <span class="badge default-badge">
-                      <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>
+                      <Icon icon={iconStar} size={14} />
                       Default Library
                     </span>
                   {/if}
@@ -337,7 +371,7 @@
                     Set Default
                   </button>
                   <button class="icon-btn danger" onclick={() => requestRemoveDrive(drive.id, drive.label)} title="Remove Drive">
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                    <Icon icon={iconDelete} size={18} />
                   </button>
                 {/if}
               </div>
@@ -362,7 +396,7 @@
               bind:value={newDrivePath}
             />
             <button class="md3-btn secondary" onclick={handleAddDrive}>
-              <svg class="btn-icon" viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+              <Icon icon={iconAdd} class="btn-icon" />
               Add Drive
             </button>
           </div>
@@ -372,7 +406,7 @@
       <!-- CONTAINER 2: GAMES (TO MANAGE GAME INSTALLATIONS & EASY MOVING) -->
       <SectionCard
         title="Games (Manage Game Installations)"
-        icon="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm4-3c-.83 0-1.5-.67-1.5-1.5S18.67 9 19.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"
+        icon={iconVideogameAsset}
         badge="{library.length} Installed"
         description="Installed games across your drives. Seamlessly relocate files, explore folders, or uninstall."
       >
@@ -390,15 +424,18 @@
                 </div>
 
                 <div class="game-move-controls">
-                  <select
-                    class="md3-select small-select"
-                    bind:value={individualTargetDrives[game.id]}
-                  >
-                    <option value="" disabled selected>Select destination drive...</option>
-                    {#each localSettings.storage_drives as d}
-                      <option value={d.id}>{d.label} ({displayPath(d.path)})</option>
-                    {/each}
-                  </select>
+                  <span class="select-field small-select">
+                    <select
+                      class="md3-select"
+                      bind:value={individualTargetDrives[game.id]}
+                    >
+                      <option value="" disabled selected>Select destination drive...</option>
+                      {#each localSettings.storage_drives as d}
+                        <option value={d.id}>{d.label} ({displayPath(d.path)})</option>
+                      {/each}
+                    </select>
+                    <Icon icon={iconArrowDropDown} size={20} class="select-chevron" />
+                  </span>
 
                   <button
                     class="md3-btn tonal small"
@@ -413,9 +450,7 @@
                     onclick={() => openGameFolder(game.install_dir)}
                     title="Open Installation Folder"
                   >
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-                      <path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/>
-                    </svg>
+                    <Icon icon={iconFolderOpen} size={18} />
                   </button>
 
                   <button
@@ -423,7 +458,7 @@
                     onclick={() => requestUninstallGame(game.id, game.title)}
                     title="Uninstall game"
                   >
-                    <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                    <Icon icon={iconDelete} size={18} />
                   </button>
                 </div>
               </div>
@@ -433,83 +468,56 @@
       </SectionCard>
 
     <!-- 2. LAUNCH & RUNNERS (CLEAR & UNAMBIGUOUS) -->
-    {:else if activeCategory === 'launch'}
+    {:else if activeCategory === 'launch' && platform === 'linux'}
       <div class="panel-header">
-        <div class="panel-header-row">
-          <div>
-            <h2>{platform === 'windows' ? 'Launch Options' : 'Launch & Compatibility Runners'}</h2>
-            <span class="subtext">
-              {platform === 'windows'
-                ? 'Configure global launch parameters and execution options.'
-                : 'Orchestrate runtime compatibility for Windows executables and game prefixes.'}
-            </span>
-          </div>
-          <div class="platform-chip" title="Detected Host: {platform}">
-            {#if platform === 'linux'}
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-                <path d="M12 2a4 4 0 0 0-4 4c0 .77.22 1.48.58 2.09C6.43 9.42 5 11.54 5 14c0 3.31 2.69 6 6 6h2c3.31 0 6-2.69 6-6 0-2.46-1.43-4.58-3.58-5.91.36-.61.58-1.32.58-2.09a4 4 0 0 0-4-4z"/>
-              </svg>
-              <span>Linux</span>
-            {:else}
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-                <path d="M3 5.48L10.37 4.46V11.53H3V5.48ZM10.37 12.44V19.54L3 18.52V12.44H10.37ZM11.49 4.31L21 3V11.53H11.49V4.31ZM21 12.44V21L11.49 19.69V12.44H21Z"/>
-              </svg>
-              <span>Windows</span>
-            {/if}
-          </div>
-        </div>
+        <h2>Compatibility Runners</h2>
+        <span class="subtext">Windows games run through Proton or Wine. Games set to Auto use the default below; override it per game under Launch & Runner.</span>
       </div>
 
-      {#if platform === 'linux'}
-        <!-- CARD 1: WINDOWS COMPATIBILITY RUNNER WITH INTEGRATED PREFIX ISOLATION (LINUX ONLY) -->
-        <SectionCard
-          title="Windows Compatibility Runner (Wine / Proton)"
-          icon="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"
-          description="Select which runner executes Windows PE binaries (.exe) and Steam manifests on your system:"
-        >
-          <div class="form-row">
-            <select
-              class="md3-select flex-2"
-              bind:value={localSettings.default_runner}
-              onchange={saveLocalSettings}
-            >
-              <option value="auto">Proton Auto (Discovers latest Proton-GE or Valve Proton — Recommended)</option>
-              {#each runners.filter(r => r.runner_type === 'proton') as p}
-                <option value={p.id}>{p.name}</option>
-              {/each}
-              <option value="wine">System Wine</option>
-            </select>
-
-            <button class="md3-btn primary" onclick={handleDownloadProton} disabled={isDownloadingProton}>
-              <span>{isDownloadingProton ? 'Downloading...' : 'Download Latest Proton-GE'}</span>
-            </button>
-          </div>
-
-          <div class="prefix-inline-note">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-              <path d="M11 17h2v-6h-2v6zm1-15C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v2h-2zm0 0"/>
-            </svg>
-            <span>
-              <strong>Dedicated Prefix Isolation:</strong> Windows games run inside isolated prefixes (<code>~/.local/share/azdl/prefixes/&lt;game_id&gt;</code>) to avoid library collisions, isolate saves, and allow per-game <code>WINEDLLOVERRIDES</code> staging for multiplayer fix DLLs with automated rollback.
-            </span>
-          </div>
-        </SectionCard>
-      {/if}
-
-      <!-- CARD 2: GLOBAL LAUNCH ARGUMENTS -->
       <SectionCard
-        title="Global Launch Arguments"
-        icon="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"
-        description="Parameters appended to every game invocation (e.g. gamemoderun %command%, DXVK_HUD=1):"
+        title="Default Runner"
+        icon={iconVideogameAsset}
+        description="Runner used by Windows games whose runner is set to Auto:"
+      >
+        <span class="select-field runner-select">
+          <select
+            class="md3-select"
+            aria-label="Default runner"
+            value={confirmedDefaultRunner}
+            disabled={savingDefaultRunner}
+            onchange={(e) => {
+              const value = e.currentTarget.value;
+              e.currentTarget.value = confirmedDefaultRunner;
+              handleSetDefaultRunner(value);
+            }}
+          >
+            {#each windowsRunners as r (r.id)}
+              <option value={r.id}>{r.id === 'auto' ? 'Auto (Proton when Steam is installed, otherwise Wine)' : r.name}</option>
+            {/each}
+            {#if !windowsRunners.some((r) => r.id === confirmedDefaultRunner)}
+              <option value={confirmedDefaultRunner}>{confirmedDefaultRunner} (unavailable)</option>
+            {/if}
+          </select>
+          <Icon icon={iconArrowDropDown} size={20} class="select-chevron" />
+        </span>
+      </SectionCard>
+
+      <SectionCard
+        title="Proton-GE"
+        icon={iconPlayCircle}
+        description="Install the latest Proton-GE release so it can be selected as a game's runner:"
       >
         <div class="form-row">
-          <input
-            type="text"
-            class="md3-input flex-2"
-            placeholder="e.g. --fullscreen -novid"
-            bind:value={localSettings.global_launch_args}
-          />
-          <button class="md3-btn secondary" onclick={saveLocalSettings}>Save Arguments</button>
+          <button class="md3-btn primary" onclick={handleDownloadProton} disabled={isDownloadingProton}>
+            <span>{isDownloadingProton ? 'Downloading...' : 'Download Latest Proton-GE'}</span>
+          </button>
+        </div>
+
+        <div class="prefix-inline-note">
+          <Icon icon={iconInfoOutline} size={16} />
+          <span>
+            <strong>Dedicated Prefix Isolation:</strong> each Windows game runs in its own prefix (<code>~/.local/share/azdl/prefixes/&lt;game_id&gt;</code>), keeping saves and runtime dependencies separate.
+          </span>
         </div>
       </SectionCard>
 
@@ -521,7 +529,7 @@
 
       <SectionCard
         title="Seed Color Palette"
-        icon="M12 3c-4.97 0-9 4.03-9 9 0 2.12.74 4.07 1.97 5.61L4.35 19.4c-.39.39-.39 1.02 0 1.41.39.39 1.02.39 1.41 0l1.9-1.9C9.22 19.62 10.56 20 12 20c4.97 0 9-4.03 9-9s-4.03-9-9-9zm0 15c-3.31 0-6-2.69-6-6s2.69-6 6-6 6 2.69 6 6-2.69 6-6 6z"
+        icon={iconPalette}
         description="Material Design 3 algorithmic tone generator extracts primary, secondary, and surface hues."
       >
         <div class="seed-swatches">
@@ -534,9 +542,7 @@
               title={seed.label}
             >
               {#if seedColor.toLowerCase() === seed.hex.toLowerCase()}
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="white">
-                  <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
-                </svg>
+                <Icon icon={iconCheck} size={16} />
               {/if}
             </button>
           {/each}
@@ -563,7 +569,7 @@
 
       <SectionCard
         title="Theme Mode"
-        icon="M12 3a9 9 0 1 0 9 9c0-.46-.04-.92-.1-1.36a5.389 5.389 0 0 1-4.4 2.26 5.403 5.403 0 0 1-5.4-5.4c0-1.81.89-3.42 2.26-4.4-.44-.06-.9-.1-1.36-.1z"
+        icon={iconDarkMode}
         description="Select display appearance mode for high contrast, dark, light, or OLED deep blacks."
       >
         <div class="mode-toggles">
@@ -598,9 +604,7 @@
         </div>
       </SectionCard>
 
-    <!-- 7. INTEGRATIONS & FIXES -->
-    {:else if activeCategory === 'integrations'}
-    <!-- 7. PATCHES -->
+    <!-- 8. ABOUT & DIAGNOSTICS -->
     {:else if activeCategory === 'patches'}
       <div class="panel-header">
         <h2>Patches</h2>
@@ -609,89 +613,70 @@
 
       <SectionCard
         title="Automated Runtime Patches & DRM Stripping"
-        icon="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"
-        description="Global automated patching rules executed during game import and launch lifecycle:"
+        icon={iconLock}
+        description="Global automated patching rules executed during the game launch lifecycle for non-Steam-origin games:"
       >
         <div class="switch-row">
           <div>
             <strong>SteamStub Auto-Unpack (Steamless)</strong>
-            <p class="desc">Automatically strip SteamStub DRM wrappers on import, preserving <code>.steamstub.bak</code> backups.</p>
+            <p class="desc">Strip SteamStub DRM wrappers before launch, preserving <code>.steamstub.bak</code> backups.</p>
           </div>
           <label class="switch-container" aria-label="SteamStub Auto-Unpack">
-            <Switch
-              bind:checked={localSettings.auto_steamless_unpack}
-              onchange={saveLocalSettings}
-            />
+            <Switch bind:checked={localSettings.auto_steamless_unpack} onchange={saveLocalSettings} />
           </label>
         </div>
 
         <div class="switch-row">
           <div>
             <strong>Auto-Enable Online-Fix / SteamFix Overlays</strong>
-            <p class="desc">Set Wine DLL overrides (<code>WINEDLLOVERRIDES="OnlineFix64=n,b"</code>) and preserve clean unpatched states via <code>.arachnel-off</code> renames.</p>
+            <p class="desc">Stage multiplayer fix DLLs and Wine DLL overrides (<code>WINEDLLOVERRIDES</code>) at launch, preserving clean states.</p>
           </div>
           <label class="switch-container" aria-label="Auto-Enable Online-Fix Overlays">
-            <Switch
-              bind:checked={localSettings.auto_online_fix_overlay}
-              onchange={saveLocalSettings}
-            />
+            <Switch bind:checked={localSettings.auto_online_fix_overlay} onchange={saveLocalSettings} />
           </label>
         </div>
 
         <div class="switch-row">
           <div>
             <strong>Goldberg Steam Emulator Auto-Sync</strong>
-            <p class="desc">Automatically generate <code>steam_settings/</code> configurations (<code>DLC.txt</code>, <code>configs.app.ini</code> with <code>unlock_all=1</code>) and deploy modern emulator binaries for compatible games.</p>
+            <p class="desc">Generate <code>steam_settings/</code> configuration and deploy emulator binaries for compatible games.</p>
           </div>
           <label class="switch-container" aria-label="Goldberg Steam Emulator Auto-Sync">
-            <Switch
-              bind:checked={localSettings.auto_goldberg_sync}
-              onchange={saveLocalSettings}
-            />
+            <Switch bind:checked={localSettings.auto_goldberg_sync} onchange={saveLocalSettings} />
           </label>
         </div>
 
         <div class="switch-row">
           <div>
             <strong>Steamworks DLC Entitlement Auto-Bypass</strong>
-            <p class="desc">Automatically patch Steamworks <code>BIsDlcInstalled</code> entitlement checks in <code>steam_api64.dll</code> and GodotSteam DLLs on launch.</p>
+            <p class="desc">Patch Steamworks <code>BIsDlcInstalled</code> entitlement checks in <code>steam_api64.dll</code> and GodotSteam DLLs on launch.</p>
           </div>
           <label class="switch-container" aria-label="Steamworks DLC Entitlement Auto-Bypass">
-            <Switch
-              bind:checked={localSettings.auto_dlc_patch}
-              onchange={saveLocalSettings}
-            />
+            <Switch bind:checked={localSettings.auto_dlc_patch} onchange={saveLocalSettings} />
           </label>
         </div>
 
         <div class="switch-row">
           <div>
             <strong>EA Desktop / Origin Activation Repair</strong>
-            <p class="desc">Automatically bypass EA Desktop / Origin activation checks in Frostbite and EA game binaries (<code>Activation64.dll</code>) on launch.</p>
+            <p class="desc">Heal EA Desktop / Origin activation state in Frostbite and EA game binaries on launch.</p>
           </div>
           <label class="switch-container" aria-label="EA Desktop / Origin Activation Repair">
-            <Switch
-              bind:checked={localSettings.auto_ea_heal}
-              onchange={saveLocalSettings}
-            />
+            <Switch bind:checked={localSettings.auto_ea_heal} onchange={saveLocalSettings} />
           </label>
         </div>
 
         <div class="switch-row">
           <div>
             <strong>Standalone Game Patch Auto-Mount</strong>
-            <p class="desc">Automatically enable and mount staged standalone game patches and community modifications on launch.</p>
+            <p class="desc">Enable and mount staged standalone game patches and community modifications on launch.</p>
           </div>
           <label class="switch-container" aria-label="Standalone Game Patch Auto-Mount">
-            <Switch
-              bind:checked={localSettings.auto_game_patch}
-              onchange={saveLocalSettings}
-            />
+            <Switch bind:checked={localSettings.auto_game_patch} onchange={saveLocalSettings} />
           </label>
         </div>
       </SectionCard>
 
-    <!-- 8. ABOUT & DIAGNOSTICS -->
     {:else if activeCategory === 'about'}
       <div class="panel-header">
         <h2>About & System Diagnostics</h2>
@@ -700,7 +685,7 @@
 
       <SectionCard
         title="Application Environment"
-        icon="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"
+        icon={iconInfo}
         description="Host runtime environment details, engine version, and active data directories."
       >
         <div class="info-grid">
@@ -721,7 +706,7 @@
 
       <SectionCard
         title="System Dependencies Health"
-        icon="M19 3H5c-1.1 0-1.99.9-1.99 2L3 19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-1 11h-4v4h-4v-4H6v-4h4V6h4v4h4v4z"
+        icon={iconAddBox}
         badge="{diagnostics.filter(d => d.available).length}/{diagnostics.length} Available"
         description="Verify availability of runtime dependencies (Wine, Proton, Steam, 7z, UnRAR)."
       >
@@ -730,9 +715,9 @@
             <div class="diag-card" class:available={diag.available} class:missing={!diag.available}>
               <div class="diag-header">
                 {#if diag.available}
-                  <svg class="diag-status-icon success" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+                  <Icon icon={iconCheckCircle} class="diag-status-icon success" />
                 {:else}
-                  <svg class="diag-status-icon {diag.required ? 'error' : 'warning'}" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+                  <Icon icon={iconError} class="diag-status-icon {diag.required ? 'error' : 'warning'}" />
                 {/if}
                 <span class="diag-name">{diag.name}</span>
                 {#if diag.required}
@@ -843,7 +828,7 @@
     flex-shrink: 0;
   }
 
-  .nav-icon {
+  :global(.nav-icon) {
     width: 20px;
     height: 20px;
     fill: currentColor;
@@ -885,6 +870,27 @@
     line-height: 1.45;
   }
 
+  .switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--md-sys-color-outline-variant);
+    gap: 16px;
+  }
+
+  .switch-row:last-child {
+    border-bottom: none;
+  }
+
+  .switch-container {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
   /* FORMS & INPUTS */
   .form-row {
     display: flex;
@@ -906,6 +912,10 @@
     font-size: 0.85rem;
     outline: none;
     transition: none;
+  }
+
+  .md3-select {
+    padding-right: 36px;
   }
 
   .md3-input:focus, .md3-select:focus {
@@ -946,11 +956,6 @@
     color: var(--md-sys-color-on-secondary-container);
   }
 
-  .md3-btn.danger {
-    background: var(--md-sys-color-error-container);
-    color: var(--md-sys-color-on-error-container);
-  }
-
   .md3-btn.small {
     padding: 6px 12px;
     font-size: 0.78rem;
@@ -970,7 +975,7 @@
     transition: background 0.15s ease, color 0.15s ease;
   }
 
-  .icon-btn svg {
+  .icon-btn :global(svg) {
     fill: currentColor;
   }
 
@@ -997,7 +1002,7 @@
     color: var(--md-sys-color-on-error-container);
   }
 
-  .btn-icon {
+  :global(.btn-icon) {
     width: 18px;
     height: 18px;
     fill: currentColor;
@@ -1056,11 +1061,6 @@
   .default-badge {
     background: var(--md-sys-color-primary-container);
     color: var(--md-sys-color-on-primary-container);
-  }
-
-  .recommended-badge {
-    background: var(--md-sys-color-secondary-container);
-    color: var(--md-sys-color-on-secondary-container);
   }
 
   .required-badge {
@@ -1139,27 +1139,6 @@
   }
 
   /* SWITCH ROWS & MATERIAL 3 SWITCHES */
-  .switch-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 14px 0;
-    border-bottom: 1px solid var(--md-sys-color-outline-variant);
-    gap: 16px;
-  }
-
-  .switch-row:last-child {
-    border-bottom: none;
-  }
-
-  .switch-container {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-
   /* DIAGNOSTICS & ABOUT */
   .info-grid {
     display: grid;
@@ -1206,21 +1185,21 @@
     gap: 8px;
   }
 
-  .diag-status-icon {
+  :global(.diag-status-icon) {
     width: 18px;
     height: 18px;
     flex-shrink: 0;
   }
 
-  .diag-status-icon.success {
+  :global(.diag-status-icon.success) {
     fill: var(--md-sys-color-primary);
   }
 
-  .diag-status-icon.warning {
+  :global(.diag-status-icon.warning) {
     fill: var(--md-sys-color-tertiary);
   }
 
-  .diag-status-icon.error {
+  :global(.diag-status-icon.error) {
     fill: var(--md-sys-color-error);
   }
 
@@ -1315,33 +1294,15 @@
     flex-wrap: wrap;
   }
 
+  .runner-select {
+    display: flex;
+    width: 100%;
+  }
+
   .small-select {
     min-width: 200px;
     max-width: 300px;
     font-size: 0.82rem;
-  }
-
-  .panel-header-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-  }
-
-  .platform-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 14px;
-    border-radius: var(--md-sys-shape-full);
-    background: var(--md-sys-color-secondary-container);
-    color: var(--md-sys-color-on-secondary-container);
-    font-size: 0.8rem;
-    font-weight: 600;
-  }
-
-  .platform-chip svg {
-    fill: currentColor;
   }
 
   .prefix-inline-note {
@@ -1356,7 +1317,7 @@
     line-height: 1.45;
   }
 
-  .prefix-inline-note svg {
+  .prefix-inline-note :global(svg) {
     flex-shrink: 0;
     margin-top: 2px;
     fill: var(--md-sys-color-primary);

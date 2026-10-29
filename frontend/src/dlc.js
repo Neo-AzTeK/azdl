@@ -12,17 +12,8 @@ export function dlcTransferActive(job) {
 }
 
 export function isDlcTransferJob(job) {
-  return ['dlc', 'archive'].includes(job?.kind?.toLowerCase())
+  return job?.kind?.toLowerCase() === 'dlc'
     && String(job.target || '').replaceAll('\\', '/').includes('/dlc-downloads/');
-}
-
-export function dlcArchiveIdentity(job) {
-  if (job?.kind?.toLowerCase() !== 'archive' || !isDlcTransferJob(job)) return null;
-  const target = String(job.target).replaceAll('\\', '/');
-  const marker = '/dlc-downloads/';
-  const segments = target.slice(target.lastIndexOf(marker) + marker.length).split('/');
-  if (segments.length !== 3 || segments.some((segment) => !segment || segment === '.' || segment === '..')) return null;
-  return { gameId: segments[0], addonId: segments[1] };
 }
 
 export function dlcTransfer(jobs, gameId, addonId) {

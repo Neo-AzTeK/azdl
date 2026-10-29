@@ -1,17 +1,16 @@
-use crate::catalog::{CatalogGame, InstallOutcome, save_pending_setup_origin, stamp_origin};
 use crate::jobs::{
-    DownloadJob, InstallKind, InstallPlan, InstallState, JobKind, JobStatus, job_id_for_target,
-    load_job, now, save_job,
+    DownloadJob, InstallPlan, InstallState, JobKind, JobStatus, job_id_for_target, load_job, now,
+    save_job,
 };
 use crate::steam::{import_steam, scan_steam, steam_root};
 use crate::steam_access::fetch_manifest_bundle as fetch_provider_bundle;
+use crate::steam_install::{InstallOutcome, SteamGame, save_pending_origin, stamp_origin};
 use crate::steam_metadata::{ResolvedDepotSource, SteamAppMetadata};
 use crate::{Game, Library, Result, discovery, validate_id};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub use crate::steam_engine::find_depotkit_library;
 use crate::steam_engine::{DownloadProgressSpan, download_steam_depots_with_progress};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,11 +19,6 @@ pub struct DepotInfo {
     pub manifest_id: u64,
     pub manifest_path: PathBuf,
     pub depot_key: String,
-}
-
-/// Resolve each provider depot to exactly one manifest revision.
-pub fn parse_lua_manifests(manifest_dir: &Path, app_id: u32) -> Result<Vec<DepotInfo>> {
-    parse_lua_manifests_filtered(manifest_dir, app_id, None)
 }
 
 fn parse_lua_manifests_filtered(
@@ -175,21 +169,6 @@ fn parse_lua_content(
 }
 
 pub use crate::archive::normalize_windows_paths;
-
-/// Verify every target base depot in an older installation without changing game files.
-pub fn verify_legacy_base(
-    game: &Game,
-    root: &Path,
-    metadata: &crate::steam_metadata::SteamAppMetadata,
-) -> Result<crate::steam_content::BaseContentReceipt> {
-    verify_legacy_base_with(
-        game,
-        root,
-        metadata,
-        crate::steam_metadata::fetch_appinfo,
-        fetch_provider_bundle,
-    )
-}
 
 fn verify_legacy_base_with(
     game: &Game,
@@ -430,11 +409,9 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         pid: Some(std::process::id()),
         error: None,
         updated_unix: now()?,
-        expected_sha256: None,
         install: Some(InstallPlan {
             game_id: game.id.clone(),
             title: format!("{} DLC {dlc_id}", game.title),
-            kind: InstallKind::Archive,
         }),
         install_state: Some(InstallState::Pending),
         install_error: None,
@@ -555,7 +532,6 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         )?;
         crate::steam_manifest::check_additive_install(&manifests, &game.install_dir)?;
         crate::jobs::check_dlc_cancelled(data_dir, &job_id)?;
-        let lib_path = find_depotkit_library(data_dir)?;
         let mut job = load_job(data_dir, &job_id)?;
         job.total_bytes = (total_bytes > 0).then_some(total_bytes);
         save_job(data_dir, &job)?;
@@ -571,7 +547,6 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
                 total_bytes,
                 |group_dir, content_app_id, group, span| {
                     download_steam_depots_with_progress(
-                        &lib_path,
                         group_dir,
                         content_app_id,
                         group,
@@ -969,24 +944,12 @@ fn pin_base_download(root: &Path, depots: &[DepotInfo]) -> Result<()> {
     Ok(())
 }
 
-/// Perform end-to-end installation of a Steam manifest-based catalog game:
-/// downloads exact manifests, invokes the native engine, verifies files and
-/// registers the installation while reporting background progress.
-pub fn install_steam_manifest_game(
-    library: &mut Library,
-    data_dir: &Path,
-    game: &CatalogGame,
-    app_id: u32,
-) -> Result<InstallOutcome> {
-    install_steam_manifest_game_in(library, data_dir, &data_dir.join("games"), game, app_id)
-}
-
 /// Install a manifest game into a selected library drive.
 pub fn install_steam_manifest_game_in(
     library: &mut Library,
     data_dir: &Path,
     games_dir: &Path,
-    game: &CatalogGame,
+    game: &SteamGame,
     app_id: u32,
 ) -> Result<InstallOutcome> {
     validate_id(&game.id)?;
@@ -1002,7 +965,6 @@ pub fn install_steam_manifest_game_in(
         return Ok(InstallOutcome::Installed(id));
     }
     let _game_lock = crate::dlc::lock_game(data_dir, &game.id)?;
-    let lib_path = find_depotkit_library(data_dir)?;
     let job_id = job_id_for_target(&games_dir.join(&game.id));
     let _worker_lock = crate::jobs::acquire_lock(data_dir, &job_id)?;
 
@@ -1016,7 +978,6 @@ pub fn install_steam_manifest_game_in(
         games_dir,
         game,
         app_id,
-        &lib_path,
         &download_dir,
     );
     finish_base_install(result, &download_dir)
@@ -1026,9 +987,8 @@ fn install_steam_manifest_game_in_inner(
     library: &mut Library,
     data_dir: &Path,
     games_dir: &Path,
-    game: &CatalogGame,
+    game: &SteamGame,
     app_id: u32,
-    lib_path: &Path,
     download_dir: &Path,
 ) -> Result<InstallOutcome> {
     prepare_base_scratch(data_dir, download_dir)?;
@@ -1115,11 +1075,9 @@ fn install_steam_manifest_game_in_inner(
         pid: Some(std::process::id()),
         error: None,
         updated_unix: now()?,
-        expected_sha256: None,
         install: Some(InstallPlan {
             game_id: game.id.clone(),
             title: game.title.clone(),
-            kind: InstallKind::Archive,
         }),
         install_state: Some(InstallState::Pending),
         install_error: None,
@@ -1152,7 +1110,6 @@ fn install_steam_manifest_game_in_inner(
             if !reusable {
                 prune_unlisted_staged_files(&group_manifests, &group_dir)?;
                 download_steam_depots_with_progress(
-                    lib_path,
                     &group_dir,
                     *content_app_id,
                     group,
@@ -1276,7 +1233,7 @@ fn install_steam_manifest_game_in_inner(
             job.install_state = Some(InstallState::NeedsSelection);
             job.updated_unix = now().unwrap_or(0);
             let _ = save_job(data_dir, &job);
-            save_pending_setup_origin(data_dir, &game.id, game)?;
+            save_pending_origin(data_dir, game)?;
             Ok(InstallOutcome::NeedsSelection(game.id.clone()))
         }
     }
@@ -1773,7 +1730,6 @@ mod tests {
                 pid: Some(std::process::id()),
                 error: None,
                 updated_unix: now().unwrap(),
-                expected_sha256: None,
                 install: None,
                 install_state: Some(InstallState::Pending),
                 install_error: None,
@@ -2256,33 +2212,6 @@ mod tests {
             "90695be6010d5ec2e8890f1d742357316f4d5f74a8a9d22b2ae076b184797167"
         );
         assert_eq!(manifest_ids.get(&3892271), Some(&4322338465787944513));
-    }
-
-    #[test]
-    fn rejects_another_revision_when_requested_manifest_is_missing() {
-        let root = std::env::temp_dir().join(format!(
-            "azdl-manifest-selection-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
-        fs::write(
-            root.join("123.lua"),
-            "addappid(456,0,\"0123456789abcdef0123456789abcdef\")\nsetManifestid(456,\"789\")",
-        )
-        .unwrap();
-        fs::write(root.join("456_788.manifest"), b"manifest").unwrap();
-        let error = parse_lua_manifests(&root, 123).unwrap_err().to_string();
-        assert!(error.contains("depot 456, revision 789"));
-        fs::write(root.join("456_789.manifest"), b"manifest").unwrap();
-        let selected = parse_lua_manifests(&root, 123).unwrap();
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].manifest_id, 789);
-        assert_eq!(selected[0].manifest_path, root.join("456_789.manifest"));
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

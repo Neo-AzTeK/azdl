@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dlcTransfer, dlcTransferActive, dlcTransferStatus, dlcTransferInstalling, isDlcTransferJob, dlcArchiveIdentity, dlcProgress, filterDlc } from './dlc.js';
+import { dlcTransfer, dlcTransferActive, dlcTransferStatus, dlcTransferInstalling, isDlcTransferJob, dlcProgress, filterDlc } from './dlc.js';
 
 describe('DLC page', () => {
   const addons = [
@@ -25,9 +25,9 @@ describe('DLC page', () => {
     expect(dlcProgress({ progress_bytes: 50, total_bytes: 100 })).toBe(50);
     expect(dlcProgress({ bytes: 150, total_bytes: 100 })).toBe(100);
   });
-  it('recognizes the installation phase of both depot and archive jobs', () => {
+  it('recognizes the installation phase of depot jobs', () => {
     expect(dlcTransferInstalling({ kind: 'Dlc', status: 'Installing', install_state: 'Pending' })).toBe(true);
-    expect(dlcTransferInstalling({ kind: 'Archive', status: 'Complete', install_state: 'Installing' })).toBe(true);
+    expect(dlcTransferInstalling({ kind: 'Dlc', status: 'Complete', install_state: 'Installing' })).toBe(true);
     expect(dlcTransferInstalling({ status: 'Downloading', install_state: 'Pending' })).toBe(false);
     expect(dlcTransferInstalling(undefined)).toBe(false);
   });
@@ -42,16 +42,5 @@ describe('DLC page', () => {
     expect(dlcTransferStatus(failed)).toBe('failed');
     expect(dlcTransfer([{ ...failed, status: 'Cancelled' }], 'base', '20')).toBeDefined();
     expect(dlcTransferStatus(dlcTransfer([{ ...failed, status: 'Interrupted' }], 'base', '20'))).toBe('interrupted');
-  });
-  it('recognizes catalog archive DLC without misclassifying ordinary game archives', () => {
-    const archive = { kind: 'Archive', status: 'Downloading', target: '/tmp/dlc-downloads/base/20/bonus.zip' };
-    expect(isDlcTransferJob(archive)).toBe(true);
-    expect(dlcTransfer([archive], 'base', '20')).toBe(archive);
-    expect(isDlcTransferJob({ ...archive, target: '/tmp/games/base/bonus.zip' })).toBe(false);
-    expect(isDlcTransferJob({ ...archive, kind: 'Patch' })).toBe(false);
-    expect(dlcArchiveIdentity(archive)).toEqual({ gameId: 'base', addonId: '20' });
-    expect(dlcArchiveIdentity({ ...archive, target: 'C:\\azdl\\dlc-downloads\\base\\20\\bonus.zip' })).toEqual({ gameId: 'base', addonId: '20' });
-    expect(dlcArchiveIdentity({ ...archive, target: '/tmp/dlc-downloads/base/../bonus.zip' })).toBeNull();
-    expect(dlcArchiveIdentity({ ...archive, target: '/tmp/dlc-downloads/base/20/nested/bonus.zip' })).toBeNull();
   });
 });

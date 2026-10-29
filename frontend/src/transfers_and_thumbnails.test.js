@@ -322,7 +322,6 @@ describe('covers.js SteamGrid & Artwork Resolution', () => {
       install: {
         game_id: 'steam-1073440',
         title: 'コイカツ / Koikatsu Party',
-        kind: 'Archive',
       },
     };
 

@@ -1,4 +1,6 @@
 <script>
+  import { Icon } from 'm3-svelte';
+  import iconArrowDropDown from '@ktibow/iconset-material-symbols/arrow-drop-down';
   import { runAction, discoverExecutables } from '../api.js';
   import Modal from './Modal.svelte';
   import ConfirmModal from './ConfirmModal.svelte';
@@ -82,7 +84,6 @@
         action: 'pending-add',
         id: pendingItem.id,
         title: pendingItem.id,
-        install_kind: pendingItem.kind,
         install_dir: pendingItem.directory,
         executable: finalExe,
       });
@@ -140,7 +141,6 @@
         <label for="game-directory">Game Directory</label>
         <div id="game-directory" class="directory-pill">
           <span class="dir-name">{id}</span>
-          <span class="dir-kind">{pendingItem?.kind || 'portable'}</span>
         </div>
       </div>
 
@@ -165,20 +165,23 @@
         </div>
 
         {#if candidates.length > 0}
-          <select
-            id="exe-select"
-            class="md3-select"
-            bind:value={selectedExe}
-            disabled={submitting}
-          >
-            {#each candidates as cand}
-              {@const val = cand.relative_path || cand.path}
-              <option value={val}>
-                {val} {cand.score ? `(Score: ${cand.score})` : ''}
-              </option>
-            {/each}
-            <option value="__custom__">Custom path...</option>
-          </select>
+          <span class="select-field">
+            <select
+              id="exe-select"
+              class="md3-select"
+              bind:value={selectedExe}
+              disabled={submitting}
+            >
+              {#each candidates as cand}
+                {@const val = cand.relative_path || cand.path}
+                <option value={val}>
+                  {val} {cand.score ? `(Score: ${cand.score})` : ''}
+                </option>
+              {/each}
+              <option value="__custom__">Custom path...</option>
+            </select>
+            <Icon icon={iconArrowDropDown} size={20} class="select-chevron" />
+          </span>
         {/if}
 
         {#if selectedExe === '__custom__' || candidates.length === 0}
@@ -283,16 +286,6 @@
     font-size: 13px;
     font-weight: 600;
     color: var(--md-sys-color-on-surface);
-  }
-
-  .dir-kind {
-    font-size: 11px;
-    font-weight: 500;
-    text-transform: uppercase;
-    background: var(--md-sys-color-secondary-container);
-    color: var(--md-sys-color-on-secondary-container);
-    padding: 2px 6px;
-    border-radius: 4px;
   }
 
   .actions-container {

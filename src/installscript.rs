@@ -7,8 +7,6 @@
 //! - Parsing of VDF `Registry` and `Run Process` blocks.
 //! - Macro resolution for placeholders (`%INSTALLDIR%`, `%PROGRAMDATA%`, `%USERPROFILE%`).
 //! - Writing registry hives directly into Wine/Proton prefixes (`system.reg` / `user.reg`).
-//! - Ubisoft Connect bypass: auto-registering Ubisoft launcher installation keys
-//!   and configuring `-uplay_steam_mode` for games distributing `uplay_r1_loader64.dll`.
 
 use crate::Game;
 use std::fs::{self, OpenOptions};
@@ -31,49 +29,6 @@ pub struct RunProcessStep {
     pub arguments: Vec<String>,
     pub has_run_key: Option<String>,
     pub is_64bit: bool,
-}
-
-/// Detects if a game uses Ubisoft Connect / Uplay DRM loaders.
-pub fn is_ubisoft_game(game_dir: &Path) -> bool {
-    if !game_dir.is_dir() {
-        return false;
-    }
-
-    let indicators = [
-        "uplay_r1_loader64.dll",
-        "uplay_r2_loader.dll",
-        "uplay_r1_loader.dll",
-        "uplay_r2_loader64.dll",
-        "uplay_r1.dll",
-        "uplay_r2.dll",
-        "uplay.dll",
-        "upc.exe",
-    ];
-
-    find_any_file_named(game_dir, &indicators, 0, 3)
-}
-
-fn find_any_file_named(dir: &Path, names: &[&str], depth: usize, max_depth: usize) -> bool {
-    if depth > max_depth {
-        return false;
-    }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                let lower = file_name.to_ascii_lowercase();
-                if names.iter().any(|name| lower == *name) {
-                    return true;
-                }
-            }
-        } else if path.is_dir() && find_any_file_named(&path, names, depth + 1, max_depth) {
-            return true;
-        }
-    }
-    false
 }
 
 /// Converts a Linux POSIX path to a Wine `Z:\...` path.
@@ -259,7 +214,7 @@ pub fn append_to_wine_reg(reg_path: &Path, entries: &[RegistryEntry]) -> Result<
     Ok(added_any)
 }
 
-/// Applies all discovered install scripts and Ubisoft bypass entries for a game to its Wine prefix.
+/// Applies all discovered Steam install scripts for a game to its Wine prefix.
 pub fn apply_installscript_for_game(game: &Game, prefix_dir: &Path) -> Result<bool> {
     if !game.install_dir.is_dir() || !prefix_dir.is_dir() {
         return Ok(false);
@@ -274,25 +229,6 @@ pub fn apply_installscript_for_game(game: &Game, prefix_dir: &Path) -> Result<bo
             let parsed = parse_vdf_registry(&resolved);
             entries.extend(parsed);
         }
-    }
-
-    // 2. Ubisoft Connect bypass registration
-    if game.steam_app_id.is_none() && is_ubisoft_game(&game.install_dir) {
-        let wine_game_dir = to_wine_path(&game.install_dir);
-        entries.push(RegistryEntry {
-            root_key: "HKEY_LOCAL_MACHINE".into(),
-            sub_key: "Software\\Ubisoft\\Launcher\\Installs".into(),
-            value_name: "InstallDir".into(),
-            value_data: wine_game_dir.clone(),
-            is_dword: false,
-        });
-        entries.push(RegistryEntry {
-            root_key: "HKEY_LOCAL_MACHINE".into(),
-            sub_key: "Software\\Wow6432Node\\Ubisoft\\Launcher\\Installs".into(),
-            value_name: "InstallDir".into(),
-            value_data: wine_game_dir,
-            is_dword: false,
-        });
     }
 
     if entries.is_empty() {
@@ -423,18 +359,5 @@ mod tests {
         assert!(content.contains("\"Version\"=dword:00000002"));
 
         let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn detects_ubisoft_game_loaders() {
-        let dir = test_dir("ubisoft");
-        fs::write(dir.join("uplay_r1_loader64.dll"), b"fake dll").unwrap();
-        assert!(is_ubisoft_game(&dir));
-
-        let clean_dir = test_dir("clean");
-        assert!(!is_ubisoft_game(&clean_dir));
-
-        let _ = fs::remove_dir_all(dir);
-        let _ = fs::remove_dir_all(clean_dir);
     }
 }

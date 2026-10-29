@@ -1,6 +1,6 @@
 //! Steam Store discovery data used by the desktop catalog.
 
-use crate::{Result, clean_command};
+use crate::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -120,37 +120,9 @@ fn encode_query(query: &str) -> String {
 }
 
 fn read_store_json(url: &str) -> Result<Value> {
-    let output = clean_command("curl")
-        .args([
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--max-time",
-            "12",
-            "--max-filesize",
-            "4194304",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            url,
-        ])
-        .output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = if stderr.trim().is_empty() {
-            format!("Steam Store request failed ({})", output.status)
-        } else {
-            format!(
-                "Steam Store request failed ({}): {}",
-                output.status,
-                stderr.trim()
-            )
-        };
-        return Err(detail.into());
-    }
-    Ok(serde_json::from_slice(&output.stdout)?)
+    let body = crate::http::get_bytes(url, std::time::Duration::from_secs(12), 4_194_304)
+        .map_err(|error| format!("Steam Store request failed: {error}"))?;
+    Ok(serde_json::from_slice(&body)?)
 }
 
 fn parse_items<'a>(items: impl Iterator<Item = &'a Value>) -> Vec<SteamStoreGame> {

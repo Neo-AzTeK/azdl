@@ -1,11 +1,8 @@
-use crate::discovery::import_game;
-use crate::jobs::{JobKind, recorded_download};
-use crate::{Game, Library, Result, Runner, clean_command, validate_id};
-use std::collections::BTreeMap;
+//! Checked extraction of Steam manifest bundles and Windows path normalization.
+use crate::{Result, clean_command};
 use std::fs;
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::{Component, Path};
 
 fn tar_command() -> std::process::Command {
     #[cfg(windows)]
@@ -71,16 +68,156 @@ pub fn validate_archive(archive: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Extract a validated archive with `bsdtar`, dropping ownership, permissions and extended attributes.
 pub fn extract_checked(archive: &Path, destination: &Path) -> Result<()> {
-    extract_checked_with_passphrase(archive, destination, None)
+    if !destination.is_dir() {
+        return Err("archive destination is not a directory".into());
+    }
+    validate_archive(archive)?;
+    let mut command = tar_command();
+    command
+        .args(["-x", "-f"])
+        .arg(archive)
+        .arg("-C")
+        .arg(destination);
+    #[cfg(unix)]
+    command.args([
+        "--no-same-owner",
+        "--no-same-permissions",
+        "--no-xattrs",
+        "--no-acls",
+    ]);
+    #[cfg(not(unix))]
+    command.args(["--no-same-owner", "--no-same-permissions"]);
+    let status = command.status()?;
+    if !status.success() {
+        return Err(format!("archive extraction failed ({status})").into());
+    }
+    normalize_windows_paths(destination)?;
+    Ok(())
 }
 
-/// Extract a game package with the published Online-Fix archive password.
-/// Plain archives also extract successfully with a passphrase supplied.
-pub fn extract_game_archive(archive: &Path, destination: &Path) -> Result<()> {
-    let passphrase =
-        std::env::var("AZDL_ARCHIVE_PASSWORD").unwrap_or_else(|_| "online-fix.me".to_string());
-    extract_checked_with_passphrase(archive, destination, Some(&passphrase))
+/// Extract a validated archive that may be protected by `passphrase`.
+///
+/// Password-protected RAR patch bundles with encrypted headers cannot be
+/// listed ahead of time, so on Linux they are unpacked inside a bubblewrap
+/// sandbox and the resulting tree is validated after the fact. All other
+/// archives are validated before extraction exactly like [`extract_checked`].
+pub fn extract_checked_with_passphrase(
+    archive: &Path,
+    destination: &Path,
+    passphrase: Option<&str>,
+) -> Result<()> {
+    if !destination.is_dir() {
+        return Err("archive destination is not a directory".into());
+    }
+    let mut signature = [0u8; 8];
+    let length = fs::File::open(archive)?.read(&mut signature)?;
+    let rar = length >= 7 && signature.starts_with(b"Rar!\x1a\x07");
+    if let Err(error) = validate_archive(archive) {
+        if rar && let Some(passphrase) = passphrase {
+            #[cfg(target_os = "linux")]
+            {
+                extract_unlistable_rar(archive, destination, passphrase)?;
+                normalize_windows_paths(destination)?;
+                return Ok(());
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = passphrase;
+                return Err("encrypted-header RAR extraction requires Linux bubblewrap".into());
+            }
+        }
+        return Err(error);
+    }
+    if rar && let Some(passphrase) = passphrase {
+        let output = clean_command("unrar")
+            .args(["x", "-o-", "-idq", "-y"])
+            .arg(format!("-p{passphrase}"))
+            .arg(archive)
+            .arg(destination)
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "RAR extraction failed ({}): {} {}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+            .into());
+        }
+        normalize_windows_paths(destination)?;
+        return Ok(());
+    }
+    let mut command = tar_command();
+    command
+        .args(["-x", "-f"])
+        .arg(archive)
+        .arg("-C")
+        .arg(destination);
+    if let Some(passphrase) = passphrase {
+        command.arg("--passphrase").arg(passphrase);
+    }
+    #[cfg(unix)]
+    command.args([
+        "--no-same-owner",
+        "--no-same-permissions",
+        "--no-xattrs",
+        "--no-acls",
+    ]);
+    #[cfg(not(unix))]
+    command.args(["--no-same-owner", "--no-same-permissions"]);
+    let status = command.status()?;
+    if !status.success() {
+        return Err(format!("archive extraction failed ({status})").into());
+    }
+    normalize_windows_paths(destination)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn extract_unlistable_rar(archive: &Path, destination: &Path, passphrase: &str) -> Result<()> {
+    if fs::symlink_metadata(destination)?.file_type().is_symlink()
+        || fs::read_dir(destination)?.next().is_some()
+    {
+        return Err("encrypted-header RAR extraction needs an empty real directory".into());
+    }
+    let destination = fs::canonicalize(destination)?;
+    let archive = fs::canonicalize(archive)?;
+    let output = clean_command("bwrap")
+        .args(["--ro-bind", "/", "/", "--bind"])
+        .arg(&destination)
+        .arg(&destination)
+        .args(["--die-with-parent", "--", "unrar", "x", "-o-", "-idq", "-y"])
+        .arg(format!("-p{passphrase}"))
+        .arg(&archive)
+        .arg(&destination)
+        .output()
+        .map_err(|error| format!("safe RAR extraction requires bubblewrap: {error}"))?;
+    let result = if output.status.success() {
+        validate_extracted_tree(&destination)
+    } else {
+        Err(format!(
+            "sandboxed RAR extraction failed ({}): {} {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into())
+    };
+    if result.is_ok() {
+        normalize_windows_paths(&destination)?;
+    } else {
+        for entry in fs::read_dir(&destination)? {
+            let path = entry?.path();
+            if fs::symlink_metadata(&path)?.is_dir() {
+                fs::remove_dir_all(path)?;
+            } else {
+                fs::remove_file(path)?;
+            }
+        }
+    }
+    result
 }
 
 #[cfg(target_os = "linux")]
@@ -245,570 +382,11 @@ pub fn normalize_windows_paths(root: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn extract_unlistable_rar(archive: &Path, destination: &Path, passphrase: &str) -> Result<()> {
-    if fs::symlink_metadata(destination)?.file_type().is_symlink()
-        || fs::read_dir(destination)?.next().is_some()
-    {
-        return Err("encrypted-header RAR extraction needs an empty real directory".into());
-    }
-    let destination = fs::canonicalize(destination)?;
-    let archive = fs::canonicalize(archive)?;
-    let output = clean_command("bwrap")
-        .args(["--ro-bind", "/", "/", "--bind"])
-        .arg(&destination)
-        .arg(&destination)
-        .args(["--die-with-parent", "--", "unrar", "x", "-o-", "-idq", "-y"])
-        .arg(format!("-p{passphrase}"))
-        .arg(&archive)
-        .arg(&destination)
-        .output()
-        .map_err(|error| format!("safe RAR extraction requires bubblewrap: {error}"))?;
-    let result = if output.status.success() {
-        validate_extracted_tree(&destination)
-    } else {
-        Err(format!(
-            "sandboxed RAR extraction failed ({}): {} {}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
-        .into())
-    };
-    if result.is_ok() {
-        normalize_windows_paths(&destination)?;
-    } else {
-        for entry in fs::read_dir(&destination)? {
-            let path = entry?.path();
-            if fs::symlink_metadata(&path)?.is_dir() {
-                fs::remove_dir_all(path)?;
-            } else {
-                fs::remove_file(path)?;
-            }
-        }
-    }
-    result
-}
-
-pub fn extract_checked_with_passphrase(
-    archive: &Path,
-    destination: &Path,
-    passphrase: Option<&str>,
-) -> Result<()> {
-    if !destination.is_dir() {
-        return Err("archive destination is not a directory".into());
-    }
-    let mut signature = [0u8; 8];
-    let length = fs::File::open(archive)?.read(&mut signature)?;
-    let rar = length >= 7 && signature.starts_with(b"Rar!\x1a\x07");
-    if let Err(error) = validate_archive(archive) {
-        if rar && let Some(passphrase) = passphrase {
-            #[cfg(target_os = "linux")]
-            {
-                extract_unlistable_rar(archive, destination, passphrase)?;
-                normalize_windows_paths(destination)?;
-                return Ok(());
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                let _ = passphrase;
-                return Err("encrypted-header RAR extraction requires Linux bubblewrap".into());
-            }
-        }
-        return Err(error);
-    }
-    if rar && let Some(passphrase) = passphrase {
-        let output = clean_command("unrar")
-            .args(["x", "-o-", "-idq", "-y"])
-            .arg(format!("-p{passphrase}"))
-            .arg(archive)
-            .arg(destination)
-            .output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "RAR extraction failed ({}): {} {}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout).trim(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            )
-            .into());
-        }
-        normalize_windows_paths(destination)?;
-        return Ok(());
-    }
-    let mut command = tar_command();
-    command
-        .args(["-x", "-f"])
-        .arg(archive)
-        .arg("-C")
-        .arg(destination);
-    if let Some(passphrase) = passphrase {
-        command.arg("--passphrase").arg(passphrase);
-    }
-    #[cfg(unix)]
-    command.args([
-        "--no-same-owner",
-        "--no-same-permissions",
-        "--no-xattrs",
-        "--no-acls",
-    ]);
-    #[cfg(not(unix))]
-    command.args(["--no-same-owner", "--no-same-permissions"]);
-    let status = command.status()?;
-    if !status.success() {
-        return Err(format!("archive extraction failed ({status})").into());
-    }
-    normalize_windows_paths(destination)?;
-    Ok(())
-}
-
-/// Extract a portable game archive into azdl's managed games folder and import it.
-/// If executable selection is ambiguous, the files remain installed for `scan`/`add`.
-pub fn install_archive(
-    library: &mut Library,
-    data_dir: &Path,
-    id: &str,
-    title: &str,
-    archive: &Path,
-) -> Result<PathBuf> {
-    install_archive_in(
-        library,
-        data_dir,
-        &data_dir.join("games"),
-        id,
-        title,
-        archive,
-    )
-}
-
-/// Install an archive into a configured library drive while retaining azdl's data directory for jobs.
-pub fn install_archive_in(
-    library: &mut Library,
-    _data_dir: &Path,
-    games: &Path,
-    id: &str,
-    title: &str,
-    archive: &Path,
-) -> Result<PathBuf> {
-    validate_id(id)?;
-    if title.trim().is_empty() || library.games.contains_key(id) {
-        return Err("title is empty or game ID already exists".into());
-    }
-    let archive = fs::canonicalize(archive)?;
-    if !archive.is_file() {
-        return Err("archive path is not a file".into());
-    }
-    fs::create_dir_all(games)?;
-    let final_dir = games.join(id);
-    if fs::symlink_metadata(&final_dir).is_ok() {
-        return Err(format!("install directory already exists: {}", final_dir.display()).into());
-    }
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let staging = games.join(format!(".{id}.extract-{}-{nonce}", std::process::id()));
-    fs::create_dir(&staging)?;
-
-    extract_game_archive(&archive, &staging)
-        .map_err(|error| format!("{error}; staging files are at {}", staging.display()))?;
-    normalize_windows_paths(&staging)?;
-    fs::rename(&staging, &final_dir)?;
-    normalize_windows_paths(&final_dir)?;
-    import_game(library, id, title, &final_dir)
-        .map_err(|error| format!("{error}; extracted files are at {}", final_dir.display()))?;
-    Ok(final_dir)
-}
-
-/// Download a portable archive, extract it and register its detected executable.
-pub fn fetch_archive(
-    library: &mut Library,
-    data_dir: &Path,
-    id: &str,
-    title: &str,
-    url: &str,
-    archive_name: &Path,
-) -> Result<PathBuf> {
-    fetch_archive_in(
-        library,
-        data_dir,
-        &data_dir.join("games"),
-        id,
-        title,
-        url,
-        archive_name,
-    )
-}
-
-/// Download and install a portable archive into a configured library drive.
-pub fn fetch_archive_in(
-    library: &mut Library,
-    data_dir: &Path,
-    games: &Path,
-    id: &str,
-    title: &str,
-    url: &str,
-    archive_name: &Path,
-) -> Result<PathBuf> {
-    validate_id(id)?;
-    if title.trim().is_empty() || library.games.contains_key(id) {
-        return Err("title is empty or game ID already exists".into());
-    }
-    let downloads = data_dir.join("downloads").join(id);
-    fs::create_dir_all(&downloads)?;
-    let game = Game {
-        id: id.to_string(),
-        title: title.to_string(),
-        install_dir: fs::canonicalize(&downloads)?,
-        executable: PathBuf::new(),
-        runner: Runner::Auto,
-        arguments: Vec::new(),
-        environment: BTreeMap::new(),
-        last_played_unix: None,
-        origin: None,
-        steam_app_id: None,
-        launch_options: Vec::new(),
-        selected_launch_option_id: None,
-        cover_url: None,
-        banner_url: None,
-    };
-    let archive = recorded_download(data_dir, &game, url, archive_name, JobKind::Archive)?;
-    let result = install_archive_in(library, data_dir, games, id, title, &archive);
-    if result.is_ok() {
-        let _ = fs::remove_dir_all(&downloads);
-        let job_id = crate::jobs::job_id_for_target(&archive);
-        let _ = crate::jobs::clear_job(data_dir, &job_id);
-    }
-    result
-}
-
-pub(crate) fn multipart_names(first_name: &str, count: usize) -> Result<Vec<String>> {
-    let lower = first_name.to_ascii_lowercase();
-    let part = lower
-        .rfind(".part")
-        .filter(|_| lower.ends_with(".rar"))
-        .ok_or("first archive filename must end in .part1.rar or .part01.rar")?;
-    let digits = &first_name[part + 5..first_name.len() - 4];
-    if digits.is_empty()
-        || !digits.bytes().all(|byte| byte.is_ascii_digit())
-        || digits.parse::<usize>()? != 1
-    {
-        return Err("first archive filename must identify part 1".into());
-    }
-    if !(2..=100).contains(&count) {
-        return Err("multipart archive needs 2 to 100 HTTPS URLs".into());
-    }
-    let prefix = &first_name[..part + 5];
-    Ok((1..=count)
-        .map(|number| format!("{prefix}{number:0width$}.rar", width = digits.len()))
-        .collect())
-}
-
-/// Record each volume as an individual resumable download in the same folder.
-pub(crate) fn recorded_multipart_download(
-    data_dir: &Path,
-    download_game: &Game,
-    first_name: &Path,
-    urls: &[String],
-    kind: JobKind,
-) -> Result<PathBuf> {
-    if first_name.components().count() != 1
-        || !matches!(first_name.components().next(), Some(Component::Normal(_)))
-    {
-        return Err("first archive filename must be a single filename".into());
-    }
-    let first_name = first_name.to_str().ok_or("archive filename is not UTF-8")?;
-    let names = multipart_names(first_name, urls.len())?;
-    if urls.iter().any(|url| !url.starts_with("https://")) {
-        return Err("every archive part URL must use HTTPS".into());
-    }
-    let mut first_archive = None;
-    for (name, url) in names.iter().zip(urls) {
-        let downloaded = recorded_download(data_dir, download_game, url, Path::new(name), kind)?;
-        if first_archive.is_none() {
-            first_archive = Some(downloaded);
-        }
-    }
-    first_archive.ok_or_else(|| "no archive parts provided".into())
-}
-
-/// Fetch every part into one directory, then install the complete RAR set.
-pub fn fetch_archive_parts(
-    library: &mut Library,
-    data_dir: &Path,
-    id: &str,
-    title: &str,
-    first_name: &Path,
-    urls: &[String],
-) -> Result<PathBuf> {
-    fetch_archive_parts_in(
-        library,
-        data_dir,
-        &data_dir.join("games"),
-        id,
-        title,
-        first_name,
-        urls,
-    )
-}
-
-/// Fetch multipart archives into a configured library drive.
-pub fn fetch_archive_parts_in(
-    library: &mut Library,
-    data_dir: &Path,
-    games: &Path,
-    id: &str,
-    title: &str,
-    first_name: &Path,
-    urls: &[String],
-) -> Result<PathBuf> {
-    validate_id(id)?;
-    if title.trim().is_empty() || library.games.contains_key(id) {
-        return Err("title is empty or game ID already exists".into());
-    }
-    let downloads = data_dir.join("downloads").join(id);
-    fs::create_dir_all(&downloads)?;
-    let game = Game {
-        id: id.to_string(),
-        title: title.to_string(),
-        install_dir: fs::canonicalize(&downloads)?,
-        executable: PathBuf::new(),
-        runner: Runner::Auto,
-        arguments: Vec::new(),
-        environment: BTreeMap::new(),
-        last_played_unix: None,
-        origin: None,
-        steam_app_id: None,
-        launch_options: Vec::new(),
-        selected_launch_option_id: None,
-        cover_url: None,
-        banner_url: None,
-    };
-    let first_archive =
-        recorded_multipart_download(data_dir, &game, first_name, urls, JobKind::Archive)?;
-    let result = install_archive_in(library, data_dir, games, id, title, &first_archive);
-    if result.is_ok() {
-        let _ = fs::remove_dir_all(&downloads);
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Command;
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn extracts_rar_with_encrypted_headers_in_sandbox() {
-        if Command::new("bwrap").arg("--version").output().is_err()
-            || Command::new("unrar").arg("-?").output().is_err()
-        {
-            return;
-        }
-        let archive =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/encrypted-header-rar4.rar");
-        let root = std::env::temp_dir().join(format!(
-            "azdl-rar-headers-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
-        assert!(extract_checked_with_passphrase(&archive, &root, Some("wrong")).is_err());
-        assert!(fs::read_dir(&root).unwrap().next().is_none());
-        extract_checked_with_passphrase(&archive, &root, Some("12345678")).unwrap();
-        assert_eq!(
-            fs::read(root.join("foo.txt")).unwrap(),
-            b"data of foo.txt\n"
-        );
-        assert_eq!(
-            fs::read(root.join("bar.txt")).unwrap(),
-            b"data of bar.txt\n"
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn sandboxed_rar_tree_rejects_links() {
-        use std::os::unix::fs::symlink;
-        let root = std::env::temp_dir().join(format!(
-            "azdl-rar-link-check-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
-        symlink("/tmp/outside", root.join("link")).unwrap();
-        assert!(validate_extracted_tree(&root).is_err());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn multipart_filenames_keep_the_first_parts_number_width() {
-        assert_eq!(
-            multipart_names("game.part01.rar", 3).unwrap(),
-            ["game.part01.rar", "game.part02.rar", "game.part03.rar"]
-        );
-        assert!(multipart_names("game.part02.rar", 3).is_err());
-        assert!(multipart_names("game.rar", 3).is_err());
-        assert!(multipart_names("game.part1.rar", 1).is_err());
-    }
-
-    #[test]
-    fn extracts_complete_local_multipart_rar() {
-        if Command::new("bsdtar").arg("--version").output().is_err()
-            || Command::new("unrar").arg("-?").output().is_err()
-        {
-            return;
-        }
-        let archive = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/test_read_format_rar5_multiarchive_solid.part01.rar");
-        let root = std::env::temp_dir().join(format!(
-            "azdl-rar-parts-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
-        extract_game_archive(&archive, &root).unwrap();
-        assert_eq!(fs::metadata(root.join("test6.bin")).unwrap().len(), 4096);
-        assert_eq!(
-            fs::metadata(root.join("elf-Linux-ARMv7-ls")).unwrap().len(),
-            90808
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn extracts_encrypted_rar_after_validating_members() {
-        if Command::new("bsdtar").arg("--version").output().is_err()
-            || Command::new("unrar").arg("-?").output().is_err()
-        {
-            return;
-        }
-        let archive =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/encrypted-rar4.rar");
-        let root = std::env::temp_dir().join(format!(
-            "azdl-rar-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
-        extract_checked_with_passphrase(&archive, &root, Some("12345678")).unwrap();
-        assert_eq!(
-            fs::read(root.join("foo.txt")).unwrap(),
-            b"data of foo.txt\n"
-        );
-        assert_eq!(
-            fs::read(root.join("bar.txt")).unwrap(),
-            b"data of bar.txt\n"
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn extracts_portable_archive_and_registers_game() {
-        if Command::new("bsdtar").arg("--version").output().is_err() {
-            return;
-        }
-        let root = std::env::temp_dir().join(format!(
-            "azdl-archive-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let source = root.join("source");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("Example Game.exe"), b"game").unwrap();
-        fs::write(source.join("setup.exe"), b"setup").unwrap();
-        let archive = root.join("game.zip");
-        let status = Command::new("bsdtar")
-            .args(["-a", "-c", "-f"])
-            .arg(&archive)
-            .arg("-C")
-            .arg(&source)
-            .arg(".")
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let mut library = Library::default();
-        let installed =
-            install_archive(&mut library, &root, "example", "Example Game", &archive).unwrap();
-        assert!(installed.join("Example Game.exe").is_file());
-        assert_eq!(
-            library.games["example"].executable.file_name().unwrap(),
-            "Example Game.exe"
-        );
-        let other_drive = root.join("other-drive");
-        let installed_elsewhere = install_archive_in(
-            &mut library,
-            &root,
-            &other_drive,
-            "example-elsewhere",
-            "Example Game",
-            &archive,
-        )
-        .unwrap();
-        assert!(installed_elsewhere.starts_with(&other_drive));
-        assert_eq!(
-            library.games["example-elsewhere"].install_dir,
-            installed_elsewhere
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn installs_password_protected_portable_zip() {
-        if Command::new("bsdtar").arg("--version").output().is_err()
-            || Command::new("zip").arg("-v").output().is_err()
-        {
-            return;
-        }
-        let root = std::env::temp_dir().join(format!(
-            "azdl-encrypted-game-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let source = root.join("source");
-        fs::create_dir_all(&source).unwrap();
-        fs::write(source.join("Example Game.exe"), b"game").unwrap();
-        let archive = root.join("game.zip");
-        assert!(
-            Command::new("zip")
-                .args(["-q", "-P", "online-fix.me"])
-                .arg(&archive)
-                .arg("Example Game.exe")
-                .current_dir(&source)
-                .status()
-                .unwrap()
-                .success()
-        );
-        let mut library = Library::default();
-        let installed =
-            install_archive(&mut library, &root, "example", "Example Game", &archive).unwrap();
-        assert_eq!(
-            fs::read(installed.join("Example Game.exe")).unwrap(),
-            b"game"
-        );
-        assert_eq!(
-            library.games["example"].executable.file_name().unwrap(),
-            "Example Game.exe"
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn rejects_archive_path_escape() {
@@ -844,10 +422,10 @@ mod tests {
         data.extend(body);
         data.extend([0u8; 1024]);
         fs::write(&archive, data).unwrap();
-        let mut library = Library::default();
-        assert!(install_archive(&mut library, &root, "bad", "Bad", &archive).is_err());
-        assert!(!root.join("games/escaped.txt").exists());
-        assert!(library.games.is_empty());
+        let destination = root.join("out");
+        fs::create_dir_all(&destination).unwrap();
+        assert!(extract_checked(&archive, &destination).is_err());
+        assert!(!root.join("escaped.txt").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -990,19 +568,6 @@ mod tests {
         let candidates = crate::discovery::discover_executables(&extract_dir, "MyGame").unwrap();
         assert!(!candidates.is_empty());
         assert_eq!(candidates[0].path.file_name().unwrap(), "MyGame.exe");
-
-        // install_archive must also work smoothly with Windows-path archives
-        let mut library = Library::default();
-        let installed =
-            install_archive(&mut library, &root, "mygame-imported", "MyGame", &archive).unwrap();
-        assert!(installed.join("MyGame/Binaries/Win64/MyGame.exe").is_file());
-        assert_eq!(
-            library.games["mygame-imported"]
-                .executable
-                .file_name()
-                .unwrap(),
-            "MyGame.exe"
-        );
 
         fs::remove_dir_all(root).unwrap();
     }

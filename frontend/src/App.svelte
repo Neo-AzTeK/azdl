@@ -1,11 +1,12 @@
 <script>
+  import { Icon } from 'm3-svelte';
+  import iconClose from '@ktibow/iconset-material-symbols/close';
   import { isTransferActive } from './transfers.js';
   import { onMount } from 'svelte';
   import Titlebar from './components/Titlebar.svelte';
   import NavRail from './components/NavRail.svelte';
   import TransferDrawer from './components/TransferDrawer.svelte';
   import LibraryView from './views/LibraryView.svelte';
-  import ConfirmModal from './components/ConfirmModal.svelte';
 
   import {
     getState,
@@ -16,7 +17,6 @@
     onBusyChange,
     onStateChange,
     onProgressChange,
-    isSteamRunning,
   } from './api.js';
   import { applyTheme, onSystemThemeChange } from './theme.js';
   import { notifications, dismissNotification, notify, notifyError } from './notifications.js';
@@ -318,8 +318,6 @@
     viewedGame = null;
   }
 
-  let showSteamPromptModal = $state(false);
-  let pendingSteamLaunchGame = $state(null);
 
   async function executeLaunch(gameId) {
     try {
@@ -336,28 +334,7 @@
   }
 
   async function handleLaunch(gameId) {
-    const game = (appState.library || []).find((g) => g.id === gameId);
-    const needsOnlineFix = game && (game.fix === 'Online-Fix' || game.fix === 'SteamFix');
-    if (needsOnlineFix) {
-      try {
-        const running = await isSteamRunning();
-        if (!running) {
-          pendingSteamLaunchGame = game;
-          showSteamPromptModal = true;
-          return;
-        }
-      } catch (err) {
-        console.warn('Steam running check failed:', err);
-      }
-    }
     await executeLaunch(gameId);
-  }
-
-  async function handleLaunchWithoutSteam() {
-    if (!pendingSteamLaunchGame) return;
-    const targetGame = pendingSteamLaunchGame;
-    pendingSteamLaunchGame = null;
-    await executeLaunch(targetGame.id);
   }
 
   async function handleStop(gameId) {
@@ -448,6 +425,7 @@
           searchQuery={tabSearches.settings}
           onThemeChange={updateTheme}
           onRefresh={refreshState}
+          onRefreshRunners={refreshRunners}
           onShowToast={showToast}
         />
         {:catch}
@@ -516,23 +494,12 @@
               {n.action.label}
             </button>
           {/if}
-          <button onclick={() => dismissNotification(n.id)} class="toast-dismiss" aria-label="Dismiss">✕</button>
+          <button onclick={() => dismissNotification(n.id)} class="toast-dismiss" aria-label="Dismiss"><Icon icon={iconClose} size={18} /></button>
         </div>
       {/each}
     </div>
   {/if}
 
-  <!-- Online-Fix compatibility notice -->
-  <ConfirmModal
-    bind:open={showSteamPromptModal}
-    title="Steam Is Not Running"
-    message="{pendingSteamLaunchGame?.title || 'This game'} uses an Online-Fix / SteamFix multiplayer runtime that may require Steam running in the background."
-    confirmText="Launch Anyway"
-    cancelText="Cancel"
-    isDestructive={false}
-    onConfirm={handleLaunchWithoutSteam}
-    onCancel={() => { pendingSteamLaunchGame = null; }}
-  />
 </div>
 
 <style>

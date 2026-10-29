@@ -1,4 +1,9 @@
 <script>
+  import { Icon } from 'm3-svelte';
+  import iconDelete from '@ktibow/iconset-material-symbols/delete-outline';
+  import iconError from '@ktibow/iconset-material-symbols/error-outline';
+  import iconLibraryAdd from '@ktibow/iconset-material-symbols/library-add-outline';
+  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset-outline';
   import GameCard from '../components/GameCard.svelte';
   import ImportGameModal from '../components/ImportGameModal.svelte';
   import ConfirmModal from '../components/ConfirmModal.svelte';
@@ -72,16 +77,13 @@
   {#if pending.length > 0}
     <div class="pending-box">
       <div class="pending-header">
-        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/>
-        </svg>
+        <Icon icon={iconError} size={16} />
         <span>{pending.length} Unfinished or Portable Game Directory Detected:</span>
       </div>
       <div class="pending-list">
         {#each pending as item}
           <div class="pending-item">
             <span class="pending-id">{item.id}</span>
-            <span class="pending-kind">({item.kind})</span>
             <button class="finish-btn" onclick={() => handlePendingAdd(item)}>
               Select Executable
             </button>
@@ -90,9 +92,7 @@
               title="Remove Directory"
               onclick={() => promptRemovePending(item)}
             >
-              <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
-                <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
-              </svg>
+              <Icon icon={iconDelete} size={14} />
             </button>
           </div>
         {/each}
@@ -104,15 +104,11 @@
   <div class="games-grid">
     {#if filteredGames.length === 0}
       <div class="empty-state">
-        <svg viewBox="0 0 24 24" width="64" height="64" fill="currentColor" opacity="0.3">
-          <path d="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm4-3c-.83 0-1.5-.67-1.5-1.5S18.67 9 19.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/>
-        </svg>
+        <Icon icon={iconVideogameAsset} size={64} />
         <span class="empty-text">No games found in your library.</span>
         {#if onBrowseCatalog}
           <button class="import-action-btn empty-cta" onclick={onBrowseCatalog}>
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-              <path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/>
-            </svg>
+            <Icon icon={iconLibraryAdd} size={16} />
             <span>Explore Catalog</span>
           </button>
         {/if}
@@ -235,11 +231,6 @@
 
   .pending-id {
     font-weight: 600;
-  }
-
-  .pending-kind {
-    color: var(--md-sys-color-on-surface-variant);
-    font-size: 11px;
   }
 
   .finish-btn {

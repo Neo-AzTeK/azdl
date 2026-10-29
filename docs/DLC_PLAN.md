@@ -10,7 +10,7 @@ The current contract is [DLC.md](DLC.md). The launcher has one built-in Rust Ste
 | Shared depots | Resolve ownership chains, content App grouping, cycle/missing-manifest rejection and shared files | Live multi-App download and removal |
 | Transactions | Verified staging, atomic publication, file hashes, shared ownership and reversible overlays | Process termination at commit boundaries on both hosts |
 | Existing data | Locked, versioned migration; IDs, files, receipts, journals, jobs and inert archive-source records retained | Representative copied libraries and multi-drive layouts |
-| Native transport | Pinned Qt-free depotkit on both platforms, one internal Rust adapter, progress/cancellation and chunk resume | Native Windows installer/runtime and throttled live downloads |
+| Native transport | In-process `steamroom` CDN transfers on both platforms, one internal Rust adapter, progress/cancellation and chunk resume | Live downloads on Linux and Windows, including throttled pause/resume |
 
 Preserve exact IDs, manifest hashes and base revision comparisons when extending this model. No public metadata result or legacy content record permits an entitlement bypass. Keep transport calls behind Rust services and Tauri worker boundaries; Svelte renders state and dispatches actions.
 

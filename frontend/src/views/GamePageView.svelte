@@ -1,13 +1,31 @@
 <script>
+  import iconClose from '@ktibow/iconset-material-symbols/close';
+  import iconCheckCircle from '@ktibow/iconset-material-symbols/check-circle-outline';
+  import iconArrowDropDown from '@ktibow/iconset-material-symbols/arrow-drop-down';
+  import iconArrowBack from '@ktibow/iconset-material-symbols/arrow-back';
+  import iconCropLandscape from '@ktibow/iconset-material-symbols/crop-landscape-outline';
+  import iconDelete from '@ktibow/iconset-material-symbols/delete-outline';
+  import iconFolder from '@ktibow/iconset-material-symbols/folder-outline';
+  import iconFolderOpen from '@ktibow/iconset-material-symbols/folder-open-outline';
+  import iconMoreVert from '@ktibow/iconset-material-symbols/more-vert';
+  import iconSettings from '@ktibow/iconset-material-symbols/settings-outline';
+  import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset-outline';
   import { untrack } from 'svelte';
+  import { TRAILER_HLS_CONFIG, STALLS_BEFORE_STEP_DOWN, lowerTrailerLevel, pickTrailerLevel, trailerKey } from '../trailer.js';
   import { controlActionConfirmed } from '../game_controls.js';
-  import ActionSwitch from '../components/ActionSwitch.svelte';
   import { onMount, onDestroy, tick } from 'svelte';
-  import { Button, Tabs, FAB, LinearProgress, LinearProgressEstimate } from 'm3-svelte';
+  import { Button, Tabs, FAB, LinearProgress, LinearProgressEstimate, Icon } from 'm3-svelte';
   import SectionCard from '../components/SectionCard.svelte';
+  import ActionSwitch from '../components/ActionSwitch.svelte';
+  import iconGroups from '@ktibow/iconset-material-symbols/groups-outline';
+  import iconLockOpen from '@ktibow/iconset-material-symbols/lock-open-outline';
+  import iconExtension from '@ktibow/iconset-material-symbols/extension-outline';
+  import iconMemory from '@ktibow/iconset-material-symbols/memory-outline';
+  import iconKey from '@ktibow/iconset-material-symbols/key-outline';
+  import iconBuild from '@ktibow/iconset-material-symbols/build-outline';
   import { dlcTransfer, dlcTransferActive, dlcTransferStatus, dlcTransferInstalling, isDlcTransferJob, dlcProgress, filterDlc } from '../dlc.js';
-  import iconPlay from '@ktibow/iconset-material-symbols/play-arrow';
-  import iconStop from '@ktibow/iconset-material-symbols/stop';
+  import iconPlay from '@ktibow/iconset-material-symbols/play-arrow-outline';
+  import iconStop from '@ktibow/iconset-material-symbols/stop-outline';
   import iconDownload from '@ktibow/iconset-material-symbols/download';
   import {
     launchGame,
@@ -15,7 +33,6 @@
     runAction,
     diagnoseGame,
     discoverExecutables,
-    scanSetup,
     getSteamDetails,
     getGameDlc,
     getGameControls,
@@ -166,11 +183,11 @@
     }
   });
 
-  async function installDlc(addon, resumeJobId = null) {
+  async function installDlc(addon) {
     if (!installedRecord || dlcPending) return;
     dlcPending = addon.id;
     try {
-      const result = await runAction({ action: 'dlc-install', id: installedRecord.id, dlc_id: addon.id, ...(resumeJobId ? { resume_job_id: resumeJobId } : {}) });
+      const result = await runAction({ action: 'dlc-install', id: installedRecord.id, dlc_id: addon.id });
       if (!result?.started && !result?.already_working) {
         await refreshDlc(installedRecord.id);
       }
@@ -415,13 +432,17 @@
   let exeCandidates = $state([]);
 
   // Sub-tabs for installed game management
-  let activeDetailTab = $state('overview'); // 'overview' | 'patches' | 'config' | 'diagnostics'
+  let activeDetailTab = $state('overview'); // 'overview' | 'dlc' | 'patches' | 'config'
 
   let controlsSnapshot = $state(null);
   let controlsLoading = $state(false);
   let controlsError = $state('');
   let controlsRequest = 0;
   let pendingAction = $state(null);
+  let runtimeReport = $derived(controlsSnapshot?.runtime);
+  let controlsDisabled = $derived(isRunning || !!pendingAction || controlsLoading || !controlsSnapshot);
+
+  // Reversible patch/fix controls, read back from the live game-controls snapshot.
   let observedControls = $derived(controlsSnapshot || installedRecord || {});
   let effectiveSteamStub = $derived(observedControls.steamstub);
   let effectiveDlcPatchApplied = $derived(!!observedControls.dlc_patch_applied);
@@ -433,8 +454,6 @@
   let isDlcBypassRelevant = $derived(!!(observedControls.dlc_patch_available || effectiveDlcPatchApplied));
   let isGoldbergRelevant = $derived(!!(observedControls.goldberg_compatible || effectiveGoldbergHasSettings));
   let isPatchRelevant = $derived(!!observedControls.patch);
-  let runtimeReport = $derived(controlsSnapshot?.runtime);
-  let controlsDisabled = $derived(isRunning || !!pendingAction || controlsLoading || !controlsSnapshot);
 
   async function refreshControls(id) {
     if (id !== installedGameId) return false;
@@ -617,17 +636,27 @@
 
     // 1. Try Hls.js when HLS stream is present and supported
     if (hlsUrl && Hls && typeof Hls.isSupported === 'function' && Hls.isSupported()) {
-      const hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: false,
-      });
+      const hls = new Hls(TRAILER_HLS_CONFIG);
       hlsInstance = hls;
+      let stalls = 0;
       hls.loadSource(hlsUrl);
       hls.attachMedia(videoEl);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      hls.on(Hls.Events.MANIFEST_PARSED, (_event, data) => {
+        // Lock one rendition before any fragment loads; see trailer.js.
+        const level = pickTrailerLevel(data?.levels, videoEl.clientHeight, window.devicePixelRatio);
+        if (level >= 0) hls.currentLevel = level;
         videoEl.play().catch(() => {});
       });
       hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data && !data.fatal && data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+          stalls += 1;
+          const lower = stalls >= STALLS_BEFORE_STEP_DOWN ? lowerTrailerLevel(hls.levels, hls.currentLevel) : -1;
+          if (lower >= 0) {
+            stalls = 0;
+            // nextLevel switches at the next fragment without flushing buffered video.
+            hls.nextLevel = lower;
+          }
+        }
         if (data && data.fatal) {
           console.warn('HLS stream error, falling back to MP4/WebM:', data);
           hls.destroy();
@@ -660,12 +689,20 @@
     }
   }
 
+  // Restart playback only when the trailer source or the <video> element changes;
+  // re-derived media objects with the same URLs must not reload the stream.
+  let loadedTrailer = { key: '', element: null };
+
   $effect(() => {
     const media = currentMedia;
     const videoEl = videoPlayerRef;
-    if (media?.type === 'video' && videoEl) {
+    const key = trailerKey(media);
+    if (key && videoEl) {
+      if (loadedTrailer.key === key && loadedTrailer.element === videoEl) return;
+      loadedTrailer = { key, element: videoEl };
       setupVideoPlayer(videoEl, media);
     } else {
+      loadedTrailer = { key: '', element: null };
       videoGeneration++;
       if (hlsInstance) {
         hlsInstance.destroy();
@@ -771,7 +808,6 @@
   async function handleAction(actionPayload, successMsg) {
     if (!installedRecord || pendingAction) return;
     const id = installedRecord.id;
-    const before = controlsSnapshot;
     pendingAction = actionPayload.action;
     let failure = null;
     try {
@@ -792,7 +828,7 @@
         });
       } else if (!confirmed) {
         notify.warning('The command finished, but its state could not be read. Reopen this tab to retry.');
-      } else if (!controlActionConfirmed(actionPayload.action, before, controlsSnapshot)) {
+      } else if (!controlActionConfirmed(actionPayload.action, controlsSnapshot)) {
         notify.warning('The command completed, but the requested state was not confirmed. The controls show the current state.');
       } else {
         setBanner('success', successMsg);
@@ -909,7 +945,10 @@
     showMoreMenu = false;
     detailTabTouched = true;
     activeDetailTab = tabName;
-    if (tabName === 'patches' || targetId === 'section-diagnostics') {
+    if (tabName === 'patches') {
+      void refreshControls(installedGameId);
+    }
+    if (targetId === 'section-diagnostics') {
       refreshDiagnostics();
     }
     await tick();
@@ -937,9 +976,7 @@
         onclick={onBack}
         aria-label="Back"
       >
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-          <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z" />
-        </svg>
+        <Icon icon={iconArrowBack} size={18} />
         <span>Back</span>
       </Button>
 
@@ -1031,13 +1068,16 @@
               {#if settings?.storage_drives && settings.storage_drives.length > 0}
                 <div class="drive-select-container">
                   <label for="game-drive-select" class="drive-label">Install Location:</label>
-                  <select id="game-drive-select" class="md3-select" bind:value={selectedDriveId}>
-                    {#each settings.storage_drives as drive}
-                      <option value={drive.id}>
-                        {drive.label} ({drive.path}) {drive.is_default ? '— Default' : ''}
-                      </option>
-                    {/each}
-                  </select>
+                  <span class="select-field">
+                    <select id="game-drive-select" class="md3-select" bind:value={selectedDriveId}>
+                      {#each settings.storage_drives as drive}
+                        <option value={drive.id}>
+                          {drive.label} ({drive.path}) {drive.is_default ? '— Default' : ''}
+                        </option>
+                      {/each}
+                    </select>
+                    <Icon icon={iconArrowDropDown} size={20} class="select-chevron" />
+                  </span>
                 </div>
               {/if}
             {/if}
@@ -1063,33 +1103,31 @@
                   title="More Options"
                   aria-label="More options"
                 >
-                  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-                    <path d="M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z"/>
-                  </svg>
+                  <Icon icon={iconMoreVert} size={20} />
                 </button>
 
                 {#if showMoreMenu}
                   <button type="button" class="menu-scrim" onclick={() => (showMoreMenu = false)} aria-label="Close menu"></button>
                   <div class="md3-dropdown-menu">
                     <button class="menu-item" onclick={() => { showMoreMenu = false; handleOpenFolder(); }}>
-                      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 12H4V8h16v10z"/></svg>
+                      <Icon icon={iconFolderOpen} size={18} />
                       <span>Open Installation Folder</span>
                     </button>
                     <button class="menu-item" onclick={() => { showMoreMenu = false; showMoveModal = true; }}>
-                      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+                      <Icon icon={iconFolder} size={18} />
                       <span>Move to Another Drive</span>
                     </button>
-                    <button class="menu-item" onclick={() => navigateToDetailTab('config')}>
-                      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
-                      <span>Launch Options & Config</span>
-                    </button>
                     <button class="menu-item" onclick={() => navigateToDetailTab('patches', 'section-patches')}>
-                      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/></svg>
+                      <Icon icon={iconLockOpen} size={18} />
                       <span>Patches</span>
+                    </button>
+                    <button class="menu-item" onclick={() => navigateToDetailTab('config')}>
+                      <Icon icon={iconSettings} size={18} />
+                      <span>Launch Options & Config</span>
                     </button>
                     <div class="menu-divider"></div>
                     <button class="menu-item danger" onclick={() => { showMoreMenu = false; handleUninstall(); }}>
-                      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                      <Icon icon={iconDelete} size={18} />
                       <span>Uninstall Game</span>
                     </button>
                   </div>
@@ -1137,7 +1175,7 @@
                   >
                     <img src={item.thumb} alt="" class="thumb-img" loading="lazy" decoding="async" />
                     {#if item.type === 'video'}
-                      <div class="video-play-indicator">▶</div>
+                      <div class="video-play-indicator"><Icon icon={iconPlay} size={18} /></div>
                     {/if}
                   </button>
                 {/each}
@@ -1190,12 +1228,15 @@
               {/snippet}
               <div class="dlc-toolbar">
                 <input class="md3-input" type="search" aria-label="Search DLC" placeholder="Search downloadable content" bind:value={dlcQuery} />
-                <select class="md3-select" aria-label="Filter DLC" bind:value={dlcFilter}>
-                  <option value="all">All content</option>
-                  <option value="available">Available to install</option>
-                  <option value="installed">Installed</option>
-                  <option value="recovery">Needs recovery</option>
-                </select>
+                <span class="select-field">
+                  <select class="md3-select" aria-label="Filter DLC" bind:value={dlcFilter}>
+                    <option value="all">All content</option>
+                    <option value="available">Available to install</option>
+                    <option value="installed">Installed</option>
+                    <option value="recovery">Needs recovery</option>
+                  </select>
+                  <Icon icon={iconArrowDropDown} size={20} class="select-chevron" />
+                </span>
               </div>
               {#if hasInterruptedDlc}<p class="section-subtext">Recover interrupted content before installing or removing DLC.</p>{/if}
               {#if isRunning}<p class="section-subtext">Stop the game before changing downloadable content.</p>{/if}
@@ -1210,7 +1251,7 @@
                 <div id={`dlc-${addon.id}`} class="dlc-row" class:selected={String(game?.selected_dlc_id) === String(addon.id)}>
                   <span class="dlc-details">
                     <span>{String(game?.selected_dlc_id) === String(addon.id) ? game.selected_dlc_title || addon.title : addon.title}</span>
-                    <small aria-live="polite">{working ? installing ? 'Installing files…' : progress !== null ? `Downloading · ${progress}% · ${formatBytes(transfer.bytes ?? transfer.progress_bytes)} / ${formatBytes(transfer.total_bytes)}` : 'Checking files and preparing download…' : addon.interrupted ? 'Recovery required' : addon.installed ? 'Installed' : addon.present_unmanaged ? 'Existing files · not managed by azdl' : transferStatus === 'failed' ? 'Download failed · retry available' : transferStatus === 'interrupted' ? 'Download interrupted · retry available' : ['cancelled', 'canceled'].includes(transferStatus) ? 'Download cancelled' : transferStatus === 'paused' ? 'Download paused' : 'Not installed'}</small>
+                    <small aria-live="polite">{working ? installing ? 'Installing files…' : progress !== null ? `Downloading · ${progress}% · ${formatBytes(transfer.bytes ?? transfer.progress_bytes)} / ${formatBytes(transfer.total_bytes)}` : 'Checking files and preparing download…' : addon.interrupted ? 'Recovery required' : addon.installed ? 'Installed' : addon.present_unmanaged ? 'Existing files · not managed by azdl' : transferStatus === 'failed' ? 'Download failed · retry available' : transferStatus === 'interrupted' ? 'Download interrupted · retry available' : ['cancelled', 'canceled'].includes(transferStatus) ? 'Download cancelled' : 'Not installed'}</small>
                     {#if working && progress !== null}<LinearProgress percent={progress} aria-label={`Downloading ${addon.title}`} aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100} />{/if}
                     {#if working && progress === null}<LinearProgressEstimate aria-label={`Preparing ${addon.title}`} />{/if}
                     {#if !addon.installed && !addon.interrupted && addon.reason}
@@ -1219,8 +1260,6 @@
                   </span>
                   {#if working && transfer && !installing}
                     <button class="md3-btn text" disabled={!!dlcPending} onclick={() => cancelDlc(transfer)}>Cancel</button>
-                  {:else if transferStatus === 'paused'}
-                    <button class="md3-btn tonal" disabled={isRunning || hasInterruptedDlc || otherDlcWorking || !!dlcPending || !addon.content_available} onclick={() => installDlc(addon, transfer.id)}>Resume</button>
                   {:else if addon.interrupted}
                     <button class="md3-btn danger" disabled={isRunning || otherDlcWorking || !!dlcPending || working} onclick={() => dlcToRecover = addon}>Recover</button>
                   {:else if addon.installed}
@@ -1257,9 +1296,7 @@
               <div class="tool-card" class:irrelevant={!isFixRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
-                    </svg>
+                    <Icon icon={iconGroups} class="tool-header-icon" />
                     <h4>Online-Fix / SteamFix Overlay</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle Online-Fix or SteamFix overlay">
@@ -1274,16 +1311,13 @@
                   Toggle multiplayer fix DLLs and FakeAppId via reversible <code>.arachnel-off</code> renames.
                 </p>
                 {#if controlsSnapshot?.overlay?.mixed}<span class="tool-pill warning">Partially enabled</span>{/if}
-
               </div>
 
               <!-- 2. Steamless DRM -->
               <div class="tool-card" class:irrelevant={!isSteamStubRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>
-                    </svg>
+                    <Icon icon={iconLockOpen} class="tool-header-icon" />
                     <h4>Steamless DRM Stripper</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle Steamless DRM unpack">
@@ -1300,16 +1334,13 @@
                 <p class="tool-desc">
                   Strip SteamStub DRM from PE binaries with automated <code>.steamstub.bak</code> backups.
                 </p>
-
               </div>
 
               <!-- 3. DLC License Bypass -->
               <div class="tool-card" class:irrelevant={!isDlcBypassRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
-                    </svg>
+                    <Icon icon={iconExtension} class="tool-header-icon" />
                     <h4>DLC License Bypass</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle DLC license bypass">
@@ -1326,16 +1357,13 @@
                 <p class="tool-desc">
                   Bypasses Steamworks <code>BIsDlcInstalled</code> entitlement checks in <code>steam_api64.dll</code> and GodotSteam.
                 </p>
-
               </div>
 
               <!-- 4. Goldberg Steam Emulator Hook -->
               <div class="tool-card" class:irrelevant={!isGoldbergRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/>
-                    </svg>
+                    <Icon icon={iconMemory} class="tool-header-icon" />
                     <h4>Goldberg Emulator Settings</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle Goldberg emulator settings">
@@ -1350,18 +1378,15 @@
                   </label>
                 </div>
                 <p class="tool-desc">
-                  Auto-provisions <code>steam_settings/DLC.txt</code> and offline AppID entitlements for games using Goldberg emulator.
+                  Auto-provisions <code>steam_settings/DLC.txt</code> and offline AppID entitlements for games using the Goldberg emulator.
                 </p>
-
               </div>
 
               <!-- 5. EA Activation Patch -->
               <div class="tool-card" class:irrelevant={!isEaRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H7c0-2.76 2.24-5 5-5s5 2.24 5 5c0 1.04-.42 1.99-1.07 2.75z"/>
-                    </svg>
+                    <Icon icon={iconKey} class="tool-header-icon" />
                     <h4>EA Activation Patch</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle EA activation patch">
@@ -1378,16 +1403,13 @@
                 <p class="tool-desc">
                   Bypasses EA Desktop / Origin activation checks and restores original entitlement binaries.
                 </p>
-
               </div>
 
               <!-- 6. Standalone Game Patch -->
               <div class="tool-card" class:irrelevant={!isPatchRelevant}>
                 <div class="tool-header">
                   <div class="tool-header-left">
-                    <svg class="tool-header-icon" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14l-5-5 1.41-1.41L12 14.17l7.59-7.59L21 8l-9 9z"/>
-                    </svg>
+                    <Icon icon={iconBuild} class="tool-header-icon" />
                     <h4>Standalone Game Patch</h4>
                   </div>
                   <label class="switch-container" aria-label="Toggle standalone game patch">
@@ -1401,40 +1423,8 @@
                 <p class="tool-desc">
                   Toggle standalone game patch files and mod payloads staged in this game directory.
                 </p>
-
               </div>
-
-
             </div>
-          </section>
-
-          <!-- Merged Environment Diagnostics section -->
-          <section id="section-diagnostics" class="steam-section-card" style="margin-top: 16px;">
-            <div class="diag-header-row">
-              <h3 class="section-heading">Environment Diagnostics & Readiness</h3>
-              <button class="md3-btn tonal small" onclick={refreshDiagnostics} disabled={isRunning || loadingDiag}>
-                {loadingDiag ? 'Scanning...' : 'Re-run Checks'}
-              </button>
-            </div>
-
-            {#if loadingDiag}
-              <p class="diag-loading">Checking runner binaries, permissions, and prefix...</p>
-            {:else if diagReport}
-              <div class="diag-checks-list">
-                {#if !diagReport.checks || diagReport.checks.length === 0}
-                  <div class="diag-check check-success">
-                    <span>✔ All system and runner checks passed. System ready for launch.</span>
-                  </div>
-                {:else}
-                  {#each diagReport.checks as check}
-                    <div class="diag-check check-{check.severity}">
-                      <span class="diag-severity-tag">{check.severity}</span>
-                      <span class="diag-message">{check.message}</span>
-                    </div>
-                  {/each}
-                {/if}
-              </div>
-            {/if}
           </section>
         {/if}
 
@@ -1448,11 +1438,14 @@
               <div class="form-row">
                 <label for="runner-select" class="form-label">Compatibility Runner:</label>
                 <div class="row-input-group">
-                  <select id="runner-select" class="md3-select" bind:value={selectedRunner}>
-                    {#each runners as r}
-                      <option value={r.id}>{r.name}</option>
-                    {/each}
-                  </select>
+                  <span class="select-field grow">
+                    <select id="runner-select" class="md3-select" bind:value={selectedRunner}>
+                      {#each runners as r}
+                        <option value={r.id}>{r.name}</option>
+                      {/each}
+                    </select>
+                    <Icon icon={iconArrowDropDown} size={20} class="select-chevron" />
+                  </span>
                   <button class="md3-btn tonal small" onclick={handleSetRunner}>Save Runner</button>
                 </div>
               </div>
@@ -1464,7 +1457,7 @@
                   <input
                     id="exe-input"
                     type="text"
-                    class="md3-input"
+                    class="md3-input grow"
                     bind:value={selectedExe}
                     placeholder="Relative or absolute path to .exe"
                   />
@@ -1498,7 +1491,7 @@
                   <input
                     id="args-input"
                     type="text"
-                    class="md3-input"
+                    class="md3-input grow"
                     bind:value={argumentsInput}
                     placeholder="-windowed -novid %command%"
                   />
@@ -1510,8 +1503,8 @@
               <div class="form-row">
                 <label for="env-key-input" class="form-label">Environment Overrides:</label>
                 <div class="env-editor-row">
-                  <input id="env-key-input" type="text" class="md3-input" placeholder="Variable (e.g. DXVK_HUD)" bind:value={envKey} />
-                  <input type="text" class="md3-input" placeholder="Value (e.g. fps)" bind:value={envVal} />
+                  <input id="env-key-input" type="text" class="md3-input grow" placeholder="Variable (e.g. DXVK_HUD)" bind:value={envKey} />
+                  <input type="text" class="md3-input grow" placeholder="Value (e.g. fps)" bind:value={envVal} />
                   <button class="md3-btn tonal small" onclick={handleAddEnv}>Add</button>
                 </div>
 
@@ -1522,7 +1515,7 @@
                         <span class="env-k">{k}</span>
                         <span class="env-eq">=</span>
                         <span class="env-v">{v}</span>
-                        <button class="env-remove-btn" onclick={() => handleRemoveEnv(k)}>✕</button>
+                        <button class="env-remove-btn" onclick={() => handleRemoveEnv(k)} aria-label="Remove variable {k}"><Icon icon={iconClose} size={16} /></button>
                       </div>
                     {/each}
                   </div>
@@ -1531,7 +1524,7 @@
             </div>
           </section>
           <SectionCard title="Runtime Dependencies"
-            icon="M4 6h16v12H4zM2 4v16h20V4H2z"
+            icon={iconCropLandscape}
             description="Runtime libraries for the selected launch environment.">
             {#if controlsLoading}
               <p role="status">Reading runtime state…</p>
@@ -1566,6 +1559,35 @@
             {/if}
           </SectionCard>
 
+
+          <section id="section-diagnostics" class="steam-section-card" style="margin-top: 16px;">
+            <div class="diag-header-row">
+              <h3 class="section-heading">Environment Diagnostics & Readiness</h3>
+              <button class="md3-btn tonal small" onclick={refreshDiagnostics} disabled={isRunning || loadingDiag}>
+                {loadingDiag ? 'Scanning...' : 'Re-run Checks'}
+              </button>
+            </div>
+
+            {#if loadingDiag}
+              <p class="diag-loading">Checking runner binaries, permissions, and prefix...</p>
+            {:else if diagReport}
+              <div class="diag-checks-list">
+                {#if !diagReport.checks || diagReport.checks.length === 0}
+                  <div class="diag-check check-success">
+                    <Icon icon={iconCheckCircle} size={18} class="diag-ok-icon" />
+                    <span>All system and runner checks passed. System ready for launch.</span>
+                  </div>
+                {:else}
+                  {#each diagReport.checks as check}
+                    <div class="diag-check check-{check.severity}">
+                      <span class="diag-severity-tag">{check.severity}</span>
+                      <span class="diag-message">{check.message}</span>
+                    </div>
+                  {/each}
+                {/if}
+              </div>
+            {/if}
+          </section>
         {/if}
       </main>
 
@@ -1584,9 +1606,7 @@
             />
           {:else}
             <div class="capsule-placeholder">
-              <svg viewBox="0 0 24 24" width="32" height="32" fill="currentColor" opacity="0.6">
-                <path d="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm4-3c-.83 0-1.5-.67-1.5-1.5S18.67 9 19.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/>
-              </svg>
+              <Icon icon={iconVideogameAsset} size={32} />
               <span>{game.title}</span>
             </div>
           {/if}
@@ -2246,84 +2266,6 @@
   }
 
   /* Tools Grid */
-  .tools-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-    gap: 16px;
-  }
-
-  .tool-card {
-    background: var(--md-sys-color-surface-container);
-    border-radius: var(--md-sys-shape-medium);
-    padding: 16px;
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-    gap: 12px;
-    min-height: 200px;
-    border: 1px solid var(--md-sys-color-outline-variant);
-    transition: background-color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
-  }
-
-  .tool-card:hover:not(.irrelevant) {
-    background: var(--md-sys-color-surface-container-high);
-    border-color: var(--md-sys-color-outline);
-  }
-
-  .tool-card.irrelevant {
-    opacity: 0.65;
-    background: var(--md-sys-color-surface-container-low);
-  }
-
-  .tool-card.irrelevant .tool-header-icon {
-    color: var(--md-sys-color-on-surface-variant);
-  }
-
-  .tool-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .switch-container {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-
-  :global(.switch-container:has(input:disabled)) {
-    cursor: not-allowed;
-    opacity: 0.38;
-    pointer-events: none;
-  }
-
-  .tool-header-left {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .tool-header-icon {
-    width: 20px;
-    height: 20px;
-    color: var(--md-sys-color-primary);
-    flex-shrink: 0;
-  }
-
-  .tool-header h4 {
-    margin: 0;
-    font-size: 14px;
-    font-weight: 700;
-    color: var(--md-sys-color-on-surface);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
   .tool-pill {
     font-size: 11px;
     font-weight: 600;
@@ -2351,16 +2293,6 @@
     color: var(--md-sys-color-on-surface-variant);
   }
 
-  .tool-desc {
-    font-size: 12px;
-    color: var(--md-sys-color-on-surface-variant);
-    line-height: 1.5;
-    margin: 0;
-    flex: 1;
-  }
-
-
-
   /* Config Form */
   .config-form {
     display: flex;
@@ -2384,6 +2316,21 @@
     display: flex;
     gap: 10px;
     align-items: center;
+    width: 100%;
+  }
+
+  .row-input-group > :global(button),
+  .env-editor-row > :global(button) {
+    flex-shrink: 0;
+  }
+
+  .grow {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .select-field.grow {
+    display: flex;
   }
 
   .candidates-selector {
@@ -2421,7 +2368,9 @@
 
   .env-editor-row {
     display: flex;
-    gap: 8px;
+    gap: 10px;
+    align-items: center;
+    width: 100%;
   }
 
   .env-table {
@@ -2659,7 +2608,7 @@
     transition: background 0.15s ease;
   }
 
-  .menu-item svg {
+  .menu-item :global(svg) {
     fill: currentColor;
     flex-shrink: 0;
   }
@@ -2697,7 +2646,7 @@
     transition: background 0.15s ease, color 0.15s ease;
   }
 
-  .icon-btn svg {
+  .icon-btn :global(svg) {
     fill: currentColor;
   }
 
@@ -2735,5 +2684,87 @@
     .steam-content-grid {
       grid-template-columns: 1fr;
     }
+  }
+
+  /* Patches tab */
+  .tools-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+  }
+
+  .tool-card {
+    background: var(--md-sys-color-surface-container);
+    border-radius: var(--md-sys-shape-medium);
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 12px;
+    border: 1px solid var(--md-sys-color-outline-variant);
+    transition: background-color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
+  }
+
+  .tool-card:hover:not(.irrelevant) {
+    background: var(--md-sys-color-surface-container-high);
+    border-color: var(--md-sys-color-outline);
+  }
+
+  .tool-card.irrelevant {
+    opacity: 0.65;
+    background: var(--md-sys-color-surface-container-low);
+  }
+
+  .tool-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .tool-header-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  :global(.tool-header-icon) {
+    width: 20px;
+    height: 20px;
+    color: var(--md-sys-color-primary);
+    flex-shrink: 0;
+  }
+
+  .tool-header h4 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--md-sys-color-on-surface);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .tool-desc {
+    font-size: 12px;
+    color: var(--md-sys-color-on-surface-variant);
+    line-height: 1.5;
+    margin: 0;
+    flex: 1;
+  }
+
+  .switch-container {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  :global(.switch-container:has(input:disabled)) {
+    cursor: not-allowed;
+    opacity: 0.38;
+    pointer-events: none;
   }
 </style>

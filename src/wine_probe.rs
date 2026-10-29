@@ -39,32 +39,6 @@ pub enum GameRunStatus {
     Exited,
 }
 
-/// Checks whether a window title or error dialog text represents a fatal crash.
-pub fn title_looks_like_error(title: &str) -> bool {
-    let t = title.trim();
-    if t.is_empty() {
-        return false;
-    }
-    let lower = t.to_ascii_lowercase();
-    // Non-fatal splashes or SteamFix injectors
-    if lower.contains("injector") || lower.contains("splash") {
-        return false;
-    }
-
-    lower == "error"
-        || lower.contains("fatal error")
-        || lower.contains("error code")
-        || lower.contains("unhandled exception")
-        || lower.contains("access violation")
-        || lower.contains("protection failed")
-        || lower.contains("self-protection")
-        || lower.contains("failed to initialize")
-        || lower.contains("d3d11-compatible gpu is required")
-        || lower.contains("dx11 feature level")
-        || lower.contains("d3d12-compatible")
-        || lower.contains("ошибка")
-}
-
 /// Identifies whether a process cmdline represents a known crash reporter or debugger.
 pub fn detect_crash_reporter(cmdline: &str) -> Option<&'static str> {
     let lower = cmdline.to_ascii_lowercase();
@@ -324,24 +298,6 @@ mod tests {
             detect_crash_reporter("Z:\\games\\test\\game.exe -screen-fullscreen 1"),
             None
         );
-    }
-
-    #[test]
-    fn validates_error_dialog_titles() {
-        assert!(title_looks_like_error("Fatal Error"));
-        assert!(title_looks_like_error(
-            "Fatal Error: DX11 feature level 11.0 is required"
-        ));
-        assert!(title_looks_like_error("Unhandled Exception"));
-        assert!(title_looks_like_error("Error Code: 0x80070057"));
-        assert!(title_looks_like_error("Protection failed to initialize"));
-        assert!(title_looks_like_error("Критическая ошибка"));
-
-        // Harmless splashes / SteamFix injectors must not be flagged
-        assert!(!title_looks_like_error("SteamFix Injector"));
-        assert!(!title_looks_like_error("Game Splash"));
-        assert!(!title_looks_like_error("Super Meat Boy"));
-        assert!(!title_looks_like_error(""));
     }
 
     #[test]
