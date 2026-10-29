@@ -339,7 +339,14 @@ pub fn cleanup_leftovers(data_dir: &Path, specific_id: Option<&str>) -> Result<(
 }
 
 pub fn set_runner(game: &mut Game, value: &str) -> Result<()> {
-    game.runner = match value {
+    game.runner = parse_runner(value)?;
+    Ok(())
+}
+
+/// Parse a runner identifier: `auto`, `native`, `wine`, `proton:auto` or
+/// `proton:/path/to/proton`. Proton paths are canonicalized and must name a file.
+pub fn parse_runner(value: &str) -> Result<Runner> {
+    Ok(match value {
         "auto" => Runner::Auto,
         "native" => Runner::Native,
         "wine" => Runner::Wine,
@@ -357,8 +364,7 @@ pub fn set_runner(game: &mut Game, value: &str) -> Result<()> {
                 "runner must be auto, native, wine, proton:auto, or proton:/path/to/proton".into(),
             );
         }
-    };
-    Ok(())
+    })
 }
 
 /// Select a runnable file inside the game's registered install directory.

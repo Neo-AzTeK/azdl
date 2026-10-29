@@ -132,6 +132,13 @@ pub fn resolve_runner(configured: &Runner, executable: &Path, data_dir: &Path) -
             .is_some_and(|s| s.eq_ignore_ascii_case("exe"));
     match configured {
         Runner::Auto if windows_game => {
+            let preferred = crate::settings::default_runner(data_dir);
+            if preferred != "auto" {
+                let runner = crate::parse_runner(&preferred).map_err(|error| {
+                    format!("default runner {preferred} is unavailable: {error}")
+                })?;
+                return resolve_runner(&runner, executable, data_dir);
+            }
             let client_available = env::var_os("STEAM_COMPAT_CLIENT_INSTALL_PATH")
                 .is_some_and(|path| PathBuf::from(path).is_dir())
                 || steam_root().is_ok_and(|path| path.is_dir());
@@ -277,6 +284,31 @@ mod tests {
                     .iter()
                     .any(|entry| entry.name == "GE-Proton11-5-aarch64")
             );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn auto_windows_game_uses_configured_default_runner() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-default-runner-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("settings.json"), br#"{"default_runner":"wine"}"#).unwrap();
+        let resolved = resolve_runner(&Runner::Auto, Path::new("game.exe"), &root).unwrap();
+        if cfg!(target_os = "linux") {
+            assert_eq!(resolved, Runner::Wine);
+        }
+        let native = resolve_runner(&Runner::Auto, Path::new("game"), &root).unwrap();
+        assert_eq!(native, Runner::Native);
+        fs::write(root.join("settings.json"), br#"{"default_runner":"bogus"}"#).unwrap();
+        if cfg!(target_os = "linux") {
+            assert!(resolve_runner(&Runner::Auto, Path::new("game.exe"), &root).is_err());
         }
         fs::remove_dir_all(root).unwrap();
     }

@@ -22,6 +22,9 @@ pub struct LauncherSettings {
     pub seed_color: String,
     #[serde(default = "default_theme_mode")]
     pub theme_mode: String,
+    /// Runner identifier (see [`crate::parse_runner`]) used by Windows games left on `auto`.
+    #[serde(default = "default_runner_id")]
+    pub default_runner: String,
 }
 
 fn default_seed_color() -> String {
@@ -30,6 +33,19 @@ fn default_seed_color() -> String {
 
 fn default_theme_mode() -> String {
     "dark".into()
+}
+
+fn default_runner_id() -> String {
+    "auto".into()
+}
+
+/// Reads the configured default runner without running migrations; falls back to `auto`.
+pub fn default_runner(data_dir: &Path) -> String {
+    fs::read(data_dir.join("settings.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<LauncherSettings>(&bytes).ok())
+        .map(|settings| settings.default_runner)
+        .unwrap_or_else(default_runner_id)
 }
 
 impl LauncherSettings {
@@ -44,6 +60,7 @@ impl LauncherSettings {
             }],
             seed_color: "#10B981".into(),
             theme_mode: "dark".into(),
+            default_runner: default_runner_id(),
         }
     }
 

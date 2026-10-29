@@ -574,7 +574,7 @@ pub fn handle_get_runners(state: &AppState) -> Result<Vec<RunnerEntry>, String> 
     let mut list = vec![
         RunnerEntry {
             id: "auto".into(),
-            name: "Auto (Resolve based on OS/Game)".into(),
+            name: "Auto (Settings default)".into(),
             runner_type: "auto".into(),
             path: None,
             source: None,
@@ -1789,6 +1789,7 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
             }))
         }
         Action::SettingsUpdate { settings } => {
+            azdl::parse_runner(&settings.default_runner).map_err(|e| e.to_string())?;
             azdl::settings::save_settings(data_dir, &settings).map_err(|e| e.to_string())?;
             Ok(json!({ "success": true, "settings": settings }))
         }

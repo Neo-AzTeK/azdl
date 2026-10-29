@@ -416,6 +416,7 @@
           bind:seedColor
           bind:themeMode
           bind:activeCategory={settingsCategory}
+          {runners}
           dataDir={appState.data_dir}
           platform={appState.platform}
           settings={appState.settings}
@@ -424,6 +425,7 @@
           searchQuery={tabSearches.settings}
           onThemeChange={updateTheme}
           onRefresh={refreshState}
+          onRefreshRunners={refreshRunners}
           onShowToast={showToast}
         />
         {:catch}

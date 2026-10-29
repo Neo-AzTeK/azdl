@@ -37,6 +37,7 @@
     seedColor = $bindable('#10B981'),
     themeMode = $bindable('dark'), // 'system' | 'dark' | 'light' | 'amoled'
     activeCategory = $bindable('storage'), // 'storage' | 'launch' | 'appearance' | 'about'
+    runners = [],
     dataDir = '',
     platform = 'linux',
     settings = null,
@@ -45,6 +46,7 @@
     searchQuery = '',
     onThemeChange,
     onRefresh,
+    onRefreshRunners,
     onShowToast,
   } = $props();
 
@@ -53,6 +55,7 @@
     storage_drives: [],
     seed_color: seedColor,
     theme_mode: themeMode,
+    default_runner: 'auto',
   });
 
   $effect(() => {
@@ -104,6 +107,9 @@
 
   // Launch UI state
   let isDownloadingProton = $state(false);
+  let savingDefaultRunner = $state(false);
+  let windowsRunners = $derived(runners.filter((r) => r.runner_type !== 'native'));
+  let confirmedDefaultRunner = $derived(settings?.default_runner || 'auto');
 
   // Appearance UI state
   let customHexInput = $state(seedColor);
@@ -223,6 +229,20 @@
   }
 
   // --- Launch Actions ---
+  async function handleSetDefaultRunner(value) {
+    if (savingDefaultRunner || value === confirmedDefaultRunner) return;
+    savingDefaultRunner = true;
+    try {
+      await updateSettings({ ...localSettings, default_runner: value });
+      if (onRefresh) await onRefresh(false);
+      notify('Default runner updated', 'success');
+    } catch (e) {
+      notify(`Failed to set default runner: ${e}`, 'error');
+    } finally {
+      savingDefaultRunner = false;
+    }
+  }
+
   async function handleDownloadProton() {
     isDownloadingProton = true;
     notify('Downloading latest Proton-GE release...', 'info');
@@ -230,6 +250,7 @@
       const res = await downloadProtonGE();
       notify(`Proton-GE installed: ${res?.runner || 'Done'}`, 'info');
       if (onRefresh) await onRefresh();
+      if (onRefreshRunners) await onRefreshRunners();
     } catch (e) {
       notify(`Failed to download Proton-GE: ${e}`, 'error');
     } finally {
@@ -442,8 +463,36 @@
     {:else if activeCategory === 'launch' && platform === 'linux'}
       <div class="panel-header">
         <h2>Compatibility Runners</h2>
-        <span class="subtext">Windows games run through Proton or Wine, chosen per game under Launch & Runner.</span>
+        <span class="subtext">Windows games run through Proton or Wine. Games set to Auto use the default below; override it per game under Launch & Runner.</span>
       </div>
+
+      <SectionCard
+        title="Default Runner"
+        icon={iconVideogameAsset}
+        description="Runner used by Windows games whose runner is set to Auto:"
+      >
+        <span class="select-field runner-select">
+          <select
+            class="md3-select"
+            aria-label="Default runner"
+            value={confirmedDefaultRunner}
+            disabled={savingDefaultRunner}
+            onchange={(e) => {
+              const value = e.currentTarget.value;
+              e.currentTarget.value = confirmedDefaultRunner;
+              handleSetDefaultRunner(value);
+            }}
+          >
+            {#each windowsRunners as r (r.id)}
+              <option value={r.id}>{r.id === 'auto' ? 'Auto (Proton when Steam is installed, otherwise Wine)' : r.name}</option>
+            {/each}
+            {#if !windowsRunners.some((r) => r.id === confirmedDefaultRunner)}
+              <option value={confirmedDefaultRunner}>{confirmedDefaultRunner} (unavailable)</option>
+            {/if}
+          </select>
+          <Icon icon={iconArrowDropDown} size={20} class="select-chevron" />
+        </span>
+      </SectionCard>
 
       <SectionCard
         title="Proton-GE"
@@ -1142,6 +1191,11 @@
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
+  }
+
+  .runner-select {
+    display: flex;
+    width: 100%;
   }
 
   .small-select {

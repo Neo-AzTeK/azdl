@@ -1259,11 +1259,14 @@
               <div class="form-row">
                 <label for="runner-select" class="form-label">Compatibility Runner:</label>
                 <div class="row-input-group">
-                  <select id="runner-select" class="md3-select" bind:value={selectedRunner}>
-                    {#each runners as r}
-                      <option value={r.id}>{r.name}</option>
-                    {/each}
-                  </select>
+                  <span class="select-field grow">
+                    <select id="runner-select" class="md3-select" bind:value={selectedRunner}>
+                      {#each runners as r}
+                        <option value={r.id}>{r.name}</option>
+                      {/each}
+                    </select>
+                    <Icon icon={iconArrowDropDown} size={20} class="select-chevron" />
+                  </span>
                   <button class="md3-btn tonal small" onclick={handleSetRunner}>Save Runner</button>
                 </div>
               </div>
@@ -1275,7 +1278,7 @@
                   <input
                     id="exe-input"
                     type="text"
-                    class="md3-input"
+                    class="md3-input grow"
                     bind:value={selectedExe}
                     placeholder="Relative or absolute path to .exe"
                   />
@@ -1309,7 +1312,7 @@
                   <input
                     id="args-input"
                     type="text"
-                    class="md3-input"
+                    class="md3-input grow"
                     bind:value={argumentsInput}
                     placeholder="-windowed -novid %command%"
                   />
@@ -1321,8 +1324,8 @@
               <div class="form-row">
                 <label for="env-key-input" class="form-label">Environment Overrides:</label>
                 <div class="env-editor-row">
-                  <input id="env-key-input" type="text" class="md3-input" placeholder="Variable (e.g. DXVK_HUD)" bind:value={envKey} />
-                  <input type="text" class="md3-input" placeholder="Value (e.g. fps)" bind:value={envVal} />
+                  <input id="env-key-input" type="text" class="md3-input grow" placeholder="Variable (e.g. DXVK_HUD)" bind:value={envKey} />
+                  <input type="text" class="md3-input grow" placeholder="Value (e.g. fps)" bind:value={envVal} />
                   <button class="md3-btn tonal small" onclick={handleAddEnv}>Add</button>
                 </div>
 
@@ -2134,6 +2137,21 @@
     display: flex;
     gap: 10px;
     align-items: center;
+    width: 100%;
+  }
+
+  .row-input-group > :global(button),
+  .env-editor-row > :global(button) {
+    flex-shrink: 0;
+  }
+
+  .grow {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .select-field.grow {
+    display: flex;
   }
 
   .candidates-selector {
@@ -2171,7 +2189,9 @@
 
   .env-editor-row {
     display: flex;
-    gap: 8px;
+    gap: 10px;
+    align-items: center;
+    width: 100%;
   }
 
   .env-table {
