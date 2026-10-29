@@ -14,6 +14,7 @@
   import iconSettings from '@ktibow/iconset-material-symbols/settings';
   import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset';
   import { untrack } from 'svelte';
+  import { TRAILER_HLS_CONFIG, STALLS_BEFORE_STEP_DOWN, lowerTrailerLevel, pickTrailerLevel, trailerKey } from '../trailer.js';
   import { controlActionConfirmed } from '../game_controls.js';
   import ActionSwitch from '../components/ActionSwitch.svelte';
   import { onMount, onDestroy, tick } from 'svelte';
@@ -631,17 +632,27 @@
 
     // 1. Try Hls.js when HLS stream is present and supported
     if (hlsUrl && Hls && typeof Hls.isSupported === 'function' && Hls.isSupported()) {
-      const hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: false,
-      });
+      const hls = new Hls(TRAILER_HLS_CONFIG);
       hlsInstance = hls;
+      let stalls = 0;
       hls.loadSource(hlsUrl);
       hls.attachMedia(videoEl);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      hls.on(Hls.Events.MANIFEST_PARSED, (_event, data) => {
+        // Lock one rendition before any fragment loads; see trailer.js.
+        const level = pickTrailerLevel(data?.levels, videoEl.clientHeight, window.devicePixelRatio);
+        if (level >= 0) hls.currentLevel = level;
         videoEl.play().catch(() => {});
       });
       hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data && !data.fatal && data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+          stalls += 1;
+          const lower = stalls >= STALLS_BEFORE_STEP_DOWN ? lowerTrailerLevel(hls.levels, hls.currentLevel) : -1;
+          if (lower >= 0) {
+            stalls = 0;
+            // nextLevel switches at the next fragment without flushing buffered video.
+            hls.nextLevel = lower;
+          }
+        }
         if (data && data.fatal) {
           console.warn('HLS stream error, falling back to MP4/WebM:', data);
           hls.destroy();
@@ -674,12 +685,20 @@
     }
   }
 
+  // Restart playback only when the trailer source or the <video> element changes;
+  // re-derived media objects with the same URLs must not reload the stream.
+  let loadedTrailer = { key: '', element: null };
+
   $effect(() => {
     const media = currentMedia;
     const videoEl = videoPlayerRef;
-    if (media?.type === 'video' && videoEl) {
+    const key = trailerKey(media);
+    if (key && videoEl) {
+      if (loadedTrailer.key === key && loadedTrailer.element === videoEl) return;
+      loadedTrailer = { key, element: videoEl };
       setupVideoPlayer(videoEl, media);
     } else {
+      loadedTrailer = { key: '', element: null };
       videoGeneration++;
       if (hlsInstance) {
         hlsInstance.destroy();
