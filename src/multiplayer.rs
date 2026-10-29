@@ -154,6 +154,24 @@ fn fix_locations(game: &Game) -> Result<FixLocations> {
     })
 }
 
+/// Steam App ID sources that outrank a fix package's shipped INI value: an
+/// explicit per-game `SteamAppId` override, then the game's known Steam App ID.
+///
+/// Online-Fix and SteamFix DLLs are game-agnostic; the only per-game input is the
+/// App ID they emulate. When one of these authoritative sources exists, a generic
+/// fix payload is adapted to this game — its INI `FakeAppId`, `steam_appid.txt`
+/// and Steam* environment variables are all driven from the same value.
+fn authoritative_app_id(game: &Game) -> Option<String> {
+    if let Some(explicit) = game.environment.get("SteamAppId") {
+        return Some(explicit.clone());
+    }
+    game.steam_app_id.map(|id| id.to_string())
+}
+
+fn is_numeric_app_id(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 fn selected_fake_app_id(locations: &FixLocations) -> String {
     // A root marker can coexist with a nested active overlay. Use the active
     // overlay's INI before falling back to an ancestor's settings.
@@ -362,6 +380,67 @@ fn ensure_winmm_config(directory: &Path, bits: Option<u8>, warnings: &mut Vec<St
     }
 }
 
+/// Adapt an Online-Fix/SteamFix INI to this game by rewriting its `FakeAppId`
+/// entry to `app_id`. Only an existing numeric entry that differs is changed; the
+/// surrounding file (sections, other keys, comments, line endings and key
+/// spelling) is preserved byte for byte. Custom or non-numeric values are kept
+/// and reported, and an INI without the entry is left untouched.
+fn ensure_fake_app_id(directory: &Path, app_id: &str, warnings: &mut Vec<String>) {
+    for ini_name in ["OnlineFix.ini", "SteamFix.ini"] {
+        let Some(path) = active_regular_file(directory, ini_name) else {
+            continue;
+        };
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.len() > 256 * 1024 {
+            warnings.push(format!(
+                "{} is too large to adapt; FakeAppId was not updated",
+                path.display()
+            ));
+            continue;
+        }
+        let Ok(contents) = fs::read_to_string(&path) else {
+            warnings.push(format!("Could not read {}", path.display()));
+            continue;
+        };
+        let mut lines: Vec<String> = Vec::new();
+        let mut changed = false;
+        for raw in contents.split('\n') {
+            let has_cr = raw.ends_with('\r');
+            let line = if has_cr { &raw[..raw.len() - 1] } else { raw };
+            if let Some((key, value)) = line.split_once('=')
+                && key.trim().eq_ignore_ascii_case("FakeAppId")
+            {
+                let current = value.trim();
+                if !is_numeric_app_id(current) {
+                    warnings.push(format!(
+                        "{} has non-numeric FakeAppId {current:?}; it was kept",
+                        path.display()
+                    ));
+                } else if current != app_id {
+                    // Replace only the numeric token, keeping the key spelling and
+                    // the whitespace around the separator and value.
+                    let prefix = &line[..line.len() - value.len()];
+                    let lead = &value[..value.len() - value.trim_start().len()];
+                    let trail = &value[value.trim_end().len()..];
+                    let mut rebuilt = format!("{prefix}{lead}{app_id}{trail}");
+                    if has_cr {
+                        rebuilt.push('\r');
+                    }
+                    lines.push(rebuilt);
+                    changed = true;
+                    continue;
+                }
+            }
+            lines.push(raw.to_string());
+        }
+        if changed && let Err(error) = fs::write(&path, lines.join("\n")) {
+            warnings.push(format!("Could not update {}: {error}", path.display()));
+        }
+    }
+}
+
 /// Prepare files read directly by Steamworks and the SteamFix winmm proxy.
 /// Existing App ID values and custom winmm configurations are preserved and reported.
 pub fn prepare_fix_files(
@@ -391,11 +470,11 @@ fn prepare_fix_files_for_locations(
     if !working.starts_with(&root) {
         return Err("game working directory is outside its install directory".into());
     }
-    let app_id = game
-        .environment
-        .get("SteamAppId")
-        .cloned()
-        .unwrap_or_else(|| selected_fake_app_id(locations));
+    let app_id = authoritative_app_id(game).unwrap_or_else(|| selected_fake_app_id(locations));
+    // With an authoritative App ID we also rewrite the fix INI so a generic
+    // Online-Fix/SteamFix payload emulates this game rather than whatever App ID
+    // the package happened to ship.
+    let adapt_ini = authoritative_app_id(game).is_some();
     let mut directories: BTreeSet<PathBuf> =
         locations.overlay_directories.iter().cloned().collect();
     directories.insert(working);
@@ -424,6 +503,9 @@ fn prepare_fix_files_for_locations(
     } else {
         for directory in &directories {
             ensure_app_id(directory, &app_id, &mut warnings);
+            if adapt_ini {
+                ensure_fake_app_id(directory, &app_id, &mut warnings);
+            }
         }
     }
     let bits = pe_image_bits(&game.executable);
@@ -554,7 +636,9 @@ fn fix_environment_for_locations(
     }
     let mut dlls = BTreeSet::new();
     let mut bundled_overlay = false;
-    let id = selected_fake_app_id(locations);
+    let id = authoritative_app_id(game)
+        .filter(|value| is_numeric_app_id(value))
+        .unwrap_or_else(|| selected_fake_app_id(locations));
     for directory in &locations.directories {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
@@ -977,6 +1061,121 @@ mod tests {
         let status = prepare_fix_launch(game, &Runner::Wine).unwrap();
         assert_eq!(status, Some("Steam Fix marker detected".into()));
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn adapts_generic_online_fix_ini_to_game_steam_app_id() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-fix-adapt-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("game.exe"), b"game").unwrap();
+        fs::write(root.join("OnlineFix64.dll"), b"fix").unwrap();
+        fs::write(root.join("winmm.dll"), b"proxy").unwrap();
+        // A generic payload ships a placeholder App ID and CRLF line endings.
+        fs::write(
+            root.join("OnlineFix.ini"),
+            b"[Settings]\r\nFakeAppId = 480\r\nLogLevel=1\r\n",
+        )
+        .unwrap();
+        let mut library = Library::default();
+        add_game(&mut library, "game", "Game", &root, Path::new("game.exe")).unwrap();
+        library.games.get_mut("game").unwrap().steam_app_id = Some(1234567);
+        let game = &library.games["game"];
+        assert_eq!(detect_fix(game).unwrap(), FixKind::OnlineFix);
+        assert!(
+            prepare_fix_files(game, &Runner::Wine, &root)
+                .unwrap()
+                .is_empty()
+        );
+        // Only the value changes; spacing, other keys and CRLF endings survive.
+        assert_eq!(
+            fs::read_to_string(root.join("OnlineFix.ini")).unwrap(),
+            "[Settings]\r\nFakeAppId = 1234567\r\nLogLevel=1\r\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("steam_appid.txt")).unwrap(),
+            "1234567\n"
+        );
+        let environment = fix_environment(game, &Runner::Wine).unwrap();
+        assert_eq!(environment["SteamAppId"], "1234567");
+        assert_eq!(environment["SteamGameId"], "1234567");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn steam_app_id_override_in_environment_adapts_fix_ini() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-fix-override-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("game.exe"), b"game").unwrap();
+        fs::write(root.join("OnlineFix64.dll"), b"fix").unwrap();
+        fs::write(root.join("OnlineFix.ini"), b"FakeAppId=480\n").unwrap();
+        let mut library = Library::default();
+        add_game(&mut library, "game", "Game", &root, Path::new("game.exe")).unwrap();
+        library
+            .games
+            .get_mut("game")
+            .unwrap()
+            .environment
+            .insert("SteamAppId".into(), "730".into());
+        let game = &library.games["game"];
+        assert!(
+            prepare_fix_files(game, &Runner::Wine, &root)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("OnlineFix.ini")).unwrap(),
+            "FakeAppId=730\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn keeps_fix_ini_app_id_without_an_authoritative_source() {
+        let root = std::env::temp_dir().join(format!(
+            "azdl-fix-keep-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("game.exe"), b"game").unwrap();
+        fs::write(root.join("OnlineFix64.dll"), b"fix").unwrap();
+        fs::write(root.join("OnlineFix.ini"), b"FakeAppId=987654\n").unwrap();
+        let mut library = Library::default();
+        add_game(&mut library, "game", "Game", &root, Path::new("game.exe")).unwrap();
+        let game = &library.games["game"];
+        // No game Steam App ID and no override: the shipped value is the only
+        // source and must be left untouched.
+        assert!(
+            prepare_fix_files(game, &Runner::Wine, &root)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("OnlineFix.ini")).unwrap(),
+            "FakeAppId=987654\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("steam_appid.txt")).unwrap(),
+            "987654\n"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

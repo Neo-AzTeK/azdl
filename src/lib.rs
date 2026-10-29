@@ -522,9 +522,6 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
     let runner = runtime::resolve_runner(&game.runner, executable, data_dir)?;
     let mut effective_game = game.clone();
     effective_game.executable = executable.to_path_buf();
-    // Games installed from Steam already carry a genuine Steamworks runtime, so
-    // the emulator, DRM and entitlement patches only apply to other sources.
-    let core_steam = game.steam_app_id.is_some();
     let mut cmd = match runner {
         Runner::Native => clean_command(executable),
         Runner::Wine => {
@@ -556,21 +553,20 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
         Runner::Steam(_) => unreachable!(),
         Runner::Auto | Runner::ProtonAuto => unreachable!(),
     };
-    if !core_steam
-        && let Ok(Some(msg)) =
-            fixes::ensure_steam_api_dll(&effective_game.install_dir, &effective_game.executable)
+    if let Ok(Some(msg)) =
+        fixes::ensure_steam_api_dll(&effective_game.install_dir, &effective_game.executable)
     {
         eprintln!("{msg}");
     }
     let launcher_settings = settings::load_settings(data_dir)
         .unwrap_or_else(|_| settings::LauncherSettings::default_for(data_dir));
-    if !core_steam && launcher_settings.auto_ea_heal {
+    if launcher_settings.auto_ea_heal {
         let _ = fixes::heal_ea_activation(&effective_game.install_dir);
     }
-    if !core_steam && launcher_settings.auto_goldberg_sync {
+    if launcher_settings.auto_goldberg_sync {
         let _ = goldberg::prepare_goldberg_for_game(&effective_game, data_dir);
     }
-    if !core_steam && launcher_settings.auto_dlc_patch {
+    if launcher_settings.auto_dlc_patch {
         let installed_dlc =
             crate::dlc::list_installed(&effective_game, data_dir).unwrap_or_default();
         let dlc_ids: Vec<u32> = installed_dlc
@@ -600,8 +596,7 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
             eprintln!("Dependency provisioning: {action}");
         }
     }
-    if !core_steam
-        && launcher_settings.auto_steamless_unpack
+    if launcher_settings.auto_steamless_unpack
         && steamless::scan_game_steamstub(&effective_game).stub_present
     {
         match steamless::unpack_game(&effective_game, data_dir) {
@@ -629,7 +624,7 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
     }
     let fix = if let Some(launch) = &launch {
         cmd.current_dir(&launch.working_directory);
-        if core_steam || !launcher_settings.auto_online_fix_overlay {
+        if !launcher_settings.auto_online_fix_overlay {
             multiplayer::LaunchFixPreparation::default()
         } else {
             multiplayer::prepare_game_launch(&effective_game, &runner, &launch.working_directory)?
