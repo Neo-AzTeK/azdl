@@ -4,31 +4,24 @@ use std::env;
 use std::error::Error;
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod archive;
-pub mod catalog;
 pub mod cmd;
 pub mod dependencies;
 pub mod discovery;
 pub mod dlc;
 pub mod doctor;
 pub mod error;
-pub mod fixes;
 pub mod game_controls;
-pub mod goldberg;
 mod http;
 pub mod installscript;
 pub mod jobs;
 pub mod migration;
-pub mod multiplayer;
-pub mod overlay;
-pub mod patch;
 pub mod runtime;
 pub mod settings;
-pub mod setup;
 mod sha256;
 pub mod shortcuts;
 pub mod steam;
@@ -41,8 +34,6 @@ pub mod steam_install;
 pub mod steam_manifest;
 pub mod steam_metadata;
 pub mod steam_shortcuts;
-pub mod steamless;
-pub mod torrent;
 pub mod wine_probe;
 
 pub use archive::normalize_windows_paths;
@@ -256,16 +247,8 @@ pub fn remove_game_with_guard(
 
         let components_count = canon.components().count();
         if !is_root && !is_data_dir && !is_home && components_count >= 2 {
-            let _ = fixes::rollback_dlc_installed(&canon);
-            let _ = goldberg::rollback_goldberg_config(&canon);
             let _ = fs::remove_dir_all(&canon);
-        } else {
-            let _ = fixes::rollback_dlc_installed(&canon);
-            let _ = goldberg::rollback_goldberg_config(&canon);
         }
-    } else {
-        let _ = fixes::rollback_dlc_installed(install_dir);
-        let _ = goldberg::rollback_goldberg_config(install_dir);
     }
 
     // Remove dedicated Wine/Proton prefix if present
@@ -310,8 +293,8 @@ pub fn remove_game_with_guard(
 
 /// Clean up leftover download archives, partial extractions, and temporary files.
 pub fn cleanup_leftovers(data_dir: &Path, specific_id: Option<&str>) -> Result<()> {
-    // 1. Clean downloads / setup-downloads / patch-downloads
-    for folder in ["downloads", "setup-downloads", "patch-downloads"] {
+    // 1. Clean downloads
+    for folder in ["downloads"] {
         let base = data_dir.join(folder);
         if !base.is_dir() {
             continue;
@@ -353,206 +336,6 @@ pub fn cleanup_leftovers(data_dir: &Path, specific_id: Option<&str>) -> Result<(
     }
 
     Ok(())
-}
-
-/// Synchronize the library with actual directories on disk:
-/// 1. Prunes ghost entries whose installation directories no longer exist on disk.
-/// 2. Automatically scans `data_dir/games` and any additional storage roots to discover
-///    and import unrecorded game directories directly into the library.
-pub fn sync_installed_games(
-    library: &mut Library,
-    data_dir: &Path,
-    additional_roots: &[PathBuf],
-) -> Result<bool> {
-    let mut changed = false;
-
-    // 1. Prune ghost entries
-    let initial_count = library.games.len();
-    library.games.retain(|_, game| game.install_dir.exists());
-    if library.games.len() != initial_count {
-        changed = true;
-    }
-
-    // 2. Discover unrecorded game folders
-    let mut search_roots = vec![data_dir.join("games")];
-    search_roots.extend(additional_roots.iter().cloned());
-
-    for root in search_roots {
-        if !root.is_dir() {
-            continue;
-        }
-        let Ok(entries) = fs::read_dir(&root) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let folder_name = entry.file_name().to_string_lossy().to_string();
-            if folder_name.starts_with('.') {
-                continue;
-            }
-
-            let already_tracked = library.games.values().any(|g| {
-                g.install_dir == path
-                    || fs::canonicalize(&g.install_dir)
-                        .ok()
-                        .is_some_and(|c| fs::canonicalize(&path).ok().as_ref() == Some(&c))
-            });
-
-            if !already_tracked {
-                // Generate safe ID
-                let mut safe_id: String = folder_name
-                    .chars()
-                    .map(|c| {
-                        if c.is_ascii_alphanumeric() || c == '_' {
-                            c
-                        } else {
-                            '-'
-                        }
-                    })
-                    .take(60)
-                    .collect();
-                if safe_id.is_empty() {
-                    safe_id = "imported-game".to_string();
-                }
-                let mut candidate_id = safe_id.clone();
-                let mut counter = 1;
-                while library.games.contains_key(&candidate_id) {
-                    candidate_id = format!("{safe_id}-{counter}");
-                    counter += 1;
-                }
-
-                let title = folder_name.replace(['-', '_'], " ");
-                let imported = discovery::import_game(library, &candidate_id, &title, &path);
-                if imported.is_ok() {
-                    changed = true;
-                } else if let Ok(candidates) = discovery::discover_executables(&path, &title)
-                    && let Some(first) = candidates.first()
-                    && add_game(library, &candidate_id, &title, &path, &first.path).is_ok()
-                {
-                    changed = true;
-                }
-            }
-        }
-    }
-
-    if changed {
-        save_library(data_dir, library)?;
-    }
-
-    Ok(changed)
-}
-
-/// Download a single directly runnable file into an azdl managed install and register it.
-pub fn fetch_game(
-    library: &mut Library,
-    data_dir: &Path,
-    id: &str,
-    title: &str,
-    url: &str,
-    filename: &Path,
-) -> Result<()> {
-    fetch_game_in(
-        library,
-        data_dir,
-        &data_dir.join("games"),
-        id,
-        title,
-        url,
-        filename,
-    )
-}
-
-/// Download a runnable file directly into a configured library drive.
-pub fn fetch_game_in(
-    library: &mut Library,
-    data_dir: &Path,
-    games_dir: &Path,
-    id: &str,
-    title: &str,
-    url: &str,
-    filename: &Path,
-) -> Result<()> {
-    validate_id(id)?;
-    if title.trim().is_empty() || library.games.contains_key(id) {
-        return Err("title is empty or game ID already exists".into());
-    }
-    let install_dir = games_dir.join(id);
-    fs::create_dir_all(&install_dir)?;
-    let game = Game {
-        id: id.to_string(),
-        title: title.to_string(),
-        install_dir: fs::canonicalize(&install_dir)?,
-        executable: PathBuf::new(),
-        runner: Runner::Auto,
-        arguments: Vec::new(),
-        environment: BTreeMap::new(),
-        last_played_unix: None,
-        origin: None,
-        steam_app_id: None,
-        launch_options: Vec::new(),
-        selected_launch_option_id: None,
-        cover_url: None,
-        banner_url: None,
-    };
-    let path = jobs::recorded_download(data_dir, &game, url, filename, jobs::JobKind::Game)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&path)?.permissions();
-        permissions.set_mode(permissions.mode() | 0o111);
-        fs::set_permissions(&path, permissions)?;
-    }
-    add_game(library, id, title, &install_dir, &path)?;
-    Ok(())
-}
-
-/// Copy a local runnable file into a managed game directory and register it.
-pub fn install_file(
-    library: &mut Library,
-    data_dir: &Path,
-    id: &str,
-    title: &str,
-    source: &Path,
-) -> Result<PathBuf> {
-    validate_id(id)?;
-    if title.trim().is_empty() || library.games.contains_key(id) {
-        return Err("title is empty or game ID already exists".into());
-    }
-    let source = fs::canonicalize(source)?;
-    if !source.is_file() {
-        return Err("source path is not a file".into());
-    }
-    let filename = source.file_name().ok_or("source file has no name")?;
-    let games = data_dir.join("games");
-    fs::create_dir_all(&games)?;
-    let final_dir = games.join(id);
-    if fs::symlink_metadata(&final_dir).is_ok() {
-        return Err(format!("install directory already exists: {}", final_dir.display()).into());
-    }
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let staging = games.join(format!(".{id}.copy-{}-{nonce}", std::process::id()));
-    fs::create_dir(&staging)?;
-    let result = (|| {
-        let target = staging.join(filename);
-        fs::copy(&source, &target)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(&target)?.permissions();
-            permissions.set_mode(permissions.mode() | 0o111);
-            fs::set_permissions(&target, permissions)?;
-        }
-        fs::rename(&staging, &final_dir)?;
-        add_game(library, id, title, &final_dir, Path::new(filename))?;
-        Ok(final_dir)
-    })();
-    if result.is_err() && staging.exists() {
-        fs::remove_dir_all(&staging)?;
-    }
-    result
 }
 
 pub fn set_runner(game: &mut Game, value: &str) -> Result<()> {
@@ -727,7 +510,6 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
     let runner = runtime::resolve_runner(&game.runner, executable, data_dir)?;
     let mut effective_game = game.clone();
     effective_game.executable = executable.to_path_buf();
-    let core_steam = game.steam_app_id.is_some();
     let mut cmd = match runner {
         Runner::Native => clean_command(executable),
         Runner::Wine => {
@@ -759,59 +541,11 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
         Runner::Steam(_) => unreachable!(),
         Runner::Auto | Runner::ProtonAuto => unreachable!(),
     };
-    if !core_steam
-        && let Ok(Some(msg)) =
-            fixes::ensure_steam_api_dll(&effective_game.install_dir, &effective_game.executable)
-    {
-        eprintln!("{msg}");
-    }
-    let launcher_settings = settings::load_settings(data_dir)
-        .unwrap_or_else(|_| settings::LauncherSettings::default_for(data_dir));
-    if !core_steam && launcher_settings.auto_ea_heal {
-        let _ = fixes::heal_ea_activation(&effective_game.install_dir);
-    }
-    if !core_steam && launcher_settings.auto_goldberg_sync {
-        let _ = goldberg::prepare_goldberg_for_game(&effective_game, data_dir);
-    }
-    // Apply DLC installed patches when the game has entitlements or target DLLs are present
-    if !core_steam && launcher_settings.auto_dlc_patch {
-        let installed_dlc =
-            crate::dlc::list_installed(&effective_game, data_dir).unwrap_or_default();
-        let dlc_ids: Vec<u32> = installed_dlc
-            .iter()
-            .filter_map(|id| id.parse().ok())
-            .collect();
-        if (!dlc_ids.is_empty() || fixes::has_dlc_installed_target(&effective_game.install_dir))
-            && let Ok(true) = fixes::patch_dlc_installed_ids(&effective_game.install_dir, &dlc_ids)
-        {
-            if dlc_ids.is_empty() {
-                eprintln!("Applied generic DLC installed patches for base game");
-            } else {
-                eprintln!(
-                    "Applied DLC installed patches for {} entitlement(s)",
-                    dlc_ids.len()
-                );
-            }
-        }
-    }
-    if launcher_settings.auto_game_patch {
-        let _ = patch::enable_patch(&effective_game, data_dir);
-    }
     if let Ok(installed_deps) =
         dependencies::ensure_game_dependencies(&effective_game, &runner, data_dir)
     {
         for action in installed_deps {
             eprintln!("Dependency provisioning: {action}");
-        }
-    }
-    if !core_steam
-        && launcher_settings.auto_steamless_unpack
-        && steamless::scan_game_steamstub(&effective_game).stub_present
-    {
-        match steamless::unpack_game(&effective_game, data_dir) {
-            Ok(count) if count > 0 => eprintln!("Steamless unpacked {count} executable(s)"),
-            Ok(_) => {}
-            Err(e) => eprintln!("Steamless unpacking failed: {e}"),
         }
     }
     let prefix_dir = match &runner {
@@ -831,30 +565,13 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
     if let Ok(true) = installscript::apply_installscript_for_game(&effective_game, &prefix_dir) {
         eprintln!("Applied Steamworks installscript & registry configuration");
     }
-    if !core_steam && installscript::is_ubisoft_game(&effective_game.install_dir) {
-        cmd.arg("-uplay_steam_mode");
-    }
-    let fix = if let Some(launch) = &launch {
+    if let Some(launch) = &launch {
         cmd.current_dir(&launch.working_directory);
-        if core_steam {
-            multiplayer::LaunchFixPreparation::default()
-        } else {
-            multiplayer::prepare_game_launch(&effective_game, &runner, &launch.working_directory)?
-        }
-    } else {
-        multiplayer::LaunchFixPreparation::default()
-    };
-    for warning in &fix.warnings {
-        eprintln!("Fix preparation: {warning}");
-    }
-    if let Some(notice) = &fix.notice {
-        eprintln!("{notice}");
     }
     cmd.args(launch.as_ref().map_or(game.arguments.as_slice(), |launch| {
         launch.arguments.as_slice()
     }))
     .args(extra_args);
-    cmd.envs(&fix.environment);
     cmd.envs(&game.environment);
     let mut attempts = 0;
     let child = loop {
@@ -873,64 +590,6 @@ pub fn spawn_game(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Re
 
 pub fn launch(game: &mut Game, data_dir: &Path, extra_args: &[String]) -> Result<ExitStatus> {
     Ok(spawn_game(game, data_dir, extra_args)?.wait()?)
-}
-
-pub fn download(game: &Game, url: &str, relative: &Path) -> Result<PathBuf> {
-    if !url.starts_with("https://") {
-        return Err("download URL must use HTTPS".into());
-    }
-    if relative.as_os_str().is_empty()
-        || relative
-            .components()
-            .any(|c| !matches!(c, Component::Normal(_)))
-    {
-        return Err("destination must be a relative path within the game directory".into());
-    }
-    let target = game.install_dir.join(relative);
-    let parent = target.parent().ok_or("invalid destination")?;
-    fs::create_dir_all(parent)?;
-    let canonical_parent = fs::canonicalize(parent)?;
-    if !canonical_parent.starts_with(&game.install_dir) {
-        return Err("destination leaves the game directory".into());
-    }
-    if target.exists() {
-        return Err("destination already exists".into());
-    }
-    let mut part_name = target
-        .file_name()
-        .ok_or("invalid destination filename")?
-        .to_os_string();
-    part_name.push(".part");
-    let part = target.with_file_name(part_name);
-    if fs::symlink_metadata(&part).is_ok_and(|metadata| !metadata.is_file()) {
-        return Err("partial download path is not a regular file".into());
-    }
-    let status = clean_command("curl")
-        .args([
-            "--fail",
-            "--location",
-            "--retry",
-            "3",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--continue-at",
-            "-",
-        ])
-        .arg("--output")
-        .arg(&part)
-        .arg(url)
-        .status()?;
-    if !status.success() {
-        return Err(format!(
-            "download failed ({status}); partial file kept at {}",
-            part.display()
-        )
-        .into());
-    }
-    fs::rename(&part, &target)?;
-    Ok(target)
 }
 
 #[cfg(test)]
@@ -986,15 +645,6 @@ mod tests {
             )
             .is_err()
         );
-        let game = library.games.get("good-id").unwrap();
-        assert!(download(game, "http://example.org/game", Path::new("game.zip")).is_err());
-        assert!(download(game, "https://example.org/game", Path::new("../escape")).is_err());
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(root.join("other.exe"), game_dir.join("unsafe.part"))
-                .unwrap();
-            assert!(download(game, "https://example.org/game", Path::new("unsafe")).is_err());
-        }
         save_library(&root, &library).unwrap();
         assert_eq!(
             load_library(&root)
@@ -1050,32 +700,6 @@ mod tests {
                 .unwrap();
             assert!(set_executable(game, Path::new("link.exe")).is_err());
         }
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn installs_local_file_into_managed_directory_and_launches_it() {
-        let root = scratch();
-        let source = root.join("My Game.sh");
-        fs::write(&source, "#!/bin/sh\nprintf '%s' \"$1\" > result.txt\n").unwrap();
-        let mut library = Library::default();
-        let installed = install_file(&mut library, &root, "local", "My Game", &source).unwrap();
-        assert_eq!(installed, root.join("games/local"));
-        assert!(source.is_file());
-        assert!(installed.join("My Game.sh").is_file());
-        assert!(install_file(&mut library, &root, "local", "My Game", &source).is_err());
-        let game = library.games.get_mut("local").unwrap();
-        game.runner = Runner::Native;
-        assert!(
-            launch(game, &root, &["with spaces".into()])
-                .unwrap()
-                .success()
-        );
-        assert_eq!(
-            fs::read_to_string(installed.join("result.txt")).unwrap(),
-            "with spaces"
-        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1321,11 +945,9 @@ mod tests {
                 pid: Some(std::process::id()),
                 error: None,
                 updated_unix: 0,
-                expected_sha256: None,
                 install: Some(jobs::InstallPlan {
                     game_id: "active-dlc-game".into(),
                     title: "Active DLC Game".into(),
-                    kind: jobs::InstallKind::Archive,
                 }),
                 install_state: Some(jobs::InstallState::Pending),
                 install_error: None,
@@ -1373,79 +995,6 @@ mod tests {
         assert!(!games_staging.exists());
         assert!(!dl.exists());
         assert!(install_dir.exists());
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn test_sync_installed_games_prunes_and_auto_discovers() {
-        let root = scratch();
-        let mut library = Library::default();
-
-        // 1. Ghost entry pointing to non-existent directory
-        let ghost_dir = root.join("games").join("ghost-game");
-        library.games.insert(
-            "ghost-game".to_string(),
-            Game {
-                id: "ghost-game".to_string(),
-                title: "Ghost Game".to_string(),
-                install_dir: ghost_dir,
-                executable: PathBuf::from("game.exe"),
-                runner: Runner::Auto,
-                arguments: vec![],
-                environment: BTreeMap::new(),
-                last_played_unix: None,
-                origin: None,
-                steam_app_id: None,
-                launch_options: vec![],
-                selected_launch_option_id: None,
-                cover_url: None,
-                banner_url: None,
-            },
-        );
-
-        // 2. Untracked physical game directory in root/games
-        let physical_dir = root.join("games").join("discovered-quest");
-        fs::create_dir_all(&physical_dir).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let exe_path = physical_dir.join("quest");
-            fs::write(&exe_path, b"\x7fELFfakebinary").unwrap();
-            let mut perms = fs::metadata(&exe_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&exe_path, perms).unwrap();
-        }
-        #[cfg(windows)]
-        {
-            fs::write(physical_dir.join("quest.exe"), b"MZfakebinary").unwrap();
-        }
-
-        let changed = sync_installed_games(&mut library, &root, &[]).unwrap();
-        assert!(changed);
-
-        // Ghost game must be pruned
-        assert!(!library.games.contains_key("ghost-game"));
-
-        // Discovered quest must be added
-        assert!(
-            library.games.contains_key("discovered-quest")
-                || library
-                    .games
-                    .values()
-                    .any(|g| g.install_dir == physical_dir)
-        );
-
-        // Saved library.json must match
-        let reloaded = load_library(&root).unwrap();
-        assert!(!reloaded.games.contains_key("ghost-game"));
-        assert!(
-            reloaded.games.contains_key("discovered-quest")
-                || reloaded
-                    .games
-                    .values()
-                    .any(|g| g.install_dir == physical_dir)
-        );
 
         fs::remove_dir_all(root).unwrap();
     }

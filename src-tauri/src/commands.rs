@@ -2,9 +2,6 @@ use super::*;
 use azdl::discovery::discover_executables;
 use azdl::doctor::diagnose_game;
 use azdl::jobs::list_jobs;
-use azdl::overlay::{overlay_status, set_overlay_enabled};
-use azdl::patch::{active_patch, disable_patch, enable_patch, rollback_patch};
-use azdl::setup::scan_setup;
 use azdl::{
     Library, Runner, add_game, add_launch_option, load_library, remove_launch_option, save_library,
     select_launch_option, set_executable, set_runner, spawn_game, validate_id,
@@ -127,42 +124,6 @@ fn format_file_size(bytes: u64) -> String {
     }
 }
 
-fn scan_steamstub_cached(state: &AppState, game: &azdl::Game) -> azdl::steamless::SteamStubStatus {
-    if let Ok(cache) = state.steamstub_cache.lock()
-        && let Some((result, instant)) = cache.get(&game.id)
-        && instant.elapsed() < Duration::from_secs(60)
-    {
-        return result.clone();
-    }
-    let res = azdl::steamless::scan_game_steamstub(game);
-    if let Ok(mut cache) = state.steamstub_cache.lock() {
-        cache.insert(game.id.clone(), (res.clone(), Instant::now()));
-    }
-    res
-}
-
-pub(super) fn detect_fix_cached(
-    state: &AppState,
-    game: &azdl::Game,
-) -> Option<azdl::multiplayer::FixKind> {
-    if let Ok(cache) = state.fix_status_cache.lock()
-        && let Some((install_dir, fix, instant)) = cache.get(&game.id)
-        && install_dir == &game.install_dir
-        && instant.elapsed() < FIX_STATUS_CACHE_TTL
-    {
-        return Some(*fix);
-    }
-
-    let fix = azdl::multiplayer::detect_fix(game).ok()?;
-    if let Ok(mut cache) = state.fix_status_cache.lock() {
-        cache.insert(
-            game.id.clone(),
-            (game.install_dir.clone(), fix, Instant::now()),
-        );
-    }
-    Some(fix)
-}
-
 fn parse_steam_id(raw: &str) -> Option<String> {
     let stripped = raw
         .strip_prefix("steam:")
@@ -182,16 +143,13 @@ fn pending_installs(
     active_targets: &[PathBuf],
 ) -> AzdlResult<Vec<Value>> {
     let mut pending = Vec::new();
-    let mut roots = vec![
-        (data_dir.join("games"), "portable"),
-        (data_dir.join("prefixes"), "setup"),
-    ];
+    let mut roots = vec![data_dir.join("games")];
     for drive in azdl::settings::load_settings(data_dir)?.storage_drives {
-        if !roots.iter().any(|(root, _)| root == &drive.path) {
-            roots.push((drive.path, "portable"));
+        if !roots.contains(&drive.path) {
+            roots.push(drive.path);
         }
     }
-    for (root, kind) in roots {
+    for root in roots {
         if !root.is_dir() {
             continue;
         }
@@ -209,15 +167,8 @@ fn pending_installs(
             if !metadata.is_dir() || metadata.file_type().is_symlink() {
                 continue;
             }
-            if kind == "setup"
-                && !fs::symlink_metadata(entry.path().join("drive_c"))
-                    .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
-            {
-                continue;
-            }
             pending.push(json!({
                 "id": id,
-                "kind": kind,
                 "directory": entry.path(),
             }));
         }
@@ -227,7 +178,7 @@ fn pending_installs(
 }
 
 fn progress_jobs(state: &AppState, download_jobs: Vec<azdl::jobs::DownloadJob>) -> Vec<Value> {
-    let mut jobs_list: Vec<Value> = download_jobs
+    download_jobs
         .into_iter()
         .take(100)
         .map(|j| {
@@ -264,7 +215,6 @@ fn progress_jobs(state: &AppState, download_jobs: Vec<azdl::jobs::DownloadJob>) 
                 json!({
                     "id": p.game_id,
                     "title": p.title,
-                    "kind": format!("{:?}", p.kind),
                     "banner_url": banner,
                     "cover_url": cover,
                     "file_size": None::<String>,
@@ -288,66 +238,7 @@ fn progress_jobs(state: &AppState, download_jobs: Vec<azdl::jobs::DownloadJob>) 
                 "install_error": j.install_error,
             })
         })
-        .collect();
-
-    if let Ok(torrents) = azdl::torrent::list_torrent_jobs(&state.data_dir) {
-        for t in torrents {
-            let status_str = match t.status {
-                azdl::jobs::JobStatus::Running => {
-                    if t.install_state.is_some() {
-                        "Installing".to_string()
-                    } else {
-                        "Downloading".to_string()
-                    }
-                }
-                s => format!("{:?}", s),
-            };
-
-            let meta = state.metadata_cache.lock().ok().and_then(|c| {
-                c.get(&t.title.to_lowercase())
-                    .or_else(|| c.get(&t.id.to_lowercase()))
-                    .cloned()
-            });
-            let steam_id = meta
-                .as_ref()
-                .and_then(|m| m.steam_app_id.map(|id| id.to_string()))
-                .or_else(|| parse_steam_id(&t.id));
-            let banner = meta
-                .as_ref()
-                .and_then(|m| m.banner_url.clone())
-                .or_else(|| steam_id.as_ref().map(|id| format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{id}/header.jpg")));
-            let cover = meta
-                .as_ref()
-                .and_then(|m| m.cover_url.clone())
-                .or_else(|| steam_id.as_ref().map(|id| format!("https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/{id}/library_600x900.jpg")));
-
-            let total_bytes = None::<u64>;
-
-            jobs_list.push(json!({
-                "id": t.id,
-                "kind": "Torrent",
-                "status": status_str,
-                "bytes": t.downloaded_bytes(&state.data_dir),
-                "total_bytes": total_bytes,
-                "total": total_bytes,
-                "estimated_bytes": None::<u64>,
-                "target": t.download_dir(&state.data_dir),
-                "error": t.error,
-                "install": Some(json!({
-                    "id": t.id,
-                    "title": t.title,
-                    "kind": "Archive",
-                    "banner_url": banner,
-                    "cover_url": cover,
-                    "file_size": None::<String>,
-                })),
-                "install_state": t.install_state.map(|s| format!("{:?}", s)),
-                "install_error": None::<String>,
-            }));
-        }
-    }
-
-    jobs_list
+        .collect()
 }
 
 pub fn handle_get_state(state: &AppState) -> Result<Value, String> {
@@ -414,17 +305,6 @@ pub fn handle_get_state(state: &AppState) -> Result<Value, String> {
         .games
         .values()
         .map(|game| {
-            let patch = active_patch(&state.data_dir, &game.id).ok().flatten();
-            let custom_patch = patch.filter(|p| {
-                !p.entries
-                    .iter()
-                    .any(|e| e.path == Path::new(".azdl-bundled-fix"))
-            });
-            let fix = detect_fix_cached(state, game).map(|kind| match kind {
-                azdl::multiplayer::FixKind::OnlineFix => "Online-Fix",
-                azdl::multiplayer::FixKind::SteamFix => "SteamFix",
-                azdl::multiplayer::FixKind::None => "None",
-            });
             let is_running = running.contains_key(&game.id);
 
             let active_op = if is_running {
@@ -612,17 +492,8 @@ pub fn handle_get_state(state: &AppState) -> Result<Value, String> {
                 "genres": genres,
                 "addons_count": addons_count,
                 "last_played": game.last_played_unix,
-                "patch": custom_patch.map(|p| if p.enabled { "enabled" } else { "disabled" }),
                 "cover_url": cover_url,
                 "banner_url": banner_url,
-                "fix": fix,
-                "steamstub": scan_steamstub_cached(state, game),
-                "ea_heal_applied": azdl::fixes::has_ea_backup(&game.install_dir),
-                "ea_heal_available": azdl::fixes::has_ea_target(&game.install_dir),
-                "dlc_patch_applied": azdl::fixes::has_dlc_installed_patch(&game.install_dir),
-                "dlc_patch_available": azdl::fixes::has_dlc_installed_target(&game.install_dir),
-                "goldberg_compatible": azdl::goldberg::is_goldberg_compatible(&game.install_dir),
-                "goldberg_has_settings": azdl::goldberg::has_goldberg_settings(&game.install_dir),
                 "dependencies": dependencies,
                 "is_running": is_running,
                 "active_operation": active_op,
@@ -944,45 +815,18 @@ pub fn handle_discover_exes(state: &AppState, id: String) -> Result<Value, Strin
         return Ok(json!(list));
     }
 
-    let portable_dir = state.data_dir.join("games").join(&id);
-    if portable_dir.is_dir() {
-        let candidates = discover_executables(&portable_dir, &id).map_err(|e| e.to_string())?;
-        let list: Vec<Value> = candidates
-            .into_iter()
-            .map(|c| {
-                json!({
-                    "path": c.path,
-                    "relative_path": c.relative_path,
-                    "score": c.score,
-                })
-            })
-            .collect();
-        return Ok(json!(list));
+    // Installed files waiting for an executable choice live under a storage drive root.
+    validate_id(&id).map_err(|e| e.to_string())?;
+    let mut roots = vec![state.data_dir.join("games")];
+    if let Ok(settings) = azdl::settings::load_settings(&state.data_dir) {
+        roots.extend(settings.storage_drives.into_iter().map(|drive| drive.path));
     }
-
-    let prefix_dir = state.data_dir.join("prefixes").join(&id);
-    if prefix_dir.is_dir() {
-        let candidates = scan_setup(&state.data_dir, &id, &id).map_err(|e| e.to_string())?;
-        let list: Vec<Value> = candidates
-            .into_iter()
-            .map(|c| {
-                let rel = c
-                    .executable
-                    .strip_prefix(&c.install_dir)
-                    .unwrap_or(&c.executable);
-                json!({
-                    "path": c.executable,
-                    "relative_path": rel,
-                    "score": c.score,
-                })
-            })
-            .collect();
-        return Ok(json!(list));
-    }
-
-    let direct_path = Path::new(&id);
-    if direct_path.is_dir() {
-        let candidates = discover_executables(direct_path, &id).map_err(|e| e.to_string())?;
+    if let Some(pending_dir) = roots
+        .into_iter()
+        .map(|root| root.join(&id))
+        .find(|dir| dir.is_dir())
+    {
+        let candidates = discover_executables(&pending_dir, &id).map_err(|e| e.to_string())?;
         let list: Vec<Value> = candidates
             .into_iter()
             .map(|c| {
@@ -1003,38 +847,6 @@ pub fn handle_discover_exes(state: &AppState, id: String) -> Result<Value, Strin
 pub async fn discover_exes(state: State<'_, AppState>, id: String) -> Result<Value, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || handle_discover_exes(&state, id))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-pub fn handle_scan_game_setup(
-    state: &AppState,
-    id: String,
-    title: Option<String>,
-) -> Result<Value, String> {
-    let title_str = title.unwrap_or_else(|| id.clone());
-    let candidates = scan_setup(&state.data_dir, &id, &title_str).map_err(|e| e.to_string())?;
-    let list: Vec<Value> = candidates
-        .into_iter()
-        .map(|cand| {
-            json!({
-                "install_dir": cand.install_dir,
-                "executable": cand.executable,
-                "score": cand.score,
-            })
-        })
-        .collect();
-    Ok(json!(list))
-}
-
-#[tauri::command]
-pub async fn scan_game_setup(
-    state: State<'_, AppState>,
-    id: String,
-    title: Option<String>,
-) -> Result<Value, String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || handle_scan_game_setup(&state, id, title))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -1412,19 +1224,9 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
                 });
             }
             state.dir_size_cache.invalidate_all();
-            if let Ok(mut cache) = state.steamstub_cache.lock() {
-                cache.clear();
-            }
-            if let Ok(mut cache) = state.fix_status_cache.lock() {
-                cache.remove(&id);
-            }
             Ok(json!({ "success": true, "removed": id }))
         }
-        Action::DlcInstall {
-            id,
-            dlc_id,
-            resume_job_id,
-        } => {
+        Action::DlcInstall { id, dlc_id } => {
             let content_lock =
                 azdl::dlc::lock_game(data_dir, &id).map_err(|error| error.to_string())?;
             let library = load_library_snapshot(data_dir, &state.library_cache)?;
@@ -1440,19 +1242,9 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
             {
                 return Err("Stop the game before installing DLC".into());
             }
-            let addon = azdl::dlc::available_for_game(game, data_dir)?
-                .into_iter()
-                .find(|addon| addon.id == dlc_id && addon.content_available);
-            let steam_dlc_id = dlc_id.parse::<u32>().ok();
-            if addon.is_none() && steam_dlc_id.is_none() {
-                return Err("DLC is not offered by this game's content source".into());
-            }
-            if let Some(job_id) = &resume_job_id {
-                if addon.is_none() {
-                    return Err("Only an offered archive DLC can resume a paused transfer".into());
-                }
-                azdl::dlc::validate_catalog_dlc_resume(data_dir, job_id, &id, &dlc_id)?;
-            }
+            let steam_dlc_id = dlc_id
+                .parse::<u32>()
+                .map_err(|_| "DLC must be identified by its Steam App ID")?;
             let task_id = format!("dlc-{}-{dlc_id}", game.id);
             {
                 let mut tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
@@ -1488,28 +1280,11 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
             std::thread::Builder::new()
                 .name(thread_name)
                 .spawn(move || {
-                    let result = if let Some(job_id) = resume_job_id {
-                        azdl::dlc::validate_catalog_dlc_resume(
-                            &state_clone.data_dir,
-                            &job_id,
-                            &game.id,
-                            &dlc_id,
-                        )
-                        .and_then(|()| {
-                            azdl::dlc::resume_catalog_dlc_job(&state_clone.data_dir, &job_id)
-                        })
-                        .and_then(|result| {
-                            result.ok_or_else(|| "Paused DLC transfer is unavailable".into())
-                        })
-                    } else if let Some(addon) = addon {
-                        azdl::dlc::install_catalog_dlc(&game, &state_clone.data_dir, &addon)
-                    } else {
-                        azdl::steam_depot::install_steam_dlc(
-                            &game,
-                            &state_clone.data_dir,
-                            steam_dlc_id.unwrap_or_default(),
-                        )
-                    };
+                    let result = azdl::steam_depot::install_steam_dlc(
+                        &game,
+                        &state_clone.data_dir,
+                        steam_dlc_id,
+                    );
                     finish_dlc_install_task(&state_clone, &task_id_clone, result);
                 })
                 .map_err(|error| {
@@ -1581,69 +1356,33 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
 
             Ok(json!({ "success": true, "path": target_path.display().to_string() }))
         }
-        Action::GameImport {
-            id,
-            title,
-            install_dir,
-            executable,
-        } => {
-            let canonical_install = fs::canonicalize(&install_dir).map_err(|e| e.to_string())?;
-            let settings = azdl::settings::load_settings(data_dir)
-                .unwrap_or_else(|_| azdl::settings::LauncherSettings::default_for(data_dir));
-            let is_inside_storage = settings.storage_drives.iter().any(|drive| {
-                if let Ok(canon_drive) = fs::canonicalize(&drive.path) {
-                    canonical_install.starts_with(canon_drive)
-                } else {
-                    false
-                }
-            }) || canonical_install.starts_with(data_dir);
-            if !is_inside_storage {
-                return Err(
-                    "External game directories cannot be added. Games must reside within launcher storage locations."
-                        .into(),
-                );
-            }
-            let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
-            if let Some(exe) = executable.filter(|e| !e.is_empty()) {
-                add_game(
-                    &mut library,
-                    &id,
-                    &title,
-                    &canonical_install,
-                    Path::new(&exe),
-                )
-                .map_err(|e| e.to_string())?;
-            } else {
-                azdl::discovery::import_game(&mut library, &id, &title, &canonical_install)
-                    .map_err(|e| e.to_string())?;
-            }
-            save_library(data_dir, &library).map_err(|e| e.to_string())?;
-            Ok(json!({ "success": true, "imported": id }))
-        }
         Action::PendingAdd {
             id,
             title,
             install_dir,
             executable,
-            install_kind,
         } => {
             let game_title = title.unwrap_or_else(|| id.clone());
             let mut library = load_library(data_dir).map_err(|e| e.to_string())?;
-            let install_path = Path::new(&install_dir);
-            let exe_path = Path::new(&executable);
-            let is_setup = install_kind.as_deref() == Some("setup");
-            let final_install_dir =
-                if is_setup && exe_path.is_absolute() && !exe_path.starts_with(install_path) {
-                    exe_path.parent().unwrap_or(install_path)
-                } else {
-                    install_path
-                };
-            add_game(&mut library, &id, &game_title, final_install_dir, exe_path)
-                .map_err(|e| e.to_string())?;
-            if is_setup && let Some(game) = library.games.get_mut(&id) {
-                game.runner = Runner::Wine;
+            add_game(
+                &mut library,
+                &id,
+                &game_title,
+                Path::new(&install_dir),
+                Path::new(&executable),
+            )
+            .map_err(|e| e.to_string())?;
+            if let Some(game) = library.games.get_mut(&id) {
+                azdl::steam_install::attach_pending_origin(data_dir, game)
+                    .map_err(|e| e.to_string())?;
             }
             save_library(data_dir, &library).map_err(|e| e.to_string())?;
+            if let Err(error) = azdl::steam_install::clear_pending_origin(data_dir, &id) {
+                eprintln!("Game saved; pending install cleanup failed: {error}");
+            }
+            if let Err(error) = azdl::jobs::mark_install_registered(data_dir, &id) {
+                eprintln!("Game added, but install job status could not be updated: {error}");
+            }
             Ok(json!({ "success": true, "added": id }))
         }
         Action::PendingRemove { id, install_dir } => {
@@ -1670,10 +1409,7 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
             if games_dir.is_dir() {
                 let _ = fs::remove_dir_all(&games_dir);
             }
-            let prefix_dir = data_dir.join("prefixes").join(&id);
-            if prefix_dir.is_dir() {
-                let _ = fs::remove_dir_all(&prefix_dir);
-            }
+            let _ = azdl::steam_install::clear_pending_origin(data_dir, &id);
             let _ = azdl::cleanup_leftovers(data_dir, Some(&id));
             Ok(json!({ "success": true, "removed": id }))
         }
@@ -1726,136 +1462,6 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
             azdl::steam_shortcuts::remove_shortcut(game, None).map_err(|e| e.to_string())?;
             Ok(json!({ "success": true }))
         }
-        Action::OverlayToggle { id } => {
-            let library = load_library_snapshot(data_dir, &state.library_cache)?;
-            let game = library
-                .games
-                .get(&id)
-                .ok_or_else(|| format!("Game {id} not found"))?;
-            let status = overlay_status(game).map_err(|e| e.to_string())?;
-            set_overlay_enabled(game, !status.enabled).map_err(|e| e.to_string())?;
-            if let Ok(mut cache) = state.fix_status_cache.lock() {
-                cache.remove(&id);
-            }
-            Ok(json!({ "success": true, "enabled": !status.enabled }))
-        }
-        Action::SteamstubUnpack { id } => {
-            let library = load_library_snapshot(data_dir, &state.library_cache)?;
-            let game = library
-                .games
-                .get(&id)
-                .ok_or_else(|| format!("Game {id} not found"))?;
-            let count = azdl::steamless::unpack_game(game, data_dir).map_err(|e| e.to_string())?;
-            let new_status = azdl::steamless::scan_game_steamstub(game);
-            if let Ok(mut cache) = state.steamstub_cache.lock() {
-                cache.insert(id.clone(), (new_status.clone(), Instant::now()));
-            }
-            Ok(json!({
-                "success": true,
-                "unpacked_count": count,
-                "steamstub": new_status,
-            }))
-        }
-        Action::SteamstubRollback { id } => {
-            let library = load_library_snapshot(data_dir, &state.library_cache)?;
-            let game = library
-                .games
-                .get(&id)
-                .ok_or_else(|| format!("Game {id} not found"))?;
-            let count = azdl::steamless::rollback_game(game).map_err(|e| e.to_string())?;
-            let new_status = azdl::steamless::scan_game_steamstub(game);
-            if let Ok(mut cache) = state.steamstub_cache.lock() {
-                cache.insert(id.clone(), (new_status.clone(), Instant::now()));
-            }
-            Ok(json!({
-                "success": true,
-                "restored_count": count,
-                "steamstub": new_status,
-            }))
-        }
-        Action::EaHeal { id } => {
-            let library = load_library_snapshot(data_dir, &state.library_cache)?;
-            let game = library
-                .games
-                .get(&id)
-                .ok_or_else(|| format!("Game {id} not found"))?;
-            let msg =
-                azdl::fixes::heal_ea_activation(&game.install_dir).map_err(|e| e.to_string())?;
-            Ok(json!({ "success": true, "message": msg }))
-        }
-        Action::EaRollback { id } => {
-            let library = load_library_snapshot(data_dir, &state.library_cache)?;
-            let game = library
-                .games
-                .get(&id)
-                .ok_or_else(|| format!("Game {id} not found"))?;
-            let msg = azdl::fixes::rollback_ea_activation(&game.install_dir)
-                .map_err(|e| e.to_string())?;
-            Ok(json!({ "success": true, "message": msg }))
-        }
-        Action::DlcLicensePatch { id, dlc_ids } => {
-            let library = load_library_snapshot(data_dir, &state.library_cache)?;
-            let game = library
-                .games
-                .get(&id)
-                .ok_or_else(|| format!("Game {id} not found"))?;
-            let target_ids = match dlc_ids {
-                Some(ids) => ids,
-                None => {
-                    let installed = azdl::dlc::list_installed(game, data_dir).unwrap_or_default();
-                    installed.iter().filter_map(|s| s.parse().ok()).collect()
-                }
-            };
-            let patched = azdl::fixes::patch_dlc_installed_ids(&game.install_dir, &target_ids)
-                .map_err(|e| e.to_string())?;
-            Ok(json!({
-                "success": true,
-                "patched": patched,
-                "dlc_patch_applied": azdl::fixes::has_dlc_installed_patch(&game.install_dir),
-            }))
-        }
-        Action::DlcLicenseRollback { id } => {
-            let library = load_library_snapshot(data_dir, &state.library_cache)?;
-            let game = library
-                .games
-                .get(&id)
-                .ok_or_else(|| format!("Game {id} not found"))?;
-            let restored = azdl::fixes::rollback_dlc_installed(&game.install_dir)
-                .map_err(|e| e.to_string())?;
-            Ok(json!({
-                "success": true,
-                "restored": restored,
-                "dlc_patch_applied": azdl::fixes::has_dlc_installed_patch(&game.install_dir),
-            }))
-        }
-        Action::GoldbergSync { id } => {
-            let library = load_library_snapshot(data_dir, &state.library_cache)?;
-            let game = library
-                .games
-                .get(&id)
-                .ok_or_else(|| format!("Game {id} not found"))?;
-            let updated = azdl::goldberg::prepare_goldberg_for_game(game, data_dir)
-                .map_err(|e| e.to_string())?;
-            Ok(json!({
-                "success": true,
-                "updated": updated,
-                "goldberg_has_settings": azdl::goldberg::has_goldberg_settings(&game.install_dir),
-            }))
-        }
-        Action::GoldbergRollback { id } => {
-            let library = load_library_snapshot(data_dir, &state.library_cache)?;
-            let game = library
-                .games
-                .get(&id)
-                .ok_or_else(|| format!("Game {id} not found"))?;
-            let restored = azdl::goldberg::rollback_goldberg_config(&game.install_dir)
-                .map_err(|e| e.to_string())?;
-            Ok(json!({
-                "success": true,
-                "restored": restored,
-                "goldberg_has_settings": azdl::goldberg::has_goldberg_settings(&game.install_dir),
-            }))
-        }
         Action::InstallVcredist { id } => {
             let library = load_library_snapshot(data_dir, &state.library_cache)?;
             let game = library
@@ -1890,45 +1496,23 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
             Ok(json!({ "success": true, "installed": ok }))
         }
         Action::JobPause { id } => {
-            if azdl::jobs::load_job(data_dir, &id).is_ok() {
-                azdl::jobs::pause_job(data_dir, &id)?;
-            } else if azdl::torrent::load_torrent_job(data_dir, &id).is_ok() {
-                azdl::torrent::pause_magnet(data_dir, &id)?;
-            } else {
-                return Err(LauncherError::general(format!("Job {id} not found")));
-            }
+            azdl::jobs::pause_job(data_dir, &id)?;
             Ok(json!({ "success": true }))
         }
         Action::JobResume { id } => {
-            let mut dlc_installed_files = None;
-            if azdl::jobs::load_job(data_dir, &id).is_ok() {
-                if let Some(count) = azdl::dlc::resume_catalog_dlc_job(data_dir, &id)? {
-                    dlc_installed_files = Some(count);
-                } else if let Err(error) = azdl::jobs::retry_job(data_dir, &id) {
-                    if error
-                        .downcast_ref::<azdl::jobs::TransferStopped>()
-                        .is_some()
-                    {
-                        return Ok(json!({ "success": true, "stopped": true }));
-                    }
-                    return Err(error.into());
+            if let Err(error) = azdl::jobs::retry_job(data_dir, &id) {
+                if error
+                    .downcast_ref::<azdl::jobs::TransferStopped>()
+                    .is_some()
+                {
+                    return Ok(json!({ "success": true, "stopped": true }));
                 }
-            } else if azdl::torrent::load_torrent_job(data_dir, &id).is_ok() {
-                let mut library = load_library(data_dir)?;
-                azdl::torrent::resume_magnet(&mut library, data_dir, &id)?;
-            } else {
-                return Err(LauncherError::general(format!("Job {id} not found")));
+                return Err(error.into());
             }
-            Ok(json!({ "success": true, "dlc_installed_files": dlc_installed_files }))
+            Ok(json!({ "success": true }))
         }
         Action::JobCancel { id } => {
-            if azdl::jobs::load_job(data_dir, &id).is_ok() {
-                azdl::jobs::cancel_job(data_dir, &id)?;
-            } else if azdl::torrent::load_torrent_job(data_dir, &id).is_ok() {
-                azdl::torrent::cancel_magnet(data_dir, &id)?;
-            } else {
-                return Err(LauncherError::general(format!("Job {id} not found")));
-            }
+            azdl::jobs::cancel_job(data_dir, &id)?;
             if let Ok(mut tasks) = state.tasks.lock() {
                 tasks.retain(|t| t.id != id && t.game_id.as_deref() != Some(&id));
             }
@@ -2155,7 +1739,7 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
                             }
                         };
 
-                        let outcome = azdl::catalog::install_game_in(
+                        let outcome = azdl::steam_install::install_game_in(
                             &mut library,
                             data_dir,
                             &games_root_for_thread,
@@ -2163,7 +1747,7 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
                         );
                         let mut failure = None;
                         match outcome {
-                            Ok(azdl::catalog::InstallOutcome::Installed(inst_id)) => {
+                            Ok(azdl::steam_install::InstallOutcome::Installed(inst_id)) => {
                                 if let Ok(mut fresh_library) = load_library(data_dir) {
                                     if let Some(installed_game) = library.games.remove(&inst_id) {
                                         fresh_library.games.insert(inst_id, installed_game);
@@ -2176,10 +1760,9 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
                                 }
                                 let _ = azdl::cleanup_leftovers(data_dir, Some(&cat_game_clone.id));
                             }
-                            Ok(azdl::catalog::InstallOutcome::NeedsSelection(_)) => {
+                            Ok(azdl::steam_install::InstallOutcome::NeedsSelection(_)) => {
                                 let _ = save_library(data_dir, &library);
                             }
-                            Ok(azdl::catalog::InstallOutcome::SteamRequested(_)) => {}
                             Err(e) => {
                                 eprintln!(
                                     "Background install failed for {}: {e}",
@@ -2204,39 +1787,6 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
                 "id": id,
                 "title": cat_game.title,
             }))
-        }
-        Action::PatchToggle { id } => {
-            let library = load_library_snapshot(data_dir, &state.library_cache)?;
-            let game = library
-                .games
-                .get(&id)
-                .ok_or_else(|| format!("Game {id} not found"))?;
-            let patch = active_patch(data_dir, &id).map_err(|e| e.to_string())?;
-            if let Some(p) = patch {
-                if p.enabled {
-                    disable_patch(game, data_dir).map_err(|e| e.to_string())?;
-                } else {
-                    enable_patch(game, data_dir).map_err(|e| e.to_string())?;
-                }
-                if let Ok(mut cache) = state.fix_status_cache.lock() {
-                    cache.remove(&id);
-                }
-                Ok(json!({ "success": true, "enabled": !p.enabled }))
-            } else {
-                Err("No patch installed for this game".into())
-            }
-        }
-        Action::PatchRollback { id } => {
-            let library = load_library_snapshot(data_dir, &state.library_cache)?;
-            let game = library
-                .games
-                .get(&id)
-                .ok_or_else(|| format!("Game {id} not found"))?;
-            rollback_patch(game, data_dir).map_err(|e| e.to_string())?;
-            if let Ok(mut cache) = state.fix_status_cache.lock() {
-                cache.remove(&id);
-            }
-            Ok(json!({ "success": true }))
         }
         Action::SettingsUpdate { settings } => {
             azdl::settings::save_settings(data_dir, &settings).map_err(|e| e.to_string())?;
@@ -2327,38 +1877,6 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
                 })
                 .map_err(|e| e.to_string())?;
             Ok(json!({ "success": true, "started": true, "id": id }))
-        }
-        Action::ScanInstalledGames => {
-            let task_id = "scan-games".to_string();
-            {
-                let mut tasks = state.tasks.lock().map_err(|_| "State lock poisoned")?;
-                tasks.retain(|t| t.id != task_id);
-                tasks.push(TaskInfo {
-                    id: task_id.clone(),
-                    label: "Scanning storage drives for games".into(),
-                    status: "running".into(),
-                    pid: None,
-                    game_id: None,
-                    log_tail: String::new(),
-                });
-            }
-            let state_clone = state.clone();
-            let task_id_clone = task_id.clone();
-            std::thread::Builder::new()
-                .name("azdl-scan-games".into())
-                .spawn(move || {
-                    let data_dir = &state_clone.data_dir;
-                    let result = load_library(data_dir).and_then(|mut library| {
-                        azdl::settings::scan_drives_for_games(data_dir, &mut library)
-                    });
-                    finish_install_task(
-                        &state_clone,
-                        &task_id_clone,
-                        result.err().map(|e| e.to_string()),
-                    );
-                })
-                .map_err(|e| e.to_string())?;
-            Ok(json!({ "success": true, "started": true }))
         }
         Action::ProtonDownload => {
             let task_id = "download-proton-ge".to_string();
@@ -2459,20 +1977,6 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
                         && azdl::jobs::clear_job(data_dir, &j.id).is_ok()
                     {
                         count += 1;
-                    }
-                }
-            }
-            if let Ok(torrents) = azdl::torrent::list_torrent_jobs(data_dir) {
-                for t in torrents {
-                    if matches!(
-                        t.status,
-                        azdl::jobs::JobStatus::Complete | azdl::jobs::JobStatus::Cancelled
-                    ) || (include_failed && t.status == azdl::jobs::JobStatus::Failed)
-                    {
-                        let torrent_file = data_dir.join("torrents").join(format!("{}.json", t.id));
-                        if fs::remove_file(torrent_file).is_ok() {
-                            count += 1;
-                        }
                     }
                 }
             }
@@ -2671,12 +2175,6 @@ pub fn handle_get_game_controls(state: &AppState, id: &str) -> Result<Value, Str
     let game = library.games.get(id).ok_or("Game is not installed")?;
     let controls =
         azdl::game_controls::inspect(game, &state.data_dir).map_err(|error| error.to_string())?;
-    if let Ok(mut cache) = state.steamstub_cache.lock() {
-        cache.insert(id.into(), (controls.steamstub.clone(), Instant::now()));
-    }
-    if let Ok(mut cache) = state.fix_status_cache.lock() {
-        cache.remove(id);
-    }
     serde_json::to_value(controls).map_err(|error| error.to_string())
 }
 
@@ -2705,20 +2203,7 @@ pub async fn get_game_dlc(
             azdl::dlc::list_installed(game, &data_dir).map_err(|e| e.to_string())?;
         let interrupted =
             azdl::dlc::list_interrupted(game, &data_dir).map_err(|e| e.to_string())?;
-        let mut available = azdl::dlc::available_for_game(game, &data_dir)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|addon| {
-                json!({
-                    "id": addon.id,
-                    "title": addon.title,
-                    "content_available": addon.content_available,
-                    "installed": installed.contains(&addon.id),
-                    "interrupted": interrupted.contains(&addon.id),
-                    "reason": if addon.content_available { None } else { Some("The source has no downloadable DLC archive") },
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut available = Vec::<Value>::new();
         let mut metadata_error = None;
         if let Some(app_id) = game.steam_app_id {
             let observations = azdl::steam_content::list_observations(&data_dir, &game.id)
@@ -2887,5 +2372,5 @@ pub async fn get_game_dlc(
 
 #[tauri::command]
 pub fn is_steam_running() -> bool {
-    azdl::multiplayer::steam_running()
+    azdl::steam::steam_running()
 }

@@ -1,10 +1,10 @@
-use crate::catalog::{CatalogGame, InstallOutcome, save_pending_setup_origin, stamp_origin};
 use crate::jobs::{
-    DownloadJob, InstallKind, InstallPlan, InstallState, JobKind, JobStatus, job_id_for_target,
-    load_job, now, save_job,
+    DownloadJob, InstallPlan, InstallState, JobKind, JobStatus, job_id_for_target, load_job, now,
+    save_job,
 };
 use crate::steam::{import_steam, scan_steam, steam_root};
 use crate::steam_access::fetch_manifest_bundle as fetch_provider_bundle;
+use crate::steam_install::{InstallOutcome, SteamGame, save_pending_origin, stamp_origin};
 use crate::steam_metadata::{ResolvedDepotSource, SteamAppMetadata};
 use crate::{Game, Library, Result, discovery, validate_id};
 use std::collections::{BTreeMap, BTreeSet};
@@ -429,11 +429,9 @@ pub fn install_steam_dlc(game: &Game, data_dir: &Path, dlc_id: u32) -> Result<us
         pid: Some(std::process::id()),
         error: None,
         updated_unix: now()?,
-        expected_sha256: None,
         install: Some(InstallPlan {
             game_id: game.id.clone(),
             title: format!("{} DLC {dlc_id}", game.title),
-            kind: InstallKind::Archive,
         }),
         install_state: Some(InstallState::Pending),
         install_error: None,
@@ -972,7 +970,7 @@ fn pin_base_download(root: &Path, depots: &[DepotInfo]) -> Result<()> {
 pub fn install_steam_manifest_game(
     library: &mut Library,
     data_dir: &Path,
-    game: &CatalogGame,
+    game: &SteamGame,
     app_id: u32,
 ) -> Result<InstallOutcome> {
     install_steam_manifest_game_in(library, data_dir, &data_dir.join("games"), game, app_id)
@@ -983,7 +981,7 @@ pub fn install_steam_manifest_game_in(
     library: &mut Library,
     data_dir: &Path,
     games_dir: &Path,
-    game: &CatalogGame,
+    game: &SteamGame,
     app_id: u32,
 ) -> Result<InstallOutcome> {
     validate_id(&game.id)?;
@@ -1021,7 +1019,7 @@ fn install_steam_manifest_game_in_inner(
     library: &mut Library,
     data_dir: &Path,
     games_dir: &Path,
-    game: &CatalogGame,
+    game: &SteamGame,
     app_id: u32,
     download_dir: &Path,
 ) -> Result<InstallOutcome> {
@@ -1109,11 +1107,9 @@ fn install_steam_manifest_game_in_inner(
         pid: Some(std::process::id()),
         error: None,
         updated_unix: now()?,
-        expected_sha256: None,
         install: Some(InstallPlan {
             game_id: game.id.clone(),
             title: game.title.clone(),
-            kind: InstallKind::Archive,
         }),
         install_state: Some(InstallState::Pending),
         install_error: None,
@@ -1269,7 +1265,7 @@ fn install_steam_manifest_game_in_inner(
             job.install_state = Some(InstallState::NeedsSelection);
             job.updated_unix = now().unwrap_or(0);
             let _ = save_job(data_dir, &job);
-            save_pending_setup_origin(data_dir, &game.id, game)?;
+            save_pending_origin(data_dir, game)?;
             Ok(InstallOutcome::NeedsSelection(game.id.clone()))
         }
     }
@@ -1766,7 +1762,6 @@ mod tests {
                 pid: Some(std::process::id()),
                 error: None,
                 updated_unix: now().unwrap(),
-                expected_sha256: None,
                 install: None,
                 install_state: Some(InstallState::Pending),
                 install_error: None,

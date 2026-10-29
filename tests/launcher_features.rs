@@ -1,8 +1,5 @@
 use azdl::discovery::discover_executables;
 use azdl::doctor::diagnose_game;
-use azdl::multiplayer::{detect_fix, prepare_game_launch};
-use azdl::overlay::{overlay_status, set_overlay_enabled};
-use azdl::patch::{active_patch, apply_patch, disable_patch, enable_patch, rollback_patch};
 use azdl::settings::{
     add_storage_drive, load_settings, move_game_to_drive, remove_storage_drive, save_settings,
     set_default_drive,
@@ -106,87 +103,6 @@ fn test_library_exclusive_launcher_lifecycle() {
 
     let final_lib = load_library(&ws).unwrap();
     assert!(final_lib.games.is_empty());
-
-    let _ = fs::remove_dir_all(&ws);
-}
-
-#[test]
-fn test_multiplayer_overlay_and_patch_reversibility() {
-    let ws = temp_workspace("multiplayer");
-    let game_dir = ws.join("multiplayer-game");
-    fs::create_dir_all(&game_dir).unwrap();
-
-    let exe_name = if cfg!(windows) {
-        "game.exe"
-    } else {
-        "game.bin"
-    };
-    let exe_path = game_dir.join(exe_name);
-    fs::write(&exe_path, b"game binary").unwrap();
-
-    let game = Game {
-        id: "mp-game".into(),
-        title: "Multiplayer Game".into(),
-        install_dir: game_dir.clone(),
-        executable: exe_path.clone(),
-        runner: Runner::Wine,
-        arguments: Vec::new(),
-        environment: BTreeMap::new(),
-        last_played_unix: None,
-        origin: None,
-        steam_app_id: None,
-        launch_options: Vec::new(),
-        selected_launch_option_id: None,
-        cover_url: None,
-        banner_url: None,
-    };
-
-    // 1. OnlineFix simulation
-    fs::write(game_dir.join("OnlineFix.ini"), b"[Main]\nFakeAppId=480\n").unwrap();
-    fs::write(game_dir.join("OnlineFix64.dll"), b"fake dll").unwrap();
-
-    let fix = detect_fix(&game).unwrap();
-    assert_eq!(fix, azdl::multiplayer::FixKind::OnlineFix);
-
-    // Verify launch preparation generates wine overrides without starting Steam
-    let prep = prepare_game_launch(&game, &game.runner, &game_dir).unwrap();
-    assert!(prep.environment.contains_key("WINEDLLOVERRIDES"));
-    assert!(prep.notice.is_some());
-
-    // Verify overlay toggle reversibility (.arachnel-off)
-    assert!(overlay_status(&game).unwrap().enabled);
-    set_overlay_enabled(&game, false).unwrap();
-    assert!(!overlay_status(&game).unwrap().enabled);
-    assert!(game_dir.join("OnlineFix64.dll.arachnel-off").exists());
-
-    set_overlay_enabled(&game, true).unwrap();
-    assert!(overlay_status(&game).unwrap().enabled);
-    assert!(game_dir.join("OnlineFix64.dll").exists());
-
-    // 2. Patch simulation
-    let patch_dir = ws.join("patch-v1");
-    fs::create_dir_all(&patch_dir).unwrap();
-    fs::write(patch_dir.join("patch_file.dat"), b"new patch content").unwrap();
-
-    apply_patch(&game, &ws, &patch_dir).unwrap();
-    let active = active_patch(&ws, &game.id)
-        .unwrap()
-        .expect("patch should be active");
-    assert_eq!(active.source_dir, patch_dir);
-    assert!(game_dir.join("patch_file.dat").exists());
-
-    // Disable patch
-    disable_patch(&game, &ws).unwrap();
-    assert!(!game_dir.join("patch_file.dat").exists());
-
-    // Enable patch
-    enable_patch(&game, &ws).unwrap();
-    assert!(game_dir.join("patch_file.dat").exists());
-
-    // Rollback patch
-    rollback_patch(&game, &ws).unwrap();
-    assert!(active_patch(&ws, &game.id).unwrap().is_none());
-    assert!(!game_dir.join("patch_file.dat").exists());
 
     let _ = fs::remove_dir_all(&ws);
 }
@@ -352,64 +268,6 @@ fn test_move_game_across_drives_migrates_tree_and_remaps_executable() {
         moved_game.executable,
         drive_b.join("test-game/Binaries/Win64/game.exe")
     );
-
-    let _ = fs::remove_dir_all(&ws);
-}
-
-#[test]
-fn test_native_runner_prepares_online_fix_and_propagates_payload() {
-    let ws = temp_workspace("native-fix-prep");
-    let game_dir = ws.join("space-game");
-    let shipping_dir = game_dir.join("Space").join("Binaries").join("Win64");
-    fs::create_dir_all(&shipping_dir).unwrap();
-
-    let exe = shipping_dir.join("SpaceGame-Win64-Shipping.exe");
-    fs::write(&exe, b"MZ_SPACE_GAME").unwrap();
-
-    // Plant OnlineFix files in the root
-    fs::write(game_dir.join("OnlineFix64.dll"), b"DLL_PAYLOAD").unwrap();
-    fs::write(
-        game_dir.join("OnlineFix.ini"),
-        b"[Main]\r\nFakeAppId=480\r\n",
-    )
-    .unwrap();
-
-    let game = Game {
-        id: "space-game".into(),
-        title: "Space Game".into(),
-        install_dir: game_dir.clone(),
-        executable: exe.clone(),
-        runner: Runner::Native,
-        arguments: Vec::new(),
-        environment: BTreeMap::new(),
-        last_played_unix: None,
-        origin: None,
-        steam_app_id: None,
-        launch_options: Vec::new(),
-        selected_launch_option_id: None,
-        cover_url: None,
-        banner_url: None,
-    };
-
-    assert_eq!(
-        detect_fix(&game).unwrap(),
-        azdl::multiplayer::FixKind::OnlineFix
-    );
-
-    // Call prepare_game_launch with Runner::Native for the shipping working directory
-    let prep = prepare_game_launch(&game, &Runner::Native, &shipping_dir).unwrap();
-
-    assert!(prep.notice.is_some());
-    assert!(prep.notice.unwrap().contains("Online Fix"));
-
-    // Verify steam_appid.txt is placed beside shipping exe
-    let appid_file = shipping_dir.join("steam_appid.txt");
-    assert!(appid_file.is_file());
-    assert_eq!(fs::read_to_string(&appid_file).unwrap().trim(), "480");
-
-    // Verify OnlineFix64.dll and OnlineFix.ini were propagated downward to the shipping binary folder
-    assert!(shipping_dir.join("OnlineFix64.dll").is_file());
-    assert!(shipping_dir.join("OnlineFix.ini").is_file());
 
     let _ = fs::remove_dir_all(&ws);
 }

@@ -1,5 +1,3 @@
-use crate::multiplayer::{FixKind, detect_fix};
-use crate::patch::active_patch;
 use crate::runtime::resolve_runner;
 use crate::steam::steam_root;
 use crate::{Game, Runner, clean_command, resolve_launch};
@@ -231,43 +229,6 @@ pub fn diagnose_game(game: &Game, data_dir: &Path) -> DiagnosticReport {
             );
         }
     }
-    match active_patch(data_dir, &game.id) {
-        Ok(Some(patch)) => add(
-            &mut checks,
-            Severity::Info,
-            if patch.enabled {
-                "Reversible patch is enabled"
-            } else {
-                "Reversible patch is disabled"
-            },
-        ),
-        Ok(None) => {}
-        Err(error) => add(
-            &mut checks,
-            Severity::Error,
-            format!("Patch state cannot be read: {error}"),
-        ),
-    }
-    if !steam_profile && install.is_some() && game.executable.is_file() {
-        match detect_fix(game) {
-            Ok(FixKind::OnlineFix) => add(
-                &mut checks,
-                Severity::Info,
-                "Online Fix marker found; multiplayer session has not been verified",
-            ),
-            Ok(FixKind::SteamFix) => add(
-                &mut checks,
-                Severity::Info,
-                "Steam Fix marker found; multiplayer session has not been verified",
-            ),
-            Ok(FixKind::None) => {}
-            Err(error) => add(
-                &mut checks,
-                Severity::Warning,
-                format!("Fix markers could not be checked: {error}"),
-            ),
-        }
-    }
     if matches!(
         game.runner,
         Runner::Wine | Runner::Proton(_) | Runner::Auto | Runner::ProtonAuto
@@ -297,7 +258,7 @@ pub fn diagnose_game(game: &Game, data_dir: &Path) -> DiagnosticReport {
         add(
             &mut checks,
             Severity::Info,
-            "Local launch prerequisites found; game startup and multiplayer are unverified",
+            "Local launch prerequisites found; game startup is unverified",
         );
     }
     DiagnosticReport { runner, checks }
@@ -346,14 +307,14 @@ pub fn system_diagnostics() -> Vec<SystemCheck> {
     let mut checks = vec![
         check_binary(
             "curl",
-            "HTTP/HTTPS download transport and feed fetcher",
+            "HTTPS transport for manifests, runtimes and redistributables",
             true,
             "--version",
         ),
         if cfg!(windows) {
             let bsdtar_check = check_binary(
                 "bsdtar",
-                "Multi-format archive extraction (ZIP, 7z, TAR, ISO)",
+                "Manifest bundle and runtime archive extraction",
                 true,
                 "--version",
             );
@@ -362,7 +323,7 @@ pub fn system_diagnostics() -> Vec<SystemCheck> {
             } else {
                 check_binary(
                     "tar",
-                    "Windows built-in archive extraction engine (ZIP, 7z, TAR)",
+                    "Windows built-in archive extraction for manifest bundles",
                     true,
                     "--version",
                 )
@@ -370,33 +331,15 @@ pub fn system_diagnostics() -> Vec<SystemCheck> {
         } else {
             check_binary(
                 "bsdtar",
-                "Multi-format archive extraction (ZIP, 7z, TAR, ISO)",
+                "Manifest bundle and runtime archive extraction",
                 true,
                 "--version",
             )
         },
-        check_binary(
-            "unrar",
-            "Proprietary RAR 4/5 archive decompression",
-            false,
-            "-v",
-        ),
-        check_binary(
-            "aria2c",
-            "Multi-source BitTorrent / magnet transport engine",
-            false,
-            "--version",
-        ),
     ];
 
     #[cfg(target_os = "linux")]
     {
-        checks.push(check_binary(
-            "bwrap",
-            "Bubblewrap namespace sandbox for untrusted unpackers",
-            false,
-            "--version",
-        ));
         checks.push(check_binary(
             "wine",
             "Windows NT compatibility runtime",
@@ -512,51 +455,5 @@ mod tests {
             !checks.iter().any(|c| c.name.eq_ignore_ascii_case("steam")),
             "steam should not be in system diagnostics checks"
         );
-    }
-
-    #[test]
-    fn test_diagnose_game_steamfix_does_not_require_steam() {
-        let root = env::temp_dir().join(format!(
-            "azdl-doctor-fix-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let installed = root.join("installed");
-        fs::create_dir_all(&installed).unwrap();
-        let executable = installed.join("game.exe");
-        fs::write(&executable, b"MZ dummy PE").unwrap();
-        fs::write(installed.join("steamfix.ini"), b"[SteamFix]\nFakeAppId=480").unwrap();
-
-        let mut library = Library::default();
-        add_game(
-            &mut library,
-            "fix-demo",
-            "Fix Demo",
-            &installed,
-            Path::new("game.exe"),
-        )
-        .unwrap();
-
-        let game = library.games.get("fix-demo").unwrap();
-        let report = diagnose_game(game, &root);
-
-        // Report should not contain warnings demanding Steam to be running
-        for check in report.checks {
-            assert!(
-                !check.message.contains("Steam is not running"),
-                "report should not demand Steam to be running: {}",
-                check.message
-            );
-            assert!(
-                !check.message.contains("Steam will be requested at launch"),
-                "report should not threaten Steam auto-launch: {}",
-                check.message
-            );
-        }
-
-        fs::remove_dir_all(root).unwrap();
     }
 }

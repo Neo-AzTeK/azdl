@@ -1,32 +1,126 @@
 //! Steam installation requests; Store metadata never grants content access.
-use crate::Result;
-use crate::catalog::{CatalogGame, PackageType};
+use crate::{CatalogOrigin, Game, Library, Result};
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+/// A Steam game to install: identity and optional Store artwork only.
+#[derive(Debug, Clone)]
+pub struct SteamGame {
+    /// Library ID, `steam-<app id>` unless resuming a recorded job.
+    pub id: String,
+    pub title: String,
+    pub app_id: u32,
+    pub cover_url: Option<String>,
+    pub banner_url: Option<String>,
+}
+
+/// Result of an installation request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallOutcome {
+    /// The game is registered in the library.
+    Installed(String),
+    /// Files are installed but the launch executable must be chosen by the user.
+    NeedsSelection(String),
+}
 
 /// Construct a direct Steam install request without querying content services.
-pub fn game_for_app(app_id: u32, title: &str) -> Result<CatalogGame> {
+pub fn game_for_app(app_id: u32, title: &str) -> Result<SteamGame> {
     if app_id == 0 || title.trim().is_empty() {
         return Err("Steam App ID and game title are required".into());
     }
-    Ok(CatalogGame {
-        source_id: "steam".into(),
+    Ok(SteamGame {
         id: format!("steam-{app_id}"),
         title: title.trim().into(),
-        description: String::new(),
-        uri: None,
-        filename: None,
-        archive_parts: Vec::new(),
-        sha256: None,
-        archive_part_hashes: Vec::new(),
-        package_type: PackageType::Steam(app_id),
-        upload_date: None,
-        version: None,
-        addons: Vec::new(),
+        app_id,
         cover_url: None,
         banner_url: None,
-        file_size: None,
-        genres: Vec::new(),
-        steam_app_id: Some(app_id),
     })
+}
+
+/// Install a Steam game into a selected library drive.
+pub fn install_game_in(
+    library: &mut Library,
+    data_dir: &Path,
+    games_dir: &Path,
+    game: &SteamGame,
+) -> Result<InstallOutcome> {
+    crate::steam_depot::install_steam_manifest_game_in(
+        library,
+        data_dir,
+        games_dir,
+        game,
+        game.app_id,
+    )
+}
+
+fn origin_for(game: &SteamGame) -> CatalogOrigin {
+    CatalogOrigin {
+        qualified_id: format!("steam:{}", game.id),
+        upload_date: None,
+        version: None,
+    }
+}
+
+/// Record the Steam origin, App ID and Store artwork on an installed library entry.
+pub(crate) fn stamp_origin(library: &mut Library, id: &str, game: &SteamGame) {
+    if let Some(installed) = library.games.get_mut(id) {
+        installed.origin = Some(origin_for(game));
+        installed.steam_app_id = Some(game.app_id);
+        if game.banner_url.is_some() {
+            installed.banner_url = game.banner_url.clone();
+        }
+        if game.cover_url.is_some() {
+            installed.cover_url = game.cover_url.clone();
+        }
+    }
+}
+
+/// Origins of installs waiting for executable selection; the directory name predates Steam-only installs.
+fn pending_origin_path(data_dir: &Path, id: &str) -> Result<PathBuf> {
+    crate::validate_id(id)?;
+    Ok(data_dir.join("setup-pending").join(format!("{id}.json")))
+}
+
+pub(crate) fn save_pending_origin(data_dir: &Path, game: &SteamGame) -> Result<()> {
+    let target = pending_origin_path(data_dir, &game.id)?;
+    fs::create_dir_all(target.parent().ok_or("invalid pending origin path")?)?;
+    let temp = target.with_extension("json.tmp");
+    let mut file = File::create(&temp)?;
+    serde_json::to_writer_pretty(&mut file, &origin_for(game))?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    #[cfg(windows)]
+    if target.exists() {
+        fs::remove_file(&target)?;
+    }
+    fs::rename(temp, target)?;
+    Ok(())
+}
+
+/// Attach the recorded Steam origin when a pending install gets its executable.
+pub fn attach_pending_origin(data_dir: &Path, game: &mut Game) -> Result<()> {
+    match fs::read(pending_origin_path(data_dir, &game.id)?) {
+        Ok(bytes) => {
+            let origin: CatalogOrigin = serde_json::from_slice(&bytes)?;
+            game.steam_app_id = origin
+                .qualified_id
+                .strip_prefix("steam:steam-")
+                .and_then(|id| id.parse().ok());
+            game.origin = Some(origin);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
+pub fn clear_pending_origin(data_dir: &Path, id: &str) -> Result<()> {
+    match fs::remove_file(pending_origin_path(data_dir, id)?) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Resume an interrupted or paused base download from its recorded target and ID.
@@ -80,7 +174,7 @@ pub fn resume_job(data_dir: &std::path::Path, id: &str) -> Result<std::path::Pat
         &game,
         app_id,
     )?;
-    if let crate::catalog::InstallOutcome::Installed(installed_id) = outcome {
+    if let InstallOutcome::Installed(installed_id) = outcome {
         let mut fresh = crate::load_library(data_dir)?;
         if let Some(installed) = library.games.remove(&installed_id) {
             fresh.games.insert(installed_id, installed);
@@ -144,11 +238,9 @@ mod tests {
             pid: None,
             error: None,
             updated_unix: 0,
-            expected_sha256: None,
             install: Some(crate::jobs::InstallPlan {
                 game_id: "old-id".into(),
                 title: "Base".into(),
-                kind: crate::jobs::InstallKind::Archive,
             }),
             install_state: Some(crate::jobs::InstallState::Pending),
             install_error: None,
@@ -214,9 +306,8 @@ mod tests {
     #[test]
     fn direct_request_requires_no_installed_resources() {
         let game = game_for_app(480, "Spacewar").unwrap();
-        assert_eq!(game.source_id, "steam");
         assert_eq!(game.id, "steam-480");
-        assert!(game.addons.is_empty());
+        assert_eq!(game.app_id, 480);
         assert!(game_for_app(0, "Spacewar").is_err());
         assert!(game_for_app(480, " ").is_err());
     }

@@ -296,6 +296,40 @@ pub fn import_steam(library: &mut Library, root: &Path, app_id: u32) -> Result<S
     Ok(id)
 }
 
+/// Whether the official Steam client is currently running on this host.
+#[cfg(target_os = "linux")]
+pub fn steam_running() -> bool {
+    let Ok(processes) = fs::read_dir("/proc") else {
+        return false;
+    };
+    processes.filter_map(std::result::Result::ok).any(|entry| {
+        entry
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            && fs::read_to_string(entry.path().join("comm"))
+                .is_ok_and(|name| name.trim().eq_ignore_ascii_case("steam"))
+    })
+}
+
+#[cfg(windows)]
+pub fn steam_running() -> bool {
+    crate::clean_command("tasklist")
+        .args(["/FI", "IMAGENAME eq steam.exe", "/NH"])
+        .output()
+        .map(|out| {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout.to_ascii_lowercase().contains("steam.exe")
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub fn steam_running() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

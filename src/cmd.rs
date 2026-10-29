@@ -5,7 +5,7 @@
 //! modifies dynamic linker variables (`LD_LIBRARY_PATH`, `PATH`, etc.) to point
 //! to the AppImage's internal bundled libraries.
 //!
-//! If child processes (such as `curl`, `wine`, `bsdtar`, `unrar`, `xdg-open`, or
+//! If child processes (such as `curl`, `wine`, `bsdtar`, `xdg-open`, or
 //! games) inherit these bundled paths, dynamic linking will fail (often with exit
 //! status 127) due to symbol version mismatches against the host's system libraries.
 //!

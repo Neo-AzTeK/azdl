@@ -1,5 +1,4 @@
-use crate::sha256::file_sha256;
-use crate::{Game, Result, clean_command, load_library, validate_id};
+use crate::{Result, clean_command, load_library, validate_id};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -14,11 +13,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub enum JobKind {
     Game,
     Dlc,
-    Archive,
-    Setup,
-    SetupArchive,
-    Patch,
-    AdditionalFile,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,31 +50,10 @@ impl std::fmt::Display for TransferStopped {
 
 impl std::error::Error for TransferStopped {}
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum InstallKind {
-    File,
-    Archive,
-    Setup,
-    SetupArchive,
-}
-
-impl InstallKind {
-    pub fn job_kind(self) -> JobKind {
-        match self {
-            Self::File => JobKind::Game,
-            Self::Archive => JobKind::Archive,
-            Self::Setup => JobKind::Setup,
-            Self::SetupArchive => JobKind::SetupArchive,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstallPlan {
     pub game_id: String,
     pub title: String,
-    pub kind: InstallKind,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -93,12 +66,6 @@ pub enum InstallState {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstallFinish {
-    Complete,
-    NeedsSelection,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadJob {
     pub id: String,
@@ -109,8 +76,6 @@ pub struct DownloadJob {
     pub pid: Option<u32>,
     pub error: Option<String>,
     pub updated_unix: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install: Option<InstallPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,45 +203,6 @@ pub fn job_id_for_target(target: &Path) -> String {
     job_id(target)
 }
 
-fn normalized_sha256(value: Option<&str>) -> Result<Option<String>> {
-    value
-        .map(|value| {
-            if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return Err("SHA-256 must be 64 hexadecimal characters".into());
-            }
-            Ok(value.to_ascii_lowercase())
-        })
-        .transpose()
-}
-
-fn verified_file(job: &DownloadJob) -> Result<()> {
-    let metadata = fs::symlink_metadata(&job.target)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err("download target is not a regular file".into());
-    }
-    let Some(expected) = &job.expected_sha256 else {
-        return Ok(());
-    };
-    let actual = file_sha256(&job.target)?;
-    if actual == *expected {
-        return Ok(());
-    }
-    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let mut name = job
-        .target
-        .file_name()
-        .ok_or("invalid download target")?
-        .to_os_string();
-    name.push(format!(".bad-sha256-{}-{nonce}", std::process::id()));
-    let quarantine = job.target.with_file_name(name);
-    fs::rename(&job.target, &quarantine)?;
-    Err(format!(
-        "SHA-256 mismatch: expected {expected}, got {actual}; downloaded file kept at {}",
-        quarantine.display()
-    )
-    .into())
-}
-
 fn job_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("jobs")
 }
@@ -335,7 +261,10 @@ pub fn list_jobs(data_dir: &Path) -> Result<Vec<DownloadJob>> {
             .is_some_and(|extension| extension == "json")
         {
             let id = path.file_stem().unwrap_or_default().to_string_lossy();
-            let mut job = load_job(data_dir, &id)?;
+            // Records of removed non-Steam job kinds no longer parse; leave them on disk unlisted.
+            let Ok(mut job) = load_job(data_dir, &id) else {
+                continue;
+            };
             if job.kind == JobKind::Dlc
                 && job.status == JobStatus::Running
                 && !dlc_worker_active(data_dir, &id)?
@@ -463,24 +392,6 @@ pub(crate) fn acquire_lock(data_dir: &Path, id: &str) -> Result<JobLock> {
     Err("could not acquire download job".into())
 }
 
-fn target_for(game: &Game, relative: &Path) -> Result<PathBuf> {
-    if relative.as_os_str().is_empty()
-        || relative
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_)))
-    {
-        return Err("download destination must be within the game directory".into());
-    }
-    let target = game.install_dir.join(relative);
-    let parent = target.parent().ok_or("invalid download destination")?;
-    fs::create_dir_all(parent)?;
-    let parent = fs::canonicalize(parent)?;
-    if !parent.starts_with(&game.install_dir) {
-        return Err("download destination leaves game directory".into());
-    }
-    Ok(parent.join(target.file_name().ok_or("invalid download filename")?))
-}
-
 fn pause_path(data_dir: &Path, id: &str) -> Result<PathBuf> {
     Ok(job_path(data_dir, id)?.with_extension("pause"))
 }
@@ -586,454 +497,12 @@ pub(crate) fn finish_dlc_job(data_dir: &Path, id: &str, error: Option<&str>) -> 
     Ok(cancelled)
 }
 
-enum TransferOutcome {
-    Complete(PathBuf),
-    Paused,
-    Cancelled,
-}
-
-fn transfer(data_dir: &Path, job: &DownloadJob) -> Result<TransferOutcome> {
-    let target = &job.target;
-    if target.exists() {
-        return Err("destination already exists".into());
-    }
-    let part = job.partial_path();
-    if fs::symlink_metadata(&part).is_ok_and(|metadata| !metadata.is_file()) {
-        return Err("partial download path is not a regular file".into());
-    }
-    let pause = pause_path(data_dir, &job.id)?;
-    let cancel = cancel_path(data_dir, &job.id)?;
-    if cancel.exists() {
-        remove_partial(job)?;
-        return Ok(TransferOutcome::Cancelled);
-    }
-    if pause.exists() {
-        return Ok(TransferOutcome::Paused);
-    }
-    let mut child = clean_command("curl")
-        .args([
-            "--fail",
-            "--location",
-            "--retry",
-            "3",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--continue-at",
-            "-",
-        ])
-        .arg("--output")
-        .arg(&part)
-        .arg(&job.url)
-        .spawn()?;
-    loop {
-        if cancel.exists() {
-            let _ = child.kill();
-            let _ = child.wait();
-            remove_partial(job)?;
-            return Ok(TransferOutcome::Cancelled);
-        }
-        if pause.exists() {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(TransferOutcome::Paused);
-        }
-        if let Some(status) = child.try_wait()? {
-            if !status.success() {
-                return Err(format!(
-                    "download failed ({status}); partial file kept at {}",
-                    part.display()
-                )
-                .into());
-            }
-            if cancel.exists() {
-                remove_partial(job)?;
-                return Ok(TransferOutcome::Cancelled);
-            }
-            fs::rename(&part, target)?;
-            if cancel.exists() {
-                fs::remove_file(target)?;
-                return Ok(TransferOutcome::Cancelled);
-            }
-            return Ok(TransferOutcome::Complete(target.clone()));
-        }
-        thread::sleep(Duration::from_millis(200));
-    }
-}
-
-pub fn recorded_download(
-    data_dir: &Path,
-    game: &Game,
-    url: &str,
-    relative: &Path,
-    kind: JobKind,
-) -> Result<PathBuf> {
-    recorded_download_with_sha256(data_dir, game, url, relative, kind, None)
-}
-
-pub fn recorded_download_with_sha256(
-    data_dir: &Path,
-    game: &Game,
-    url: &str,
-    relative: &Path,
-    kind: JobKind,
-    expected_sha256: Option<&str>,
-) -> Result<PathBuf> {
-    if !url.starts_with("https://") {
-        return Err("download URL must use HTTPS".into());
-    }
-    let expected_sha256 = normalized_sha256(expected_sha256)?;
-    let target = target_for(game, relative)?;
-    let id = job_id(&target);
-    let _lock = acquire_lock(data_dir, &id)?;
-    let mut job = match maybe_load_job(data_dir, &id)? {
-        Some(mut existing) => {
-            if existing.target != target || existing.url != url || existing.kind != kind {
-                return Err("download destination belongs to a different job".into());
-            }
-            if let Some(expected) = expected_sha256 {
-                if existing
-                    .expected_sha256
-                    .as_ref()
-                    .is_some_and(|saved| saved != &expected)
-                {
-                    return Err("download destination has a different SHA-256 expectation".into());
-                }
-                existing.expected_sha256 = Some(expected);
-            }
-            if existing.status == JobStatus::Complete && fs::symlink_metadata(&target).is_ok() {
-                if let Err(error) = verified_file(&existing) {
-                    existing.status = JobStatus::Failed;
-                    existing.error = Some(error.to_string());
-                    existing.updated_unix = now()?;
-                    save_job(data_dir, &existing)?;
-                    return Err(error);
-                }
-                save_job(data_dir, &existing)?;
-                return Ok(target);
-            }
-            if existing.install.is_none() && !game.title.is_empty() {
-                existing.install = Some(InstallPlan {
-                    game_id: game.id.clone(),
-                    title: game.title.clone(),
-                    kind: match kind {
-                        JobKind::Game => InstallKind::File,
-                        JobKind::Archive => InstallKind::Archive,
-                        JobKind::Setup => InstallKind::Setup,
-                        JobKind::SetupArchive => InstallKind::SetupArchive,
-                        _ => InstallKind::Archive,
-                    },
-                });
-            }
-            existing
-        }
-        None => DownloadJob {
-            id,
-            kind,
-            url: url.to_string(),
-            target: target.clone(),
-            status: JobStatus::Interrupted,
-            pid: None,
-            error: None,
-            updated_unix: now()?,
-            expected_sha256,
-            install: if !game.title.is_empty() {
-                Some(InstallPlan {
-                    game_id: game.id.clone(),
-                    title: game.title.clone(),
-                    kind: match kind {
-                        JobKind::Game => InstallKind::File,
-                        JobKind::Archive => InstallKind::Archive,
-                        JobKind::Setup => InstallKind::Setup,
-                        JobKind::SetupArchive => InstallKind::SetupArchive,
-                        _ => InstallKind::Archive,
-                    },
-                })
-            } else {
-                None
-            },
-            install_state: None,
-            install_error: None,
-            progress_bytes: None,
-            total_bytes: None,
-        },
-    };
-    job.status = JobStatus::Running;
-    job.pid = Some(std::process::id());
-    job.error = None;
-    job.updated_unix = now()?;
-    save_job(data_dir, &job)?;
-    let result = transfer(data_dir, &job);
-    job.pid = None;
-    job.updated_unix = now()?;
-    match result {
-        Ok(TransferOutcome::Complete(path)) => {
-            if let Err(error) = verified_file(&job) {
-                job.status = JobStatus::Failed;
-                job.error = Some(error.to_string());
-                save_job(data_dir, &job)?;
-                return Err(error);
-            }
-            job.status = JobStatus::Complete;
-            save_job(data_dir, &job)?;
-            Ok(path)
-        }
-        Ok(TransferOutcome::Paused) => {
-            job.status = JobStatus::Paused;
-            save_job(data_dir, &job)?;
-            Err(TransferStopped::Paused(job.id).into())
-        }
-        Ok(TransferOutcome::Cancelled) => {
-            job.status = JobStatus::Cancelled;
-            save_job(data_dir, &job)?;
-            clear_cancel(data_dir, &job.id)?;
-            Err(TransferStopped::Cancelled(Some(job.id)).into())
-        }
-        Err(error) => {
-            job.status = JobStatus::Failed;
-            job.error = Some(error.to_string());
-            save_job(data_dir, &job)?;
-            Err(format!("download job {} failed: {error}", job.id).into())
-        }
-    }
-}
-
+/// Resume a recorded Steam download in the foreground.
 pub fn retry_job(data_dir: &Path, id: &str) -> Result<PathBuf> {
-    if load_job(data_dir, id)?.url.starts_with("steam://") {
-        return crate::steam_install::resume_job(data_dir, id);
-    }
-    resume_job(data_dir, id)
+    crate::steam_install::resume_job(data_dir, id)
 }
 
-fn resume_job(data_dir: &Path, id: &str) -> Result<PathBuf> {
-    let job = load_job(data_dir, id)?;
-    if job.kind == JobKind::Dlc {
-        return Err("DLC depot jobs must be restarted from the game page".into());
-    }
-    if job.status == JobStatus::Cancelled {
-        return Err("cancelled download jobs cannot be resumed".into());
-    }
-    if job.effective_status() == JobStatus::Running {
-        return Err("download job is already running".into());
-    }
-    if job.target.is_file() {
-        return Err("download target already exists".into());
-    }
-    clear_pause(data_dir, id)?;
-    let parent = job.target.parent().ok_or("invalid job target")?;
-    let parent = fs::canonicalize(parent)?;
-    let name = job.target.file_name().ok_or("invalid job filename")?;
-    let game = Game {
-        id: "job".into(),
-        title: "Download job".into(),
-        install_dir: parent,
-        executable: PathBuf::new(),
-        runner: crate::Runner::Auto,
-        arguments: Vec::new(),
-        environment: Default::default(),
-        last_played_unix: None,
-        origin: None,
-        steam_app_id: None,
-        launch_options: Vec::new(),
-        selected_launch_option_id: None,
-        cover_url: None,
-        banner_url: None,
-    };
-    let path = recorded_download(data_dir, &game, &job.url, Path::new(name), job.kind)?;
-    #[cfg(unix)]
-    if job.kind == JobKind::Game {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&path)?.permissions();
-        permissions.set_mode(permissions.mode() | 0o111);
-        fs::set_permissions(&path, permissions)?;
-    }
-    Ok(path)
-}
-
-/// Create a queued HTTPS transfer under azdl's background downloads directory.
-pub fn queue_job(data_dir: &Path, url: &str, relative: &Path) -> Result<String> {
-    queue_job_with_sha256(data_dir, url, relative, None)
-}
-
-pub fn queue_job_with_sha256(
-    data_dir: &Path,
-    url: &str,
-    relative: &Path,
-    expected_sha256: Option<&str>,
-) -> Result<String> {
-    if !url.starts_with("https://") {
-        return Err("download URL must use HTTPS".into());
-    }
-    let expected_sha256 = normalized_sha256(expected_sha256)?;
-    let downloads = data_dir.join("background-downloads");
-    fs::create_dir_all(&downloads)?;
-    let game = Game {
-        id: "background".into(),
-        title: "Background download".into(),
-        install_dir: fs::canonicalize(downloads)?,
-        executable: PathBuf::new(),
-        runner: crate::Runner::Auto,
-        arguments: Vec::new(),
-        environment: Default::default(),
-        last_played_unix: None,
-        origin: None,
-        steam_app_id: None,
-        launch_options: Vec::new(),
-        selected_launch_option_id: None,
-        cover_url: None,
-        banner_url: None,
-    };
-    let target = target_for(&game, relative)?;
-    let id = job_id(&target);
-    let _lock = acquire_lock(data_dir, &id)?;
-    if maybe_load_job(data_dir, &id)?.is_some() || target.exists() {
-        return Err("download job or target already exists".into());
-    }
-    save_job(
-        data_dir,
-        &DownloadJob {
-            id: id.clone(),
-            kind: JobKind::AdditionalFile,
-            url: url.to_string(),
-            target,
-            status: JobStatus::Queued,
-            pid: None,
-            error: None,
-            updated_unix: now()?,
-            expected_sha256,
-            install: None,
-            install_state: None,
-            install_error: None,
-            progress_bytes: None,
-            total_bytes: None,
-        },
-    )?;
-    Ok(id)
-}
-
-/// Queue a download that continues with installation after the transfer completes.
-pub fn queue_install_job(
-    data_dir: &Path,
-    game_id: &str,
-    title: &str,
-    kind: InstallKind,
-    url: &str,
-    filename: &Path,
-) -> Result<String> {
-    queue_install_job_with_sha256(data_dir, game_id, title, kind, url, filename, None)
-}
-
-pub fn queue_install_job_with_sha256(
-    data_dir: &Path,
-    game_id: &str,
-    title: &str,
-    kind: InstallKind,
-    url: &str,
-    filename: &Path,
-    expected_sha256: Option<&str>,
-) -> Result<String> {
-    validate_id(game_id)?;
-    if title.trim().is_empty() || load_library(data_dir)?.games.contains_key(game_id) {
-        return Err("title is empty or game ID already exists".into());
-    }
-    let destination = match kind {
-        InstallKind::File | InstallKind::Archive => data_dir.join("games").join(game_id),
-        InstallKind::Setup | InstallKind::SetupArchive => data_dir.join("prefixes").join(game_id),
-    };
-    if fs::symlink_metadata(destination).is_ok() {
-        return Err("install directory already exists for this game ID".into());
-    }
-    if list_jobs(data_dir)?.iter().any(|job| {
-        job.install
-            .as_ref()
-            .is_some_and(|plan| plan.game_id == game_id)
-            && job.status != JobStatus::Cancelled
-    }) {
-        return Err("an install job already exists for this game ID".into());
-    }
-    if filename.as_os_str().is_empty()
-        || filename
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err("download filename must be relative to the game directory".into());
-    }
-    let id = queue_job_with_sha256(
-        data_dir,
-        url,
-        &Path::new(game_id).join(filename),
-        expected_sha256,
-    )?;
-    let _lock = acquire_lock(data_dir, &id)?;
-    let mut job = load_job(data_dir, &id)?;
-    job.kind = kind.job_kind();
-    job.install = Some(InstallPlan {
-        game_id: game_id.into(),
-        title: title.into(),
-        kind,
-    });
-    job.install_state = Some(InstallState::Pending);
-    save_job(data_dir, &job)?;
-    Ok(id)
-}
-
-/// Run the saved install plan while holding the job lock. A failed install can be retried
-/// without downloading the file again; the downloaded artifact remains in place.
-pub fn finish_job_install<F>(data_dir: &Path, id: &str, install: F) -> Result<InstallFinish>
-where
-    F: FnOnce(&InstallPlan, &Path) -> Result<InstallFinish>,
-{
-    let _lock = acquire_lock(data_dir, id)?;
-    let mut job = load_job(data_dir, id)?;
-    let plan = job
-        .install
-        .clone()
-        .ok_or("download job has no install plan")?;
-    if job.status != JobStatus::Complete {
-        return Err("download has not completed".into());
-    }
-    if !fs::symlink_metadata(&job.target)
-        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
-    {
-        return Err("downloaded file is missing or is not a regular file".into());
-    }
-    if let Err(error) = verified_file(&job) {
-        job.status = JobStatus::Failed;
-        job.error = Some(error.to_string());
-        job.install_state = Some(InstallState::Failed);
-        job.install_error = Some(error.to_string());
-        job.updated_unix = now()?;
-        save_job(data_dir, &job)?;
-        return Err(error);
-    }
-    match job.effective_install_state() {
-        Some(InstallState::Complete) => return Ok(InstallFinish::Complete),
-        Some(InstallState::NeedsSelection) => return Ok(InstallFinish::NeedsSelection),
-        Some(InstallState::Installing) => return Err("game installation is already running".into()),
-        _ => {}
-    }
-    job.install_state = Some(InstallState::Installing);
-    job.install_error = None;
-    job.pid = Some(std::process::id());
-    job.updated_unix = now()?;
-    save_job(data_dir, &job)?;
-    let result = install(&plan, &job.target);
-    job.pid = None;
-    job.updated_unix = now()?;
-    match &result {
-        Ok(InstallFinish::Complete) => job.install_state = Some(InstallState::Complete),
-        Ok(InstallFinish::NeedsSelection) => job.install_state = Some(InstallState::NeedsSelection),
-        Err(error) => {
-            job.install_state = Some(InstallState::Failed);
-            job.install_error = Some(error.to_string());
-        }
-    }
-    save_job(data_dir, &job)?;
-    result
-}
-
-/// Reconcile an executable chosen after an archive or setup install needed selection.
+/// Reconcile an executable chosen after a Steam install needed selection.
 pub fn mark_install_registered(data_dir: &Path, game_id: &str) -> Result<()> {
     let library = load_library(data_dir)?;
     let Some(game) = library.games.get(game_id) else {
@@ -1049,13 +518,7 @@ pub fn mark_install_registered(data_dir: &Path, game_id: &str) -> Result<()> {
             continue;
         }
         let plan = listed.install.as_ref().ok_or("install plan missing")?;
-        let expected = match plan.kind {
-            InstallKind::File | InstallKind::Archive => data_dir.join("games").join(game_id),
-            InstallKind::Setup | InstallKind::SetupArchive => {
-                data_dir.join("prefixes").join(game_id)
-            }
-        };
-        if plan.title != game.title || !game.install_dir.starts_with(expected) {
+        if plan.title != game.title || !game.install_dir.starts_with(&listed.target) {
             continue;
         }
         let _lock = acquire_lock(data_dir, &listed.id)?;
@@ -1080,16 +543,6 @@ pub fn start_background(data_dir: &Path, id: &str) -> Result<u32> {
     }
     if job.effective_install_state() == Some(InstallState::Installing) {
         return Err("game installation is already running".into());
-    }
-    if job.target.is_file()
-        && !(job.status == JobStatus::Complete
-            && job.install.is_some()
-            && !matches!(
-                job.effective_install_state(),
-                Some(InstallState::Complete | InstallState::NeedsSelection)
-            ))
-    {
-        return Err("download target already exists".into());
     }
     clear_pause(data_dir, id)?;
     let log = File::create(job_path(data_dir, id)?.with_extension("log"))?;
@@ -1265,13 +718,6 @@ fn clear_retained_dlc_staging(data_dir: &Path, job: &DownloadJob) -> Result<()> 
     Ok(())
 }
 
-pub(crate) fn clear_job_if_present(data_dir: &Path, id: &str) -> Result<()> {
-    if maybe_load_job(data_dir, id)?.is_some() {
-        clear_job(data_dir, id)?;
-    }
-    Ok(())
-}
-
 pub fn clear_completed_jobs(data_dir: &Path) -> Result<usize> {
     let jobs = list_jobs(data_dir)?;
     let mut count = 0;
@@ -1310,11 +756,9 @@ mod tests {
             pid: None,
             error: Some("network failure".into()),
             updated_unix: now().unwrap(),
-            expected_sha256: None,
             install: Some(InstallPlan {
                 game_id: "base".into(),
                 title: "DLC".into(),
-                kind: InstallKind::Archive,
             }),
             install_state: Some(InstallState::Failed),
             install_error: None,
@@ -1331,68 +775,6 @@ mod tests {
         save_job(&root, &job).unwrap();
         clear_job(&root, &job.id).unwrap();
         assert_eq!(fs::read(job.target.join("unowned.bin")).unwrap(), b"keep");
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn user_stopped_downloads_keep_typed_outcomes_and_job_status() {
-        let root = std::env::temp_dir().join(format!(
-            "azdl-stopped-transfer-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let install_dir = root.join("game");
-        fs::create_dir_all(&install_dir).unwrap();
-        fs::create_dir_all(root.join("jobs")).unwrap();
-        let game = Game {
-            id: "base".into(),
-            title: "Base".into(),
-            install_dir: fs::canonicalize(&install_dir).unwrap(),
-            executable: PathBuf::new(),
-            runner: crate::Runner::Auto,
-            arguments: Vec::new(),
-            environment: Default::default(),
-            last_played_unix: None,
-            origin: None,
-            steam_app_id: None,
-            launch_options: Vec::new(),
-            selected_launch_option_id: None,
-            cover_url: None,
-            banner_url: None,
-        };
-        for (name, status) in [
-            ("paused.zip", JobStatus::Paused),
-            ("cancelled.zip", JobStatus::Cancelled),
-        ] {
-            let id = job_id_for_target(&game.install_dir.join(name));
-            let marker = if status == JobStatus::Paused {
-                pause_path(&root, &id)
-            } else {
-                cancel_path(&root, &id)
-            }
-            .unwrap();
-            fs::write(marker, b"stop").unwrap();
-            let error = recorded_download(
-                &root,
-                &game,
-                "https://example.invalid/archive",
-                Path::new(name),
-                JobKind::Archive,
-            )
-            .unwrap_err();
-            assert!(matches!(
-                (status, error.downcast_ref::<TransferStopped>()),
-                (JobStatus::Paused, Some(TransferStopped::Paused(_)))
-                    | (
-                        JobStatus::Cancelled,
-                        Some(TransferStopped::Cancelled(Some(_)))
-                    )
-            ));
-            assert_eq!(load_job(&root, &id).unwrap().status, status);
-        }
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1426,7 +808,6 @@ mod tests {
                 pid: Some(std::process::id()),
                 error: None,
                 updated_unix: now().unwrap(),
-                expected_sha256: None,
                 install: None,
                 install_state: Some(InstallState::Pending),
                 install_error: None,
@@ -1504,7 +885,6 @@ mod tests {
                     pid: Some(std::process::id()),
                     error: None,
                     updated_unix: now().unwrap(),
-                    expected_sha256: None,
                     install: None,
                     install_state: Some(InstallState::Pending),
                     install_error: None,
@@ -1539,110 +919,6 @@ mod tests {
     }
 
     #[test]
-    fn completed_job_verifies_digest_and_quarantines_modified_file() {
-        let root = std::env::temp_dir().join(format!(
-            "azdl-jobs-hash-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-        let id = queue_job_with_sha256(
-            &root,
-            "https://example.org/game.zip",
-            Path::new("game.zip"),
-            Some(expected),
-        )
-        .unwrap();
-        let mut job = load_job(&root, &id).unwrap();
-        fs::write(&job.target, b"abc").unwrap();
-        job.status = JobStatus::Complete;
-        save_job(&root, &job).unwrap();
-        let parent = fs::canonicalize(job.target.parent().unwrap()).unwrap();
-        let placeholder = Game {
-            id: "background".into(),
-            title: "Background".into(),
-            install_dir: parent,
-            executable: PathBuf::new(),
-            runner: crate::Runner::Auto,
-            arguments: Vec::new(),
-            environment: Default::default(),
-            last_played_unix: None,
-            origin: None,
-            steam_app_id: None,
-            launch_options: Vec::new(),
-            selected_launch_option_id: None,
-            cover_url: None,
-            banner_url: None,
-        };
-        assert_eq!(
-            recorded_download(
-                &root,
-                &placeholder,
-                &job.url,
-                Path::new("game.zip"),
-                JobKind::AdditionalFile,
-            )
-            .unwrap(),
-            job.target
-        );
-        fs::write(&job.target, b"modified").unwrap();
-        let error = recorded_download(
-            &root,
-            &placeholder,
-            &job.url,
-            Path::new("game.zip"),
-            JobKind::AdditionalFile,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("SHA-256 mismatch"));
-        assert_eq!(load_job(&root, &id).unwrap().status, JobStatus::Failed);
-        assert!(!job.target.exists());
-        assert!(
-            fs::read_dir(job.target.parent().unwrap())
-                .unwrap()
-                .filter_map(std::result::Result::ok)
-                .any(|entry| entry.file_name().to_string_lossy().contains("bad-sha256"))
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn deferred_install_checks_digest_again_before_running() {
-        let root = std::env::temp_dir().join(format!(
-            "azdl-install-hash-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-        let id = queue_install_job_with_sha256(
-            &root,
-            "demo",
-            "Demo",
-            InstallKind::Archive,
-            "https://example.org/demo.zip",
-            Path::new("demo.zip"),
-            Some(expected),
-        )
-        .unwrap();
-        let mut job = load_job(&root, &id).unwrap();
-        fs::write(&job.target, b"modified").unwrap();
-        job.status = JobStatus::Complete;
-        save_job(&root, &job).unwrap();
-        assert!(finish_job_install(&root, &id, |_, _| panic!("bad artifact installed")).is_err());
-        let failed = load_job(&root, &id).unwrap();
-        assert_eq!(failed.status, JobStatus::Failed);
-        assert_eq!(failed.install_state, Some(InstallState::Failed));
-        assert!(!job.target.exists());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn records_and_lists_interrupted_job_without_touching_network() {
         let root = std::env::temp_dir().join(format!(
             "azdl-jobs-{}-{}",
@@ -1656,14 +932,13 @@ mod tests {
         let target = root.join("game.zip");
         let job = DownloadJob {
             id: job_id(&target),
-            kind: JobKind::Archive,
+            kind: JobKind::Game,
             url: "https://example.org/game.zip".into(),
             target: target.clone(),
             status: JobStatus::Running,
             pid: Some(u32::MAX),
             error: None,
             updated_unix: now().unwrap(),
-            expected_sha256: None,
             install: None,
             install_state: None,
             install_error: None,
@@ -1680,88 +955,6 @@ mod tests {
         let mut completed = listed[0].clone();
         completed.status = JobStatus::Complete;
         assert_eq!(completed.downloaded_bytes(), 13);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn cancels_queued_job_and_discards_partial_file() {
-        let root = std::env::temp_dir().join(format!(
-            "azdl-jobs-cancel-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let id = queue_job(&root, "https://example.org/game.zip", Path::new("game.zip")).unwrap();
-        let job = load_job(&root, &id).unwrap();
-        fs::write(job.partial_path(), b"partial").unwrap();
-        cancel_job(&root, &id).unwrap();
-        let cancelled = load_job(&root, &id).unwrap();
-        assert_eq!(cancelled.status, JobStatus::Cancelled);
-        assert_eq!(cancelled.downloaded_bytes(), 0);
-        assert!(!cancelled.partial_path().exists());
-        assert!(!cancel_path(&root, &id).unwrap().exists());
-        assert!(retry_job(&root, &id).is_err());
-        assert!(start_background(&root, &id).is_err());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn install_plan_survives_failed_install_and_retries_without_download() {
-        let root = std::env::temp_dir().join(format!(
-            "azdl-install-job-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let id = queue_install_job(
-            &root,
-            "demo",
-            "Demo",
-            InstallKind::Archive,
-            "https://example.org/demo.zip",
-            Path::new("demo.zip"),
-        )
-        .unwrap();
-        assert!(
-            queue_install_job(
-                &root,
-                "demo",
-                "Demo",
-                InstallKind::Archive,
-                "https://example.org/other.zip",
-                Path::new("other.zip"),
-            )
-            .is_err()
-        );
-        let mut job = load_job(&root, &id).unwrap();
-        assert_eq!(job.install_state, Some(InstallState::Pending));
-        fs::write(&job.target, b"invalid archive").unwrap();
-        job.status = JobStatus::Complete;
-        save_job(&root, &job).unwrap();
-        assert!(finish_job_install(&root, &id, |_, _| Err("bad archive".into())).is_err());
-        let failed = load_job(&root, &id).unwrap();
-        assert_eq!(failed.status, JobStatus::Complete);
-        assert_eq!(failed.install_state, Some(InstallState::Failed));
-        assert_eq!(failed.install_error.as_deref(), Some("bad archive"));
-        assert_eq!(
-            finish_job_install(&root, &id, |plan, path| {
-                assert_eq!(plan.game_id, "demo");
-                assert_eq!(fs::read(path).unwrap(), b"invalid archive");
-                Ok(InstallFinish::Complete)
-            })
-            .unwrap(),
-            InstallFinish::Complete
-        );
-        assert_eq!(
-            load_job(&root, &id).unwrap().install_state,
-            Some(InstallState::Complete)
-        );
         fs::remove_dir_all(root).unwrap();
     }
 }

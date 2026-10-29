@@ -13,7 +13,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataCacheEntry {
@@ -34,7 +34,6 @@ fn is_guessed_steam_artwork(entry: &MetadataCacheEntry) -> bool {
 
 const MAX_CONCURRENT_METADATA_LOOKUPS: usize = 8;
 const MAX_METADATA_CACHE_ENTRIES: usize = 2048;
-const FIX_STATUS_CACHE_TTL: Duration = Duration::from_secs(15);
 
 fn steam_dlc_provider_status(app_id: u32) -> Result<(), String> {
     azdl::steam_access::manifest_url(app_id)
@@ -400,8 +399,6 @@ pub struct TaskInfo {
     pub log_tail: String,
 }
 
-type FixStatusCache = HashMap<String, (PathBuf, azdl::multiplayer::FixKind, Instant)>;
-
 #[derive(Clone)]
 pub struct AppState {
     pub data_dir: PathBuf,
@@ -411,8 +408,6 @@ pub struct AppState {
     pub cached_diagnostics: Arc<Mutex<Option<Vec<azdl::doctor::SystemCheck>>>>,
     library_cache: Arc<Mutex<Option<CachedLibrary>>>,
     pub dir_size_cache: Arc<sizes::SizeCache>,
-    pub steamstub_cache: Arc<Mutex<HashMap<String, (azdl::steamless::SteamStubStatus, Instant)>>>,
-    pub fix_status_cache: Arc<Mutex<FixStatusCache>>,
     pub metadata_cache: Arc<Mutex<HashMap<String, MetadataCacheEntry>>>,
     pub metadata_pending: Arc<Mutex<HashSet<String>>>,
     pub app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
@@ -454,8 +449,6 @@ pub enum Action {
     DlcInstall {
         id: String,
         dlc_id: String,
-        #[serde(default)]
-        resume_job_id: Option<String>,
     },
     DlcRemove {
         id: String,
@@ -471,21 +464,12 @@ pub enum Action {
         #[serde(default)]
         location: Option<String>,
     },
-    GameImport {
-        id: String,
-        title: String,
-        install_dir: String,
-        #[serde(default)]
-        executable: Option<String>,
-    },
     PendingAdd {
         id: String,
         #[serde(default)]
         title: Option<String>,
         install_dir: String,
         executable: String,
-        #[serde(default)]
-        install_kind: Option<String>,
     },
     PendingRemove {
         id: String,
@@ -502,35 +486,6 @@ pub enum Action {
         id: String,
     },
     SteamShortcutRemove {
-        id: String,
-    },
-    OverlayToggle {
-        id: String,
-    },
-    SteamstubUnpack {
-        id: String,
-    },
-    SteamstubRollback {
-        id: String,
-    },
-    EaHeal {
-        id: String,
-    },
-    EaRollback {
-        id: String,
-    },
-    DlcLicensePatch {
-        id: String,
-        #[serde(default)]
-        dlc_ids: Option<Vec<u32>>,
-    },
-    DlcLicenseRollback {
-        id: String,
-    },
-    GoldbergSync {
-        id: String,
-    },
-    GoldbergRollback {
         id: String,
     },
     InstallVcredist {
@@ -592,12 +547,6 @@ pub enum Action {
         #[serde(default)]
         location: Option<String>,
     },
-    PatchToggle {
-        id: String,
-    },
-    PatchRollback {
-        id: String,
-    },
     SettingsUpdate {
         settings: azdl::settings::LauncherSettings,
     },
@@ -619,7 +568,6 @@ pub enum Action {
         id: String,
         drive_id: String,
     },
-    ScanInstalledGames,
     ProtonDownload,
     SteamShortcutsSync,
     JobClear {
@@ -637,7 +585,7 @@ fn resolve_install_game(
     title: Option<&str>,
     banner_url: Option<&str>,
     cover_url: Option<&str>,
-) -> AzdlResult<azdl::catalog::CatalogGame> {
+) -> AzdlResult<azdl::steam_install::SteamGame> {
     if let Some(app_id) = qualified_id
         .strip_prefix("steam:")
         .and_then(|value| value.parse::<u32>().ok())
@@ -924,9 +872,10 @@ fn run_worker_install(
             std::process::exit(1);
         }
     };
-    let outcome = azdl::catalog::install_game_in(&mut library, &data_dir, &games_root, &cat_game);
+    let outcome =
+        azdl::steam_install::install_game_in(&mut library, &data_dir, &games_root, &cat_game);
     match outcome {
-        Ok(azdl::catalog::InstallOutcome::Installed(inst_id)) => {
+        Ok(azdl::steam_install::InstallOutcome::Installed(inst_id)) => {
             if let Ok(mut fresh_library) = azdl::load_library(&data_dir) {
                 if let Some(installed_game) = library.games.remove(&inst_id) {
                     fresh_library.games.insert(inst_id, installed_game);
@@ -940,11 +889,8 @@ fn run_worker_install(
             let _ = azdl::cleanup_leftovers(&data_dir, Some(&cat_game.id));
             std::process::exit(0);
         }
-        Ok(azdl::catalog::InstallOutcome::NeedsSelection(_)) => {
+        Ok(azdl::steam_install::InstallOutcome::NeedsSelection(_)) => {
             let _ = azdl::save_library(&data_dir, &library);
-            std::process::exit(0);
-        }
-        Ok(azdl::catalog::InstallOutcome::SteamRequested(_)) => {
             std::process::exit(0);
         }
         Err(e) => {
@@ -988,8 +934,6 @@ fn main() {
         cached_diagnostics: Arc::new(Mutex::new(None)),
         library_cache: Arc::new(Mutex::new(None)),
         dir_size_cache,
-        steamstub_cache: Arc::new(Mutex::new(HashMap::new())),
-        fix_status_cache: Arc::new(Mutex::new(HashMap::new())),
         metadata_cache: Arc::new(Mutex::new(metadata_cache)),
         metadata_pending: Arc::new(Mutex::new(HashSet::new())),
         app_handle: Arc::new(Mutex::new(None)),
@@ -1132,7 +1076,6 @@ fn main() {
             commands::resolve_game_artwork,
             commands::diagnose,
             commands::discover_exes,
-            commands::scan_game_setup,
             commands::launch_game,
             commands::stop_game,
             commands::run_action,

@@ -99,12 +99,17 @@ fn test_state(root: &Path) -> AppState {
         cached_diagnostics: Arc::new(Mutex::new(None)),
         library_cache: Arc::new(Mutex::new(None)),
         dir_size_cache: Arc::new(sizes::SizeCache::new(root)),
-        steamstub_cache: Arc::new(Mutex::new(HashMap::new())),
-        fix_status_cache: Arc::new(Mutex::new(HashMap::new())),
         metadata_cache: Arc::new(Mutex::new(HashMap::new())),
         metadata_pending: Arc::new(Mutex::new(HashSet::new())),
         app_handle: Arc::new(Mutex::new(None)),
     }
+}
+
+/// Register an installed game directly, as a completed Steam install would.
+fn register_fixture(state: &AppState, id: &str, title: &str, install_dir: &Path, executable: &str) {
+    let mut library = azdl::load_library(&state.data_dir).unwrap();
+    azdl::add_game(&mut library, id, title, install_dir, Path::new(executable)).unwrap();
+    azdl::save_library(&state.data_dir, &library).unwrap();
 }
 
 #[test]
@@ -312,42 +317,6 @@ fn metadata_lookups_are_deduplicated_and_bounded() {
 }
 
 #[test]
-fn fix_status_cache_reuses_results_and_refreshes_after_invalidation() {
-    let root = scratch();
-    let install_dir = root.join("game");
-    fs::create_dir_all(&install_dir).unwrap();
-    fs::write(install_dir.join("game.exe"), b"game").unwrap();
-    let mut library = azdl::Library::default();
-    azdl::add_game(
-        &mut library,
-        "game",
-        "Game",
-        &install_dir,
-        Path::new("game.exe"),
-    )
-    .unwrap();
-    let game = library.games.get("game").unwrap();
-    let state = test_state(&root);
-
-    assert_eq!(
-        commands::detect_fix_cached(&state, game),
-        Some(azdl::multiplayer::FixKind::None)
-    );
-    fs::write(install_dir.join("OnlineFix.ini"), b"[OnlineFix]").unwrap();
-    assert_eq!(
-        commands::detect_fix_cached(&state, game),
-        Some(azdl::multiplayer::FixKind::None)
-    );
-
-    state.fix_status_cache.lock().unwrap().remove("game");
-    assert_eq!(
-        commands::detect_fix_cached(&state, game),
-        Some(azdl::multiplayer::FixKind::OnlineFix)
-    );
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn test_app_state_initialization() {
     let temp = scratch();
     let state = test_state(&temp);
@@ -411,19 +380,7 @@ fn test_action_request_deserialization() {
 
     let install: ActionRequest =
         serde_json::from_str(r#"{"action":"dlc-install","id":"base","dlc_id":"bonus"}"#).unwrap();
-    assert!(matches!(
-        install,
-        Action::DlcInstall {
-            resume_job_id: None,
-            ..
-        }
-    ));
-    let resume: ActionRequest = serde_json::from_str(
-        r#"{"action":"dlc-install","id":"base","dlc_id":"bonus","resume_job_id":"0123456789abcdef"}"#,
-    ).unwrap();
-    assert!(
-        matches!(resume, Action::DlcInstall { resume_job_id: Some(id), .. } if id == "0123456789abcdef")
-    );
+    assert!(matches!(install, Action::DlcInstall { dlc_id, .. } if dlc_id == "bonus"));
 }
 
 #[test]
@@ -453,7 +410,7 @@ fn test_handle_get_runners() {
 }
 
 #[test]
-fn test_handle_run_action_game_import_and_remove() {
+fn test_handle_run_action_game_remove() {
     let root = scratch();
     let state = test_state(&root);
     let game_dir = root.join("my-test-game");
@@ -461,14 +418,7 @@ fn test_handle_run_action_game_import_and_remove() {
     fs::write(game_dir.join("game.bin"), b"test").unwrap();
 
     // 1. Import game
-    let import_req = Action::GameImport {
-        id: "test-game".into(),
-        title: "My Test Game".into(),
-        install_dir: game_dir.to_string_lossy().into(),
-        executable: Some("game.bin".into()),
-    };
-    let res = handle_run_action(&state, import_req).unwrap();
-    assert_eq!(res["imported"], "test-game");
+    register_fixture(&state, "test-game", "My Test Game", &game_dir, "game.bin");
 
     // Verify it is in state
     let current = handle_get_state(&state).unwrap();
@@ -517,13 +467,7 @@ fn test_handle_run_action_runner_and_executable_set() {
     fs::write(game_dir.join("game.exe"), b"test").unwrap();
     fs::write(game_dir.join("game2.exe"), b"test2").unwrap();
 
-    let import_req = Action::GameImport {
-        id: "runner-game".into(),
-        title: "Runner Game".into(),
-        install_dir: game_dir.to_string_lossy().into(),
-        executable: Some("game.exe".into()),
-    };
-    handle_run_action(&state, import_req).unwrap();
+    register_fixture(&state, "runner-game", "Runner Game", &game_dir, "game.exe");
 
     // Change runner to wine
     let runner_req = Action::RunnerSet {
@@ -553,16 +497,13 @@ fn test_handle_run_action_args_and_env() {
     fs::create_dir_all(&game_dir).unwrap();
     fs::write(game_dir.join("main.bin"), b"test").unwrap();
 
-    handle_run_action(
+    register_fixture(
         &state,
-        Action::GameImport {
-            id: "args-env-game".into(),
-            title: "Args Env Game".into(),
-            install_dir: game_dir.to_string_lossy().into(),
-            executable: Some("main.bin".into()),
-        },
-    )
-    .unwrap();
+        "args-env-game",
+        "Args Env Game",
+        &game_dir,
+        "main.bin",
+    );
 
     // Set launch arguments
     handle_run_action(
@@ -613,16 +554,7 @@ fn test_handle_run_action_launch_options() {
     fs::write(game_dir.join("game.exe"), b"test").unwrap();
     fs::write(game_dir.join("mp.exe"), b"mp").unwrap();
 
-    handle_run_action(
-        &state,
-        Action::GameImport {
-            id: "opt-game".into(),
-            title: "Option Game".into(),
-            install_dir: game_dir.to_string_lossy().into(),
-            executable: Some("game.exe".into()),
-        },
-    )
-    .unwrap();
+    register_fixture(&state, "opt-game", "Option Game", &game_dir, "game.exe");
 
     // Add launch option
     handle_run_action(
@@ -698,7 +630,6 @@ fn test_handle_run_action_pending_add() {
             title: None, // defaults to "unregistered"
             install_dir: pending_dir.to_string_lossy().into(),
             executable: "app.exe".into(),
-            install_kind: None,
         },
     )
     .unwrap();
@@ -745,16 +676,7 @@ fn test_handle_diagnose_and_discover_exes() {
     fs::create_dir_all(&game_dir).unwrap();
     fs::write(game_dir.join("main.exe"), b"exe").unwrap();
 
-    handle_run_action(
-        &state,
-        Action::GameImport {
-            id: "diag-game".into(),
-            title: "Diag Game".into(),
-            install_dir: game_dir.to_string_lossy().into(),
-            executable: Some("main.exe".into()),
-        },
-    )
-    .unwrap();
+    register_fixture(&state, "diag-game", "Diag Game", &game_dir, "main.exe");
 
     let diag = handle_diagnose(&state, "diag-game".into()).unwrap();
     assert!(diag.get("runner").is_some());
@@ -765,28 +687,6 @@ fn test_handle_diagnose_and_discover_exes() {
     assert!(
         arr.iter()
             .any(|c| c["relative_path"].as_str().unwrap() == "main.exe")
-    );
-}
-
-#[test]
-fn test_handle_scan_game_setup() {
-    let root = scratch();
-    let state = test_state(&root);
-    let prefix_dir = root
-        .join("prefixes")
-        .join("prefix-game")
-        .join("drive_c")
-        .join("Program Files")
-        .join("Game");
-    fs::create_dir_all(&prefix_dir).unwrap();
-    fs::write(prefix_dir.join("game.exe"), b"game").unwrap();
-
-    let scanned = handle_scan_game_setup(&state, "prefix-game".into(), None).unwrap();
-    let arr = scanned.as_array().unwrap();
-    assert!(!arr.is_empty());
-    assert!(
-        arr.iter()
-            .any(|c| c["executable"].as_str().unwrap().contains("game.exe"))
     );
 }
 
@@ -844,121 +744,6 @@ fn get_state_returns_persisted_steam_artwork_and_app_id() {
 }
 
 #[test]
-fn test_handle_run_action_overlay_toggle() {
-    let root = scratch();
-    let state = test_state(&root);
-    let game_dir = root.join("fix-game");
-    fs::create_dir_all(&game_dir).unwrap();
-    fs::write(game_dir.join("game.exe"), b"test").unwrap();
-    // Create an online-fix DLL
-    fs::write(game_dir.join("OnlineFix.ini"), b"[Main]\nFakeAppId=480").unwrap();
-    fs::write(game_dir.join("OnlineFix64.dll"), b"dll").unwrap();
-
-    handle_run_action(
-        &state,
-        Action::GameImport {
-            id: "fix-game".into(),
-            title: "Fix Game".into(),
-            install_dir: game_dir.to_string_lossy().into(),
-            executable: Some("game.exe".into()),
-        },
-    )
-    .unwrap();
-
-    // Toggle overlay: disables OnlineFix64.dll -> OnlineFix64.dll.arachnel-off
-    let res = handle_run_action(
-        &state,
-        Action::OverlayToggle {
-            id: "fix-game".into(),
-        },
-    )
-    .unwrap();
-    assert_eq!(res["enabled"], false);
-    assert!(game_dir.join("OnlineFix64.dll.arachnel-off").exists());
-
-    // Toggle back: re-enables
-    let res2 = handle_run_action(
-        &state,
-        Action::OverlayToggle {
-            id: "fix-game".into(),
-        },
-    )
-    .unwrap();
-    assert_eq!(res2["enabled"], true);
-    assert!(game_dir.join("OnlineFix64.dll").exists());
-}
-
-#[test]
-fn test_handle_run_action_steamstub_unpack_and_rollback() {
-    let root = scratch();
-    let state = test_state(&root);
-    let game_dir = root.join("stub-game");
-    fs::create_dir_all(&game_dir).unwrap();
-
-    let exe_path = game_dir.join("game.exe");
-    let mut data = vec![0u8; 512];
-    data[0] = b'M';
-    data[1] = b'Z';
-    data[0x3C] = 0x80;
-    data[128] = b'P';
-    data[129] = b'E';
-    data[130] = 0;
-    data[131] = 0;
-    data[134] = 1;
-    data[148] = 0;
-    for (i, b) in b".bind\0\0\0".iter().enumerate() {
-        data[152 + i] = *b;
-    }
-    fs::write(&exe_path, &data).unwrap();
-
-    handle_run_action(
-        &state,
-        Action::GameImport {
-            id: "stub-game".into(),
-            title: "Stub Game".into(),
-            install_dir: game_dir.to_string_lossy().into(),
-            executable: Some("game.exe".into()),
-        },
-    )
-    .unwrap();
-
-    let lib_state = handle_get_state(&state).unwrap();
-    assert_eq!(lib_state["library"][0]["steamstub"]["stub_present"], true);
-    assert_eq!(lib_state["library"][0]["steamstub"]["applied"], false);
-
-    // Simulate unpack by creating backup and clean exe
-    let backup_path = game_dir.join("game.exe.steamstub.bak");
-    fs::copy(&exe_path, &backup_path).unwrap();
-    let mut clean_data = data.clone();
-    for (i, b) in b".text\0\0\0".iter().enumerate() {
-        clean_data[152 + i] = *b;
-    }
-    fs::write(&exe_path, &clean_data).unwrap();
-
-    let res_rollback = handle_run_action(
-        &state,
-        Action::SteamstubRollback {
-            id: "stub-game".into(),
-        },
-    )
-    .unwrap();
-
-    assert_eq!(res_rollback["success"], true);
-    assert_eq!(res_rollback["restored_count"], 1);
-    assert_eq!(res_rollback["steamstub"]["stub_present"], true);
-    assert_eq!(res_rollback["steamstub"]["applied"], false);
-
-    let cached_status = {
-        let cache = state.steamstub_cache.lock().unwrap();
-        cache.get("stub-game").map(|(s, _)| s.clone()).unwrap()
-    };
-    assert!(cached_status.stub_present);
-    assert!(!cached_status.applied);
-
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn test_handle_launch_and_stop_game() {
     let root = scratch();
     let state = test_state(&root);
@@ -983,16 +768,7 @@ fn test_handle_launch_and_stop_game() {
     #[cfg(windows)]
     fs::write(&exe_path, b"@echo off\r\nping -n 31 127.0.0.1 >nul\r\n").unwrap();
 
-    handle_run_action(
-        &state,
-        Action::GameImport {
-            id: "proc-game".into(),
-            title: "Proc Game".into(),
-            install_dir: game_dir.to_string_lossy().into(),
-            executable: Some(exe_name.into()),
-        },
-    )
-    .unwrap();
+    register_fixture(&state, "proc-game", "Proc Game", &game_dir, exe_name);
 
     state.tasks.lock().unwrap().push(TaskInfo {
         id: "dlc-proc-game-123".into(),
@@ -1255,11 +1031,9 @@ fn test_download_status_and_thumbnail_enrichment_and_clear_completed() {
         pid: Some(std::process::id()),
         error: None,
         updated_unix: 1700000000,
-        expected_sha256: None,
         install: Some(azdl::jobs::InstallPlan {
             game_id: "steam-480".to_string(),
             title: "Spacewar".to_string(),
-            kind: azdl::jobs::InstallKind::File,
         }),
         install_state: None,
         install_error: None,
@@ -1275,7 +1049,6 @@ fn test_download_status_and_thumbnail_enrichment_and_clear_completed() {
         pid: None,
         error: Some("network error".to_string()),
         updated_unix: 1700000000,
-        expected_sha256: None,
         install: None,
         install_state: None,
         install_error: None,

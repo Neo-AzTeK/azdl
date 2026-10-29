@@ -8,8 +8,6 @@ use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
-pub(crate) mod legacy_catalog;
-
 const VERSION: u64 = 1;
 
 fn regular(path: &Path, directory: bool) -> Result<bool> {
@@ -131,52 +129,14 @@ pub fn migrate(data_dir: &Path) -> Result<()> {
     }
     let library_path = data_dir.join("library.json");
     let mut installed_paths = Vec::<PathBuf>::new();
-    let mut warnings = Vec::new();
     if let Some(mut library) = read_json(&library_path)? {
         let games = library["games"]
             .as_object_mut()
             .ok_or("Invalid library game map")?;
-        // Preserve archive DLC resumability before archiving old source catalogs.
-        let sources = data_dir.join("content-sources");
-        directory(&sources)?;
         for (id, game) in games.iter_mut() {
             validate_id(id)?;
             if let Some(path) = game["install_dir"].as_str() {
                 installed_paths.push(PathBuf::from(path));
-            }
-            if let Some(qualified) = game["origin"]["qualified_id"].as_str()
-                && let Some((source, _)) = qualified.split_once(':')
-            {
-                validate_id(source)?;
-                let cache = data_dir.join("catalog-cache");
-                if regular(&cache, true)? {
-                    let feed = cache.join(format!("{source}.json"));
-                    if regular(&feed, false)? {
-                        let entries = match legacy_catalog::parse_feed(&fs::read(&feed)?, source) {
-                            Ok(entries) => entries,
-                            Err(error) => {
-                                warnings.push(
-                                    serde_json::json!({"file":feed, "error":error.to_string()}),
-                                );
-                                Vec::new()
-                            }
-                        };
-                        if let Some(entry) = entries
-                            .into_iter()
-                            .find(|entry| entry.qualified_id() == qualified)
-                        {
-                            let addons = entry
-                                .addons
-                                .into_iter()
-                                .filter(|addon| addon.kind == crate::catalog::AddonKind::Dlc)
-                                .collect::<Vec<_>>();
-                            let target = sources.join(format!("{id}.json"));
-                            if !regular(&target, false)? {
-                                publish(&target, &serde_json::to_value(addons)?)?;
-                            }
-                        }
-                    }
-                }
             }
             let app_id = game["steam_app_id"]
                 .as_u64()
@@ -255,17 +215,12 @@ pub fn migrate(data_dir: &Path) -> Result<()> {
             }
         }
     }
-    if !warnings.is_empty() {
-        publish(
-            &backup_dir.join("catalog-warnings.json"),
-            &serde_json::to_value(warnings)?,
-        )?;
-    }
     for name in [
         "plugins",
         "plugin-downloads",
         "plugin-store.json",
         "catalog-cache",
+        "content-sources",
     ] {
         let source = data_dir.join(name);
         let meta = match fs::symlink_metadata(&source) {
@@ -371,9 +326,9 @@ mod tests {
         assert_eq!(migrated, expected);
         let loaded = crate::load_library(&root).unwrap();
         assert_eq!(loaded.games["old-id"].arguments, ["-windowed"]);
-        assert_eq!(
-            crate::dlc::available_for_game(&loaded.games["old-id"], &root).unwrap()[0].id,
-            "bonus"
+        assert!(
+            root.join("migration-backup-v1/catalog-cache/provider.json")
+                .is_file()
         );
         assert!(!root.join("plugins").exists());
         assert!(
@@ -419,10 +374,6 @@ mod tests {
         assert_eq!(
             fs::read(root.join("migration-backup-v1/catalog-cache/old.json")).unwrap(),
             b"broken cache"
-        );
-        assert!(
-            root.join("migration-backup-v1/catalog-warnings.json")
-                .is_file()
         );
         assert_eq!(
             read_json(&root.join("library.json")).unwrap().unwrap()["games"]["kept"]["id"],

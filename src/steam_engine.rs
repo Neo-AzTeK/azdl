@@ -503,7 +503,6 @@ mod tests {
                 pid: Some(std::process::id()),
                 error: None,
                 updated_unix: now().unwrap(),
-                expected_sha256: None,
                 install: None,
                 install_state: Some(InstallState::Pending),
                 install_error: None,
