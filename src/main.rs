@@ -2,6 +2,12 @@ use azdl::doctor::diagnose_game;
 use azdl::jobs::{
     cancel_job, list_jobs, load_job, mark_install_registered, pause_job, start_background,
 };
+use azdl::multiplayer::{FixKind, detect_fix, steam_running};
+use azdl::overlay::{overlay_status, set_overlay_enabled};
+use azdl::patch::{
+    active_patch, apply_patch, apply_patch_archive_with_root, disable_patch, enable_patch,
+    rollback_patch,
+};
 use azdl::runtime::discover_proton;
 use azdl::shortcuts::{create_shortcut, remove_shortcut, shortcut_status};
 use azdl::steam::{import_steam, scan_steam, steam_root};
@@ -13,14 +19,14 @@ use azdl::steam_shortcuts::{
 };
 use azdl::{
     Library, Result, add_game, add_launch_option, data_dir, load_library, remove_launch_option,
-    save_library, select_launch_option, set_executable, set_runner, spawn_game,
+    resolve_launch, save_library, select_launch_option, set_executable, set_runner, spawn_game,
 };
 use std::env;
 use std::fs;
 use std::path::Path;
 
 fn usage() -> &'static str {
-    "Usage:\n  azdl list\n  azdl runners\n  azdl steam featured|search <query>\n  azdl steam install <appid>\n  azdl steam scan|import <appid>\n  azdl jobs list|show <job-id>|retry <job-id>\n  azdl jobs pause|resume|cancel <job-id>\n  azdl pending add <id> <title> <install-dir> <executable>\n  azdl shortcut create|status|remove <id> [desktop-directory]\n  azdl steam shortcut create|status|remove <id> [shortcuts.vdf]\n  azdl doctor <id>\n  azdl executable <id> <path-inside-install-dir>\n  azdl runner <id> <auto|native|wine|proton:auto|proton:/path/to/proton>\n  azdl option list <id>\n  azdl option add <id> <option-id> <title> <executable> <working-dir|-> [arguments...]\n  azdl option select <id> <option-id|default>\n  azdl option remove <id> <option-id>\n  azdl args <id> [launch arguments...]\n  azdl env <id> <name> <value>\n  azdl env-remove <id> <name>\n  azdl launch <id> [extra arguments...]\n  azdl dependencies <id> [status|install-vcredist|install-directx]\n  azdl installscript scan|apply <id>\n  azdl remove <id>\n\nUse AZDL_DATA_DIR to choose a library and prefix directory."
+    "Usage:\n  azdl list\n  azdl runners\n  azdl steam featured|search <query>\n  azdl steam install <appid>\n  azdl steam scan|import <appid>\n  azdl jobs list|show <job-id>|retry <job-id>\n  azdl jobs pause|resume|cancel <job-id>\n  azdl pending add <id> <title> <install-dir> <executable>\n  azdl shortcut create|status|remove <id> [desktop-directory]\n  azdl steam shortcut create|status|remove <id> [shortcuts.vdf]\n  azdl doctor <id>\n  azdl executable <id> <path-inside-install-dir>\n  azdl runner <id> <auto|native|wine|proton:auto|proton:/path/to/proton>\n  azdl option list <id>\n  azdl option add <id> <option-id> <title> <executable> <working-dir|-> [arguments...]\n  azdl option select <id> <option-id|default>\n  azdl option remove <id> <option-id>\n  azdl args <id> [launch arguments...]\n  azdl env <id> <name> <value>\n  azdl env-remove <id> <name>\n  azdl launch <id> [extra arguments...]\n  azdl dependencies <id> [status|install-vcredist|install-directx]\n  azdl installscript scan|apply <id>\n  azdl steamstub status|unpack|rollback <id>\n  azdl goldberg sync|status|rollback <id>\n  azdl fixes ea-heal|ea-rollback|provision-steam-api|patch-dlc-installed|patch-dlc-installed-rollback <id> [dlc-ids...]\n  azdl patch apply <id> <extracted-patch-dir>\n  azdl patch archive <id> <archive-path> [archive-root]\n  azdl patch status|enable|disable|rollback <id>\n  azdl overlay status|enable|disable <id>\n  azdl fix-status <id>\n  azdl remove <id>\n\nUse AZDL_DATA_DIR to choose a library and prefix directory."
 }
 
 fn save_pending_result(library: &mut Library, data_dir: &Path, id: &str) -> Result<()> {
@@ -296,6 +302,232 @@ fn run() -> Result<()> {
             }
             if report.has_errors() {
                 return Err("launch prerequisites have errors".into());
+            }
+        }
+        Some("steamstub") if args.len() == 3 => {
+            let game = library.games.get(&args[2]).ok_or("unknown game ID")?;
+            match args[1].as_str() {
+                "status" => {
+                    let status = azdl::steamless::scan_game_steamstub(game);
+                    println!("SteamStub for {}: {}", game.id, status.label);
+                }
+                "unpack" => {
+                    let stripped = azdl::steamless::unpack_game(game, &data)?;
+                    println!("Unpacked {} executable(s) for {}", stripped, game.id);
+                }
+                "rollback" => {
+                    let restored = azdl::steamless::rollback_game(game)?;
+                    println!("Restored {} executable(s) for {}", restored, game.id);
+                }
+                _ => return Err(usage().into()),
+            }
+        }
+        Some("fixes") if args.len() >= 3 => {
+            let game = library.games.get(&args[2]).ok_or("unknown game ID")?;
+            match args[1].as_str() {
+                "ea-heal" => {
+                    let patched = azdl::fixes::heal_ea_activation(&game.install_dir)?;
+                    println!(
+                        "EA activation heal for {}: {}",
+                        game.id,
+                        if patched {
+                            "patched"
+                        } else {
+                            "not needed / clean"
+                        }
+                    );
+                }
+                "ea-rollback" => {
+                    let restored = azdl::fixes::rollback_ea_activation(&game.install_dir)?;
+                    println!(
+                        "EA activation rollback for {}: {}",
+                        game.id,
+                        if restored {
+                            "restored"
+                        } else {
+                            "no backup found"
+                        }
+                    );
+                }
+                "provision-steam-api" => {
+                    let res =
+                        azdl::fixes::ensure_steam_api_dll(&game.install_dir, &game.executable)?;
+                    println!(
+                        "Steam API provisioning for {}: {}",
+                        game.id,
+                        res.unwrap_or_else(|| "already satisfied".into())
+                    );
+                }
+                "patch-dlc-installed" => {
+                    let mut dlc_ids = Vec::new();
+                    for arg in args.iter().skip(3) {
+                        if let Ok(id) = arg.parse::<u32>() {
+                            dlc_ids.push(id);
+                        }
+                    }
+                    let patched = azdl::fixes::patch_dlc_installed_ids(&game.install_dir, &dlc_ids)?;
+                    println!(
+                        "DLC installed patch for {}: {}",
+                        game.id,
+                        if patched {
+                            "patched"
+                        } else {
+                            "not needed / clean"
+                        }
+                    );
+                }
+                "patch-dlc-installed-rollback" => {
+                    let restored = azdl::fixes::rollback_dlc_installed(&game.install_dir)?;
+                    println!(
+                        "DLC installed patch rollback for {}: {}",
+                        game.id,
+                        if restored {
+                            "restored"
+                        } else {
+                            "no backup found"
+                        }
+                    );
+                }
+                _ => return Err(usage().into()),
+            }
+        }
+        Some("goldberg") if args.len() == 3 => {
+            let game = library.games.get(&args[2]).ok_or("unknown game ID")?;
+            match args[1].as_str() {
+                "sync" => {
+                    let updated = azdl::goldberg::prepare_goldberg_for_game(game, &data)?;
+                    println!(
+                        "Goldberg sync for {}: {}",
+                        game.id,
+                        if updated {
+                            "synchronized"
+                        } else {
+                            "already up to date / not needed"
+                        }
+                    );
+                }
+                "status" => {
+                    let compatible = azdl::goldberg::is_goldberg_compatible(&game.install_dir);
+                    let has_settings = azdl::goldberg::has_goldberg_settings(&game.install_dir);
+                    println!(
+                        "Goldberg status for {}: compatible={}, has_settings={}",
+                        game.id, compatible, has_settings
+                    );
+                }
+                "rollback" => {
+                    let rolled_back = azdl::goldberg::rollback_goldberg_config(&game.install_dir)?;
+                    println!(
+                        "Goldberg rollback for {}: {}",
+                        game.id,
+                        if rolled_back {
+                            "restored"
+                        } else {
+                            "no managed config found"
+                        }
+                    );
+                }
+                _ => return Err(usage().into()),
+            }
+        }
+        Some("patch") if args.len() == 4 && args[1] == "apply" => {
+            let game = library.games.get(&args[2]).ok_or("unknown game ID")?;
+            let count = apply_patch(game, &data, Path::new(&args[3]))?;
+            println!("Applied {count} patch files to {}", args[2]);
+        }
+        Some("patch") if (args.len() == 4 || args.len() == 5) && args[1] == "archive" => {
+            let game = library.games.get(&args[2]).ok_or("unknown game ID")?;
+            let count = apply_patch_archive_with_root(
+                game,
+                &data,
+                Path::new(&args[3]),
+                args.get(4).map(Path::new),
+            )?;
+            println!("Applied {count} patch files to {}", args[2]);
+        }
+        Some("patch") if args.len() == 3 && args[1] == "status" => {
+            if let Some(patch) = active_patch(&data, &args[2])? {
+                let source = patch.source_archive.as_ref().unwrap_or(&patch.source_dir);
+                println!(
+                    "{}: {} files from {}",
+                    if patch.enabled { "enabled" } else { "disabled" },
+                    patch.entries.len(),
+                    source.display()
+                );
+            } else {
+                println!("No active patch for {}", args[2]);
+            }
+        }
+        Some("patch") if args.len() == 3 && args[1] == "disable" => {
+            let game = library.games.get(&args[2]).ok_or("unknown game ID")?;
+            disable_patch(game, &data)?;
+            println!("Disabled patch for {}", args[2]);
+        }
+        Some("patch") if args.len() == 3 && args[1] == "enable" => {
+            let game = library.games.get(&args[2]).ok_or("unknown game ID")?;
+            enable_patch(game, &data)?;
+            println!("Enabled patch for {}", args[2]);
+        }
+        Some("patch") if args.len() == 3 && args[1] == "rollback" => {
+            let game = library.games.get(&args[2]).ok_or("unknown game ID")?;
+            rollback_patch(game, &data)?;
+            println!("Rolled back patch for {}", args[2]);
+        }
+        Some("overlay") if args.len() == 3 && args[1] == "status" => {
+            let game = library.games.get(&args[2]).ok_or("unknown game ID")?;
+            let status = overlay_status(game)?;
+            println!(
+                "{}: {} active, {} disabled fix files in {} directories",
+                if !status.can_toggle {
+                    "absent"
+                } else if status.mixed {
+                    "mixed"
+                } else if status.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                status.active_files,
+                status.disabled_files,
+                status.directories.len()
+            );
+            for directory in status.directories {
+                println!("{}", directory.display());
+            }
+        }
+        Some("overlay") if args.len() == 3 && matches!(args[1].as_str(), "enable" | "disable") => {
+            let game = library.games.get(&args[2]).ok_or("unknown game ID")?;
+            if active_patch(&data, &args[2])?.is_some() {
+                return Err("this game has a staged patch; use patch enable or patch disable".into());
+            }
+            let enabled = args[1] == "enable";
+            let count = set_overlay_enabled(game, enabled)?;
+            println!(
+                "{} {count} local fix files for {}",
+                if enabled { "Enabled" } else { "Disabled" },
+                args[2]
+            );
+        }
+        Some("fix-status") if args.len() == 2 => {
+            let game = library.games.get(&args[1]).ok_or("unknown game ID")?;
+            if matches!(game.runner, azdl::Runner::Steam(_)) {
+                println!(
+                    "Legacy Steam runner cannot launch here; choose a local executable and runner"
+                );
+            } else {
+                let mut effective = game.clone();
+                effective.executable = resolve_launch(game)?.executable;
+                match detect_fix(&effective)? {
+                    FixKind::None => println!("No Online Fix or Steam Fix marker found"),
+                    FixKind::OnlineFix => println!("Online Fix marker found"),
+                    FixKind::SteamFix => println!(
+                        "Steam Fix marker found; Steam is {}",
+                        if steam_running() {
+                            "running"
+                        } else {
+                            "not running"
+                        }
+                    ),
+                }
             }
         }
         Some("runner") if args.len() == 3 => {
