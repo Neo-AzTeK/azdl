@@ -2,6 +2,8 @@ use super::*;
 use azdl::discovery::discover_executables;
 use azdl::doctor::diagnose_game;
 use azdl::jobs::list_jobs;
+use azdl::overlay::{overlay_status, set_overlay_enabled};
+use azdl::patch::{active_patch, disable_patch, enable_patch, rollback_patch};
 use azdl::{
     Library, Runner, add_game, add_launch_option, load_library, remove_launch_option, save_library,
     select_launch_option, set_executable, set_runner, spawn_game, validate_id,
@@ -10,8 +12,50 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{State, Window};
+
+/// How long a detected Online-Fix/SteamFix result stays cached per game.
+const FIX_STATUS_CACHE_TTL: Duration = Duration::from_secs(15);
+
+/// Cached fix detections keyed by game id, invalidated when the install path changes.
+pub(crate) type FixStatusCache =
+    std::collections::HashMap<String, (PathBuf, azdl::multiplayer::FixKind, Instant)>;
+
+fn scan_steamstub_cached(state: &AppState, game: &azdl::Game) -> azdl::steamless::SteamStubStatus {
+    if let Ok(cache) = state.steamstub_cache.lock()
+        && let Some((result, instant)) = cache.get(&game.id)
+        && instant.elapsed() < Duration::from_secs(60)
+    {
+        return result.clone();
+    }
+    let res = azdl::steamless::scan_game_steamstub(game);
+    if let Ok(mut cache) = state.steamstub_cache.lock() {
+        cache.insert(game.id.clone(), (res.clone(), Instant::now()));
+    }
+    res
+}
+
+pub(super) fn detect_fix_cached(
+    state: &AppState,
+    game: &azdl::Game,
+) -> Option<azdl::multiplayer::FixKind> {
+    if let Ok(cache) = state.fix_status_cache.lock()
+        && let Some((install_dir, fix, instant)) = cache.get(&game.id)
+        && install_dir == &game.install_dir
+        && instant.elapsed() < FIX_STATUS_CACHE_TTL
+    {
+        return Some(*fix);
+    }
+    let fix = azdl::multiplayer::detect_fix(game).ok()?;
+    if let Ok(mut cache) = state.fix_status_cache.lock() {
+        cache.insert(
+            game.id.clone(),
+            (game.install_dir.clone(), fix, Instant::now()),
+        );
+    }
+    Some(fix)
+}
 
 #[derive(serde::Deserialize)]
 struct SteamDetailsEnvelope {
@@ -471,6 +515,20 @@ pub fn handle_get_state(state: &AppState) -> Result<Value, String> {
                 None
             };
 
+            // A bundled multiplayer fix is staged through the same patch records
+            // as a user patch, but should not surface as a user-managed patch.
+            let patch = active_patch(&state.data_dir, &game.id).ok().flatten();
+            let custom_patch = patch.filter(|p| {
+                !p.entries
+                    .iter()
+                    .any(|e| e.path == Path::new(".azdl-bundled-fix"))
+            });
+            let fix = detect_fix_cached(state, game).map(|kind| match kind {
+                azdl::multiplayer::FixKind::OnlineFix => "Online-Fix",
+                azdl::multiplayer::FixKind::SteamFix => "SteamFix",
+                azdl::multiplayer::FixKind::None => "None",
+            });
+
             json!({
                 "id": game.id,
                 "title": game.title,
@@ -492,8 +550,17 @@ pub fn handle_get_state(state: &AppState) -> Result<Value, String> {
                 "genres": genres,
                 "addons_count": addons_count,
                 "last_played": game.last_played_unix,
+                "patch": custom_patch.map(|p| if p.enabled { "enabled" } else { "disabled" }),
                 "cover_url": cover_url,
                 "banner_url": banner_url,
+                "fix": fix,
+                "steamstub": scan_steamstub_cached(state, game),
+                "ea_heal_applied": azdl::fixes::has_ea_backup(&game.install_dir),
+                "ea_heal_available": azdl::fixes::has_ea_target(&game.install_dir),
+                "dlc_patch_applied": azdl::fixes::has_dlc_installed_patch(&game.install_dir),
+                "dlc_patch_available": azdl::fixes::has_dlc_installed_target(&game.install_dir),
+                "goldberg_compatible": azdl::goldberg::is_goldberg_compatible(&game.install_dir),
+                "goldberg_has_settings": azdl::goldberg::has_goldberg_settings(&game.install_dir),
                 "dependencies": dependencies,
                 "is_running": is_running,
                 "active_operation": active_op,
@@ -1787,6 +1854,169 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
                 "id": id,
                 "title": cat_game.title,
             }))
+        }
+        Action::OverlayToggle { id } => {
+            let library = load_library_snapshot(data_dir, &state.library_cache)?;
+            let game = library
+                .games
+                .get(&id)
+                .ok_or_else(|| format!("Game {id} not found"))?;
+            let status = overlay_status(game).map_err(|e| e.to_string())?;
+            set_overlay_enabled(game, !status.enabled).map_err(|e| e.to_string())?;
+            if let Ok(mut cache) = state.fix_status_cache.lock() {
+                cache.remove(&id);
+            }
+            Ok(json!({ "success": true, "enabled": !status.enabled }))
+        }
+        Action::SteamstubUnpack { id } => {
+            let library = load_library_snapshot(data_dir, &state.library_cache)?;
+            let game = library
+                .games
+                .get(&id)
+                .ok_or_else(|| format!("Game {id} not found"))?;
+            let count = azdl::steamless::unpack_game(game, data_dir).map_err(|e| e.to_string())?;
+            let new_status = azdl::steamless::scan_game_steamstub(game);
+            if let Ok(mut cache) = state.steamstub_cache.lock() {
+                cache.insert(id.clone(), (new_status.clone(), Instant::now()));
+            }
+            Ok(json!({
+                "success": true,
+                "unpacked_count": count,
+                "steamstub": new_status,
+            }))
+        }
+        Action::SteamstubRollback { id } => {
+            let library = load_library_snapshot(data_dir, &state.library_cache)?;
+            let game = library
+                .games
+                .get(&id)
+                .ok_or_else(|| format!("Game {id} not found"))?;
+            let count = azdl::steamless::rollback_game(game).map_err(|e| e.to_string())?;
+            let new_status = azdl::steamless::scan_game_steamstub(game);
+            if let Ok(mut cache) = state.steamstub_cache.lock() {
+                cache.insert(id.clone(), (new_status.clone(), Instant::now()));
+            }
+            Ok(json!({
+                "success": true,
+                "restored_count": count,
+                "steamstub": new_status,
+            }))
+        }
+        Action::EaHeal { id } => {
+            let library = load_library_snapshot(data_dir, &state.library_cache)?;
+            let game = library
+                .games
+                .get(&id)
+                .ok_or_else(|| format!("Game {id} not found"))?;
+            let msg =
+                azdl::fixes::heal_ea_activation(&game.install_dir).map_err(|e| e.to_string())?;
+            Ok(json!({ "success": true, "message": msg }))
+        }
+        Action::EaRollback { id } => {
+            let library = load_library_snapshot(data_dir, &state.library_cache)?;
+            let game = library
+                .games
+                .get(&id)
+                .ok_or_else(|| format!("Game {id} not found"))?;
+            let msg = azdl::fixes::rollback_ea_activation(&game.install_dir)
+                .map_err(|e| e.to_string())?;
+            Ok(json!({ "success": true, "message": msg }))
+        }
+        Action::DlcLicensePatch { id, dlc_ids } => {
+            let library = load_library_snapshot(data_dir, &state.library_cache)?;
+            let game = library
+                .games
+                .get(&id)
+                .ok_or_else(|| format!("Game {id} not found"))?;
+            let target_ids = match dlc_ids {
+                Some(ids) => ids,
+                None => {
+                    let installed = azdl::dlc::list_installed(game, data_dir).unwrap_or_default();
+                    installed.iter().filter_map(|s| s.parse().ok()).collect()
+                }
+            };
+            let patched = azdl::fixes::patch_dlc_installed_ids(&game.install_dir, &target_ids)
+                .map_err(|e| e.to_string())?;
+            Ok(json!({
+                "success": true,
+                "patched": patched,
+                "dlc_patch_applied": azdl::fixes::has_dlc_installed_patch(&game.install_dir),
+            }))
+        }
+        Action::DlcLicenseRollback { id } => {
+            let library = load_library_snapshot(data_dir, &state.library_cache)?;
+            let game = library
+                .games
+                .get(&id)
+                .ok_or_else(|| format!("Game {id} not found"))?;
+            let restored = azdl::fixes::rollback_dlc_installed(&game.install_dir)
+                .map_err(|e| e.to_string())?;
+            Ok(json!({
+                "success": true,
+                "restored": restored,
+                "dlc_patch_applied": azdl::fixes::has_dlc_installed_patch(&game.install_dir),
+            }))
+        }
+        Action::GoldbergSync { id } => {
+            let library = load_library_snapshot(data_dir, &state.library_cache)?;
+            let game = library
+                .games
+                .get(&id)
+                .ok_or_else(|| format!("Game {id} not found"))?;
+            let updated = azdl::goldberg::prepare_goldberg_for_game(game, data_dir)
+                .map_err(|e| e.to_string())?;
+            Ok(json!({
+                "success": true,
+                "updated": updated,
+                "goldberg_has_settings": azdl::goldberg::has_goldberg_settings(&game.install_dir),
+            }))
+        }
+        Action::GoldbergRollback { id } => {
+            let library = load_library_snapshot(data_dir, &state.library_cache)?;
+            let game = library
+                .games
+                .get(&id)
+                .ok_or_else(|| format!("Game {id} not found"))?;
+            let restored = azdl::goldberg::rollback_goldberg_config(&game.install_dir)
+                .map_err(|e| e.to_string())?;
+            Ok(json!({
+                "success": true,
+                "restored": restored,
+                "goldberg_has_settings": azdl::goldberg::has_goldberg_settings(&game.install_dir),
+            }))
+        }
+        Action::PatchToggle { id } => {
+            let library = load_library_snapshot(data_dir, &state.library_cache)?;
+            let game = library
+                .games
+                .get(&id)
+                .ok_or_else(|| format!("Game {id} not found"))?;
+            let patch = active_patch(data_dir, &id).map_err(|e| e.to_string())?;
+            if let Some(p) = patch {
+                if p.enabled {
+                    disable_patch(game, data_dir).map_err(|e| e.to_string())?;
+                } else {
+                    enable_patch(game, data_dir).map_err(|e| e.to_string())?;
+                }
+                if let Ok(mut cache) = state.fix_status_cache.lock() {
+                    cache.remove(&id);
+                }
+                Ok(json!({ "success": true, "enabled": !p.enabled }))
+            } else {
+                Err("No patch installed for this game".into())
+            }
+        }
+        Action::PatchRollback { id } => {
+            let library = load_library_snapshot(data_dir, &state.library_cache)?;
+            let game = library
+                .games
+                .get(&id)
+                .ok_or_else(|| format!("Game {id} not found"))?;
+            rollback_patch(game, data_dir).map_err(|e| e.to_string())?;
+            if let Ok(mut cache) = state.fix_status_cache.lock() {
+                cache.remove(&id);
+            }
+            Ok(json!({ "success": true }))
         }
         Action::SettingsUpdate { settings } => {
             azdl::parse_runner(&settings.default_runner).map_err(|e| e.to_string())?;

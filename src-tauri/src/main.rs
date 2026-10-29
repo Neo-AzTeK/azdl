@@ -13,7 +13,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataCacheEntry {
@@ -410,6 +410,8 @@ pub struct AppState {
     pub dir_size_cache: Arc<sizes::SizeCache>,
     pub metadata_cache: Arc<Mutex<HashMap<String, MetadataCacheEntry>>>,
     pub metadata_pending: Arc<Mutex<HashSet<String>>>,
+    pub steamstub_cache: Arc<Mutex<HashMap<String, (azdl::steamless::SteamStubStatus, Instant)>>>,
+    pub fix_status_cache: Arc<Mutex<commands::FixStatusCache>>,
     pub app_handle: Arc<Mutex<Option<tauri::AppHandle>>>,
 }
 
@@ -546,6 +548,41 @@ pub enum Action {
         cover_url: Option<String>,
         #[serde(default)]
         location: Option<String>,
+    },
+    OverlayToggle {
+        id: String,
+    },
+    SteamstubUnpack {
+        id: String,
+    },
+    SteamstubRollback {
+        id: String,
+    },
+    EaHeal {
+        id: String,
+    },
+    EaRollback {
+        id: String,
+    },
+    DlcLicensePatch {
+        id: String,
+        #[serde(default)]
+        dlc_ids: Option<Vec<u32>>,
+    },
+    DlcLicenseRollback {
+        id: String,
+    },
+    GoldbergSync {
+        id: String,
+    },
+    GoldbergRollback {
+        id: String,
+    },
+    PatchToggle {
+        id: String,
+    },
+    PatchRollback {
+        id: String,
     },
     SettingsUpdate {
         settings: azdl::settings::LauncherSettings,
@@ -936,6 +973,8 @@ fn main() {
         dir_size_cache,
         metadata_cache: Arc::new(Mutex::new(metadata_cache)),
         metadata_pending: Arc::new(Mutex::new(HashSet::new())),
+        steamstub_cache: Arc::new(Mutex::new(HashMap::new())),
+        fix_status_cache: Arc::new(Mutex::new(HashMap::new())),
         app_handle: Arc::new(Mutex::new(None)),
     };
 

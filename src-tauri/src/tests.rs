@@ -101,6 +101,8 @@ fn test_state(root: &Path) -> AppState {
         dir_size_cache: Arc::new(sizes::SizeCache::new(root)),
         metadata_cache: Arc::new(Mutex::new(HashMap::new())),
         metadata_pending: Arc::new(Mutex::new(HashSet::new())),
+        steamstub_cache: Arc::new(Mutex::new(HashMap::new())),
+        fix_status_cache: Arc::new(Mutex::new(HashMap::new())),
         app_handle: Arc::new(Mutex::new(None)),
     }
 }
