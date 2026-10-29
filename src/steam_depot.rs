@@ -21,11 +21,6 @@ pub struct DepotInfo {
     pub depot_key: String,
 }
 
-/// Resolve each provider depot to exactly one manifest revision.
-pub fn parse_lua_manifests(manifest_dir: &Path, app_id: u32) -> Result<Vec<DepotInfo>> {
-    parse_lua_manifests_filtered(manifest_dir, app_id, None)
-}
-
 fn parse_lua_manifests_filtered(
     manifest_dir: &Path,
     app_id: u32,
@@ -174,21 +169,6 @@ fn parse_lua_content(
 }
 
 pub use crate::archive::normalize_windows_paths;
-
-/// Verify every target base depot in an older installation without changing game files.
-pub fn verify_legacy_base(
-    game: &Game,
-    root: &Path,
-    metadata: &crate::steam_metadata::SteamAppMetadata,
-) -> Result<crate::steam_content::BaseContentReceipt> {
-    verify_legacy_base_with(
-        game,
-        root,
-        metadata,
-        crate::steam_metadata::fetch_appinfo,
-        fetch_provider_bundle,
-    )
-}
 
 fn verify_legacy_base_with(
     game: &Game,
@@ -962,18 +942,6 @@ fn pin_base_download(root: &Path, depots: &[DepotInfo]) -> Result<()> {
         Err(error) => return Err(error.into()),
     }
     Ok(())
-}
-
-/// Perform end-to-end installation of a Steam manifest-based catalog game:
-/// downloads exact manifests, invokes the native engine, verifies files and
-/// registers the installation while reporting background progress.
-pub fn install_steam_manifest_game(
-    library: &mut Library,
-    data_dir: &Path,
-    game: &SteamGame,
-    app_id: u32,
-) -> Result<InstallOutcome> {
-    install_steam_manifest_game_in(library, data_dir, &data_dir.join("games"), game, app_id)
 }
 
 /// Install a manifest game into a selected library drive.
@@ -2244,33 +2212,6 @@ mod tests {
             "90695be6010d5ec2e8890f1d742357316f4d5f74a8a9d22b2ae076b184797167"
         );
         assert_eq!(manifest_ids.get(&3892271), Some(&4322338465787944513));
-    }
-
-    #[test]
-    fn rejects_another_revision_when_requested_manifest_is_missing() {
-        let root = std::env::temp_dir().join(format!(
-            "azdl-manifest-selection-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&root).unwrap();
-        fs::write(
-            root.join("123.lua"),
-            "addappid(456,0,\"0123456789abcdef0123456789abcdef\")\nsetManifestid(456,\"789\")",
-        )
-        .unwrap();
-        fs::write(root.join("456_788.manifest"), b"manifest").unwrap();
-        let error = parse_lua_manifests(&root, 123).unwrap_err().to_string();
-        assert!(error.contains("depot 456, revision 789"));
-        fs::write(root.join("456_789.manifest"), b"manifest").unwrap();
-        let selected = parse_lua_manifests(&root, 123).unwrap();
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].manifest_id, 789);
-        assert_eq!(selected[0].manifest_path, root.join("456_789.manifest"));
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

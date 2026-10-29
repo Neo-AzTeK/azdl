@@ -296,9 +296,6 @@ pub fn import_steam(library: &mut Library, root: &Path, app_id: u32) -> Result<S
     Ok(id)
 }
 
-
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1950,16 +1950,7 @@ pub fn handle_run_action(state: &AppState, action: ActionRequest) -> Result<Valu
             Ok(json!({ "success": true, "started": true }))
         }
         Action::JobClear { id } => {
-            let mut cleared = false;
             if azdl::jobs::clear_job(data_dir, &id).is_ok() {
-                cleared = true;
-            }
-            let torrent_file = data_dir.join("torrents").join(format!("{id}.json"));
-            if torrent_file.is_file() {
-                let _ = fs::remove_file(torrent_file);
-                cleared = true;
-            }
-            if cleared {
                 Ok(json!({ "success": true, "cleared": id }))
             } else {
                 Err(LauncherError::general(format!(
@@ -2369,4 +2360,3 @@ pub async fn get_game_dlc(
     .await
     .map_err(|e| e.to_string())?
 }
-

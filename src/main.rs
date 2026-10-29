@@ -174,12 +174,10 @@ fn run() -> Result<()> {
             match args[1].as_str() {
                 "scan" => {
                     let files = azdl::installscript::find_installscript_files(&game.install_dir);
-                    let ubisoft = azdl::installscript::is_ubisoft_game(&game.install_dir);
                     println!("Install scripts found: {}", files.len());
                     for f in files {
                         println!("  {}", f.display());
                     }
-                    println!("Ubisoft DRM detected: {ubisoft}");
                 }
                 "apply" => {
                     let ok = azdl::installscript::apply_installscript_for_game(game, &prefix_dir)?;
