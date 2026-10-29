@@ -365,7 +365,8 @@ fn run() -> Result<()> {
                             dlc_ids.push(id);
                         }
                     }
-                    let patched = azdl::fixes::patch_dlc_installed_ids(&game.install_dir, &dlc_ids)?;
+                    let patched =
+                        azdl::fixes::patch_dlc_installed_ids(&game.install_dir, &dlc_ids)?;
                     println!(
                         "DLC installed patch for {}: {}",
                         game.id,
@@ -497,7 +498,9 @@ fn run() -> Result<()> {
         Some("overlay") if args.len() == 3 && matches!(args[1].as_str(), "enable" | "disable") => {
             let game = library.games.get(&args[2]).ok_or("unknown game ID")?;
             if active_patch(&data, &args[2])?.is_some() {
-                return Err("this game has a staged patch; use patch enable or patch disable".into());
+                return Err(
+                    "this game has a staged patch; use patch enable or patch disable".into(),
+                );
             }
             let enabled = args[1] == "enable";
             let count = set_overlay_enabled(game, enabled)?;

@@ -347,7 +347,6 @@ pub fn apply_patch_archive_with_root(
     }
 }
 
-
 /// Restore overwritten files and remove files introduced by the active patch.
 pub fn rollback_patch(game: &Game, data_dir: &Path) -> Result<()> {
     let manifest = active_patch(data_dir, &game.id)?.ok_or("game has no active patch")?;
