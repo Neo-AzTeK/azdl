@@ -1082,7 +1082,6 @@ fn main() {
             commands::window_minimize,
             commands::window_toggle_maximize,
             commands::window_close,
-            commands::is_steam_running,
         ])
         .run(tauri::generate_context!())
         .expect("error while running azdl tauri application");

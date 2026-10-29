@@ -127,10 +127,9 @@ describe('App-wide Per-Tab Search Architecture', () => {
 describe('Settings Category Search Matching', () => {
   const categories = [
     { id: 'storage', label: 'Storage & Drives', keywords: ['storage', 'drive', 'disk', 'folder', 'migrate', 'path', 'games'] },
-    { id: 'launch', label: 'Launch & Runners', keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'arguments', 'dxvk', 'prefix'] },
+    { id: 'launch', label: 'Compatibility Runners', keywords: ['launch', 'proton', 'wine', 'runner', 'ge', 'prefix'] },
     { id: 'appearance', label: 'Material You Theming', keywords: ['theme', 'appearance', 'material', 'color', 'seed', 'dark', 'light'] },
-    { id: 'patches', label: 'Patches', keywords: ['patch', 'patches', 'steamless', 'onlinefix', 'overlay', 'drm', 'steamstub', 'fix'] },
-    { id: 'about', label: 'About & Diagnostics', keywords: ['about', 'diagnostics', 'doctor', 'version', 'system', 'bwrap', 'unrar', 'bsdtar'] },
+    { id: 'about', label: 'About & Diagnostics', keywords: ['about', 'diagnostics', 'doctor', 'version', 'system', 'bsdtar', 'curl'] },
   ];
 
   function matchesCategory(cat, query) {
@@ -327,51 +326,6 @@ describe('UI Cleanliness, Horizontal Cards & Library Component Invariants', () =
     expect(catalogBar.hasMoreMenu).toBe(false);
   });
 
-  it('unifies cards across library and catalog with catalog tags, 16:9 ratio, and zero motion transforms', () => {
-    const libraryGame = { id: 'lib-1', title: 'Hades', runner: 'proton-9.0', fix: 'OnlineFix' };
-    const catalogGame = {
-      qualified_id: 'cat-1',
-      id: 'cat-1',
-      title: 'Hades II',
-      source_id: 'steamrip',
-      file_size: '14 GB',
-      version: '0.9.1',
-      addons_count: 2,
-    };
-
-    function extractCardBadges(game, isInstalled) {
-      const badges = [];
-      if (game.source_id) badges.push({ type: 'source', value: game.source_id });
-      if (game.file_size) badges.push({ type: 'size', value: game.file_size });
-      if (game.version) badges.push({ type: 'version', value: `v${game.version}` });
-      if (game.addons_count > 0) badges.push({ type: 'addons', value: `${game.addons_count} Addons` });
-      if (game.runner && isInstalled) badges.push({ type: 'runner', value: game.runner });
-      if (game.fix && game.fix !== 'None') badges.push({ type: 'fix', value: game.fix });
-      return badges;
-    }
-
-    const catBadges = extractCardBadges(catalogGame, false);
-    expect(catBadges.map(b => b.type)).toEqual(['source', 'size', 'version', 'addons']);
-
-    const libBadges = extractCardBadges(libraryGame, true);
-    expect(libBadges.map(b => b.type)).toEqual(['runner', 'fix']);
-  });
-
-  it('verifies removal of Add Game to Steam Library and rename of quick action to Patches', () => {
-    const playBarMoreOptions = [
-      'Open Installation Folder',
-      'Move to Another Drive',
-      'Launch Options & Config',
-      'Patches',
-      'Uninstall Game',
-    ];
-
-    expect(playBarMoreOptions).not.toContain('Add Game to Steam Library');
-    expect(playBarMoreOptions).not.toContain('Sync with Steam');
-    expect(playBarMoreOptions).not.toContain('Diagnostics & Fixes');
-    expect(playBarMoreOptions).toContain('Patches');
-  });
-
   it('verifies game page header cleanliness: no "Installed" pill, no "Ready to play", no blinking dot', () => {
     function getHeaderPills(steamAppId, isInstalled) {
       const pills = [];
@@ -420,7 +374,6 @@ describe('UI Cleanliness, Horizontal Cards & Library Component Invariants', () =
           action: 'pending-add',
           id: pendingItem.id,
           title: fixedName,
-          install_kind: pendingItem.kind,
           install_dir: pendingItem.directory,
           executable: selectedExecutable === '__custom__' ? customExecutable : selectedExecutable,
         }),
@@ -432,7 +385,7 @@ describe('UI Cleanliness, Horizontal Cards & Library Component Invariants', () =
       };
     }
 
-    const item = { id: 'hl2-portable', kind: 'portable', directory: '/azdl/games/hl2-portable' };
+    const item = { id: 'hl2-portable', directory: '/azdl/games/hl2-portable' };
     const candidates = [
       { path: '/azdl/games/hl2-portable/hl2.exe', relative_path: 'hl2.exe', score: 1000 },
       { path: '/azdl/games/hl2-portable/bin/test.exe', relative_path: 'bin/test.exe', score: 200 },
@@ -452,37 +405,4 @@ describe('UI Cleanliness, Horizontal Cards & Library Component Invariants', () =
     expect(removePayload.id).toBe('hl2-portable');
   });
 
-  it('verifies settings runners cleanup: System Wine naming and elimination of Detected Compatibility Environments section', () => {
-    const runners = [
-      { id: 'auto', name: 'Auto (Recommended)', runner_type: 'auto' },
-      { id: 'native', name: 'Native', runner_type: 'native' },
-      { id: 'wine', name: 'System Wine', runner_type: 'wine' },
-      { id: 'proton:ge', name: 'GE-Proton9-25', runner_type: 'proton' },
-    ];
-
-    const wineRunner = runners.find(r => r.id === 'wine');
-    expect(wineRunner.name).toBe('System Wine');
-    expect(wineRunner.name).not.toContain('Isolated');
-    expect(wineRunner.name).not.toContain('prefix');
-
-    // Section cards present in Launch & Runners tab
-    const launchSettingsSections = [
-      'Default Compatibility Tool',
-      'Global Launch Arguments',
-    ];
-    expect(launchSettingsSections).not.toContain('Detected Compatibility Environments');
-  });
-
-  it('verifies elimination of duplicate transfer handlers and notifications in SettingsView', () => {
-    // Transfers are exclusively managed in TransferDrawer, eliminating redundant job actions and toasts from Settings
-    const settingsManagedDomains = [
-      'storage',
-      'launch',
-      'appearance',
-      'patches',
-      'about',
-    ];
-    expect(settingsManagedDomains).not.toContain('transfers');
-    expect(settingsManagedDomains).not.toContain('downloads');
-  });
 });

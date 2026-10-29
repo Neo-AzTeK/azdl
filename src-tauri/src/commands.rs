@@ -2370,7 +2370,3 @@ pub async fn get_game_dlc(
     .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-pub fn is_steam_running() -> bool {
-    azdl::steam::steam_running()
-}

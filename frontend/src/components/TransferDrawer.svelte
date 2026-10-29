@@ -5,7 +5,6 @@
   import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset-outline';
   import { onDestroy } from 'svelte';
   import { runAction } from '../api.js';
-  import { dlcArchiveIdentity } from '../dlc.js';
   import { notify } from '../notifications.js';
   import {
     getJobThumbnail as resolveJobThumb,
@@ -140,14 +139,7 @@
 
   async function handleJobAction(action, id) {
     try {
-      const identity = action === 'resume' ? dlcArchiveIdentity(jobs.find((job) => job.id === id)) : null;
-      const payload = identity
-        ? { action: 'dlc-install', id: identity.gameId, dlc_id: identity.addonId, resume_job_id: id }
-        : { action: `job-${action}`, id };
-      const result = await runAction(payload);
-      if (action === 'resume' && result?.dlc_installed_files != null) {
-        notify.success('DLC installation complete');
-      }
+      await runAction({ action: `job-${action}`, id });
     } catch (e) {
       notify.error(e?.message || `Failed to ${action} transfer`);
     } finally {

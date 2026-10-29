@@ -84,7 +84,6 @@
         {#each pending as item}
           <div class="pending-item">
             <span class="pending-id">{item.id}</span>
-            <span class="pending-kind">({item.kind})</span>
             <button class="finish-btn" onclick={() => handlePendingAdd(item)}>
               Select Executable
             </button>
@@ -232,11 +231,6 @@
 
   .pending-id {
     font-weight: 600;
-  }
-
-  .pending-kind {
-    color: var(--md-sys-color-on-surface-variant);
-    font-size: 11px;
   }
 
   .finish-btn {

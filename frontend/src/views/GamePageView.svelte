@@ -1,26 +1,18 @@
 <script>
   import iconClose from '@ktibow/iconset-material-symbols/close';
   import iconCheckCircle from '@ktibow/iconset-material-symbols/check-circle-outline';
-  import iconBuild from '@ktibow/iconset-material-symbols/build-outline';
-  import iconKey from '@ktibow/iconset-material-symbols/key-outline';
-  import iconMemory from '@ktibow/iconset-material-symbols/memory-outline';
-  import iconExtension from '@ktibow/iconset-material-symbols/extension-outline';
-  import iconLockOpen from '@ktibow/iconset-material-symbols/lock-open-outline';
-  import iconGroups from '@ktibow/iconset-material-symbols/groups-outline';
   import iconArrowDropDown from '@ktibow/iconset-material-symbols/arrow-drop-down';
   import iconArrowBack from '@ktibow/iconset-material-symbols/arrow-back';
   import iconCropLandscape from '@ktibow/iconset-material-symbols/crop-landscape-outline';
   import iconDelete from '@ktibow/iconset-material-symbols/delete-outline';
   import iconFolder from '@ktibow/iconset-material-symbols/folder-outline';
   import iconFolderOpen from '@ktibow/iconset-material-symbols/folder-open-outline';
-  import iconLock from '@ktibow/iconset-material-symbols/lock-outline';
   import iconMoreVert from '@ktibow/iconset-material-symbols/more-vert';
   import iconSettings from '@ktibow/iconset-material-symbols/settings-outline';
   import iconVideogameAsset from '@ktibow/iconset-material-symbols/videogame-asset-outline';
   import { untrack } from 'svelte';
   import { TRAILER_HLS_CONFIG, STALLS_BEFORE_STEP_DOWN, lowerTrailerLevel, pickTrailerLevel, trailerKey } from '../trailer.js';
   import { controlActionConfirmed } from '../game_controls.js';
-  import ActionSwitch from '../components/ActionSwitch.svelte';
   import { onMount, onDestroy, tick } from 'svelte';
   import { Button, Tabs, FAB, LinearProgress, LinearProgressEstimate, Icon } from 'm3-svelte';
   import SectionCard from '../components/SectionCard.svelte';
@@ -34,7 +26,6 @@
     runAction,
     diagnoseGame,
     discoverExecutables,
-    scanSetup,
     getSteamDetails,
     getGameDlc,
     getGameControls,
@@ -185,11 +176,11 @@
     }
   });
 
-  async function installDlc(addon, resumeJobId = null) {
+  async function installDlc(addon) {
     if (!installedRecord || dlcPending) return;
     dlcPending = addon.id;
     try {
-      const result = await runAction({ action: 'dlc-install', id: installedRecord.id, dlc_id: addon.id, ...(resumeJobId ? { resume_job_id: resumeJobId } : {}) });
+      const result = await runAction({ action: 'dlc-install', id: installedRecord.id, dlc_id: addon.id });
       if (!result?.started && !result?.already_working) {
         await refreshDlc(installedRecord.id);
       }
@@ -434,24 +425,13 @@
   let exeCandidates = $state([]);
 
   // Sub-tabs for installed game management
-  let activeDetailTab = $state('overview'); // 'overview' | 'patches' | 'config' | 'diagnostics'
+  let activeDetailTab = $state('overview'); // 'overview' | 'dlc' | 'config'
 
   let controlsSnapshot = $state(null);
   let controlsLoading = $state(false);
   let controlsError = $state('');
   let controlsRequest = 0;
   let pendingAction = $state(null);
-  let observedControls = $derived(controlsSnapshot || installedRecord || {});
-  let effectiveSteamStub = $derived(observedControls.steamstub);
-  let effectiveDlcPatchApplied = $derived(!!observedControls.dlc_patch_applied);
-  let effectiveGoldbergHasSettings = $derived(!!observedControls.goldberg_has_settings);
-  let hasFix = $derived(!!controlsSnapshot?.overlay?.enabled);
-  let isFixRelevant = $derived(!!controlsSnapshot?.overlay?.can_toggle);
-  let isSteamStubRelevant = $derived(!!(effectiveSteamStub?.stub_present || effectiveSteamStub?.applied));
-  let isEaRelevant = $derived(!!(observedControls.ea_heal_available || observedControls.ea_heal_applied));
-  let isDlcBypassRelevant = $derived(!!(observedControls.dlc_patch_available || effectiveDlcPatchApplied));
-  let isGoldbergRelevant = $derived(!!(observedControls.goldberg_compatible || effectiveGoldbergHasSettings));
-  let isPatchRelevant = $derived(!!observedControls.patch);
   let runtimeReport = $derived(controlsSnapshot?.runtime);
   let controlsDisabled = $derived(isRunning || !!pendingAction || controlsLoading || !controlsSnapshot);
 
@@ -484,7 +464,7 @@
       controlsSnapshot = null;
       controlsError = '';
       controlsLoading = false;
-      if (id && ['patches', 'config'].includes(tab)) void refreshControls(id);
+      if (id && tab === 'config') void refreshControls(id);
     });
   });
 
@@ -808,7 +788,6 @@
   async function handleAction(actionPayload, successMsg) {
     if (!installedRecord || pendingAction) return;
     const id = installedRecord.id;
-    const before = controlsSnapshot;
     pendingAction = actionPayload.action;
     let failure = null;
     try {
@@ -829,7 +808,7 @@
         });
       } else if (!confirmed) {
         notify.warning('The command finished, but its state could not be read. Reopen this tab to retry.');
-      } else if (!controlActionConfirmed(actionPayload.action, before, controlsSnapshot)) {
+      } else if (!controlActionConfirmed(actionPayload.action, controlsSnapshot)) {
         notify.warning('The command completed, but the requested state was not confirmed. The controls show the current state.');
       } else {
         setBanner('success', successMsg);
@@ -946,7 +925,7 @@
     showMoreMenu = false;
     detailTabTouched = true;
     activeDetailTab = tabName;
-    if (tabName === 'patches' || targetId === 'section-diagnostics') {
+    if (targetId === 'section-diagnostics') {
       refreshDiagnostics();
     }
     await tick();
@@ -957,7 +936,7 @@
 
   function handleDetailTabChange(event) {
     const nextTab = event.target?.value;
-    if (!['overview', 'dlc', 'patches', 'config'].includes(nextTab)) return;
+    if (!['overview', 'dlc', 'config'].includes(nextTab)) return;
     detailTabTouched = true;
     activeDetailTab = nextTab;
   }
@@ -1119,10 +1098,6 @@
                       <Icon icon={iconSettings} size={18} />
                       <span>Launch Options & Config</span>
                     </button>
-                    <button class="menu-item" onclick={() => navigateToDetailTab('patches', 'section-patches')}>
-                      <Icon icon={iconLock} size={18} />
-                      <span>Patches</span>
-                    </button>
                     <div class="menu-divider"></div>
                     <button class="menu-item danger" onclick={() => { showMoreMenu = false; handleUninstall(); }}>
                       <Icon icon={iconDelete} size={18} />
@@ -1194,7 +1169,6 @@
               items={[
                 { name: 'Overview', value: 'overview' },
                 { name: `DLC${dlcInfo.available.length ? ` (${dlcInfo.available.length})` : ''}`, value: 'dlc' },
-                { name: 'Patches', value: 'patches' },
                 { name: 'Launch & Runner', value: 'config' },
               ]}
             />
@@ -1249,7 +1223,7 @@
                 <div id={`dlc-${addon.id}`} class="dlc-row" class:selected={String(game?.selected_dlc_id) === String(addon.id)}>
                   <span class="dlc-details">
                     <span>{String(game?.selected_dlc_id) === String(addon.id) ? game.selected_dlc_title || addon.title : addon.title}</span>
-                    <small aria-live="polite">{working ? installing ? 'Installing files…' : progress !== null ? `Downloading · ${progress}% · ${formatBytes(transfer.bytes ?? transfer.progress_bytes)} / ${formatBytes(transfer.total_bytes)}` : 'Checking files and preparing download…' : addon.interrupted ? 'Recovery required' : addon.installed ? 'Installed' : addon.present_unmanaged ? 'Existing files · not managed by azdl' : transferStatus === 'failed' ? 'Download failed · retry available' : transferStatus === 'interrupted' ? 'Download interrupted · retry available' : ['cancelled', 'canceled'].includes(transferStatus) ? 'Download cancelled' : transferStatus === 'paused' ? 'Download paused' : 'Not installed'}</small>
+                    <small aria-live="polite">{working ? installing ? 'Installing files…' : progress !== null ? `Downloading · ${progress}% · ${formatBytes(transfer.bytes ?? transfer.progress_bytes)} / ${formatBytes(transfer.total_bytes)}` : 'Checking files and preparing download…' : addon.interrupted ? 'Recovery required' : addon.installed ? 'Installed' : addon.present_unmanaged ? 'Existing files · not managed by azdl' : transferStatus === 'failed' ? 'Download failed · retry available' : transferStatus === 'interrupted' ? 'Download interrupted · retry available' : ['cancelled', 'canceled'].includes(transferStatus) ? 'Download cancelled' : 'Not installed'}</small>
                     {#if working && progress !== null}<LinearProgress percent={progress} aria-label={`Downloading ${addon.title}`} aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100} />{/if}
                     {#if working && progress === null}<LinearProgressEstimate aria-label={`Preparing ${addon.title}`} />{/if}
                     {#if !addon.installed && !addon.interrupted && addon.reason}
@@ -1258,8 +1232,6 @@
                   </span>
                   {#if working && transfer && !installing}
                     <button class="md3-btn text" disabled={!!dlcPending} onclick={() => cancelDlc(transfer)}>Cancel</button>
-                  {:else if transferStatus === 'paused'}
-                    <button class="md3-btn tonal" disabled={isRunning || hasInterruptedDlc || otherDlcWorking || !!dlcPending || !addon.content_available} onclick={() => installDlc(addon, transfer.id)}>Resume</button>
                   {:else if addon.interrupted}
                     <button class="md3-btn danger" disabled={isRunning || otherDlcWorking || !!dlcPending || working} onclick={() => dlcToRecover = addon}>Recover</button>
                   {:else if addon.installed}
@@ -1276,195 +1248,6 @@
             </SectionCard>
             </div>
           {/if}
-
-        <!-- TAB: PATCHES (INSTALLED) -->
-        {#if isInstalled && activeDetailTab === 'patches'}
-          <section id="section-patches" class="steam-section-card" aria-busy={!!pendingAction || controlsLoading}>
-            <h3 class="section-heading">Patches & Runtime Overlays</h3>
-            <p class="section-subtext">
-              Reversible SteamFix, Online-Fix, and SteamStub DRM stripping overlays.
-            </p>
-
-            {#if pendingAction || controlsLoading}
-              <p class="section-subtext" role="status">{pendingAction ? 'Updating game state…' : 'Reading current state…'}</p>
-            {:else if controlsError}
-              <p class="section-subtext" role="status">State unavailable: {controlsError}</p>
-            {/if}
-
-            <div class="tools-grid">
-              <!-- 1. Overlay DLLs -->
-              <div class="tool-card" class:irrelevant={!isFixRelevant}>
-                <div class="tool-header">
-                  <div class="tool-header-left">
-                    <Icon icon={iconGroups} class="tool-header-icon" />
-                    <h4>Online-Fix / SteamFix Overlay</h4>
-                  </div>
-                  <label class="switch-container" aria-label="Toggle Online-Fix or SteamFix overlay">
-                    <ActionSwitch
-                      checked={hasFix}
-                      disabled={controlsDisabled || !isFixRelevant}
-                      onToggle={() => handleAction({ action: 'overlay-toggle' }, 'Toggled DLL overlay')}
-                    />
-                  </label>
-                </div>
-                <p class="tool-desc">
-                  Toggle multiplayer fix DLLs and FakeAppId via reversible <code>.arachnel-off</code> renames.
-                </p>
-                {#if controlsSnapshot?.overlay?.mixed}<span class="tool-pill warning">Partially enabled</span>{/if}
-
-              </div>
-
-              <!-- 2. Steamless DRM -->
-              <div class="tool-card" class:irrelevant={!isSteamStubRelevant}>
-                <div class="tool-header">
-                  <div class="tool-header-left">
-                    <Icon icon={iconLockOpen} class="tool-header-icon" />
-                    <h4>Steamless DRM Stripper</h4>
-                  </div>
-                  <label class="switch-container" aria-label="Toggle Steamless DRM unpack">
-                    <ActionSwitch
-                      checked={!!effectiveSteamStub?.applied}
-                      disabled={controlsDisabled || !isSteamStubRelevant}
-                      onToggle={() => handleAction(
-                        { action: effectiveSteamStub?.applied ? 'steamstub-rollback' : 'steamstub-unpack' },
-                        effectiveSteamStub?.applied ? 'Restored original SteamStub executable' : 'SteamStub DRM unpacked'
-                      )}
-                    />
-                  </label>
-                </div>
-                <p class="tool-desc">
-                  Strip SteamStub DRM from PE binaries with automated <code>.steamstub.bak</code> backups.
-                </p>
-
-              </div>
-
-              <!-- 3. DLC License Bypass -->
-              <div class="tool-card" class:irrelevant={!isDlcBypassRelevant}>
-                <div class="tool-header">
-                  <div class="tool-header-left">
-                    <Icon icon={iconExtension} class="tool-header-icon" />
-                    <h4>DLC License Bypass</h4>
-                  </div>
-                  <label class="switch-container" aria-label="Toggle DLC license bypass">
-                    <ActionSwitch
-                      checked={effectiveDlcPatchApplied}
-                      disabled={controlsDisabled || !isDlcBypassRelevant}
-                      onToggle={() => handleAction(
-                        { action: effectiveDlcPatchApplied ? 'dlc-license-rollback' : 'dlc-license-patch' },
-                        effectiveDlcPatchApplied ? 'DLC license patch rolled back' : 'DLC license patch applied'
-                      )}
-                    />
-                  </label>
-                </div>
-                <p class="tool-desc">
-                  Bypasses Steamworks <code>BIsDlcInstalled</code> entitlement checks in <code>steam_api64.dll</code> and GodotSteam.
-                </p>
-
-              </div>
-
-              <!-- 4. Goldberg Steam Emulator Hook -->
-              <div class="tool-card" class:irrelevant={!isGoldbergRelevant}>
-                <div class="tool-header">
-                  <div class="tool-header-left">
-                    <Icon icon={iconMemory} class="tool-header-icon" />
-                    <h4>Goldberg Emulator Settings</h4>
-                  </div>
-                  <label class="switch-container" aria-label="Toggle Goldberg emulator settings">
-                    <ActionSwitch
-                      checked={effectiveGoldbergHasSettings}
-                      disabled={controlsDisabled || !isGoldbergRelevant}
-                      onToggle={() => handleAction(
-                        { action: effectiveGoldbergHasSettings ? 'goldberg-rollback' : 'goldberg-sync' },
-                        effectiveGoldbergHasSettings ? 'Goldberg configuration removed' : 'Goldberg DLC configuration generated'
-                      )}
-                    />
-                  </label>
-                </div>
-                <p class="tool-desc">
-                  Auto-provisions <code>steam_settings/DLC.txt</code> and offline AppID entitlements for games using Goldberg emulator.
-                </p>
-
-              </div>
-
-              <!-- 5. EA Activation Patch -->
-              <div class="tool-card" class:irrelevant={!isEaRelevant}>
-                <div class="tool-header">
-                  <div class="tool-header-left">
-                    <Icon icon={iconKey} class="tool-header-icon" />
-                    <h4>EA Activation Patch</h4>
-                  </div>
-                  <label class="switch-container" aria-label="Toggle EA activation patch">
-                    <ActionSwitch
-                      checked={!!observedControls.ea_heal_applied}
-                      disabled={controlsDisabled || !isEaRelevant}
-                      onToggle={() => handleAction(
-                        { action: observedControls.ea_heal_applied ? 'ea-rollback' : 'ea-heal' },
-                        observedControls.ea_heal_applied ? 'EA activation restored' : 'EA activation patched'
-                      )}
-                    />
-                  </label>
-                </div>
-                <p class="tool-desc">
-                  Bypasses EA Desktop / Origin activation checks and restores original entitlement binaries.
-                </p>
-
-              </div>
-
-              <!-- 6. Standalone Game Patch -->
-              <div class="tool-card" class:irrelevant={!isPatchRelevant}>
-                <div class="tool-header">
-                  <div class="tool-header-left">
-                    <Icon icon={iconBuild} class="tool-header-icon" />
-                    <h4>Standalone Game Patch</h4>
-                  </div>
-                  <label class="switch-container" aria-label="Toggle standalone game patch">
-                    <ActionSwitch
-                      checked={observedControls.patch === 'enabled'}
-                      disabled={controlsDisabled || !isPatchRelevant}
-                      onToggle={() => handleAction({ action: 'patch-toggle' }, 'Toggled game patch')}
-                    />
-                  </label>
-                </div>
-                <p class="tool-desc">
-                  Toggle standalone game patch files and mod payloads staged in this game directory.
-                </p>
-
-              </div>
-
-
-            </div>
-          </section>
-
-          <!-- Merged Environment Diagnostics section -->
-          <section id="section-diagnostics" class="steam-section-card" style="margin-top: 16px;">
-            <div class="diag-header-row">
-              <h3 class="section-heading">Environment Diagnostics & Readiness</h3>
-              <button class="md3-btn tonal small" onclick={refreshDiagnostics} disabled={isRunning || loadingDiag}>
-                {loadingDiag ? 'Scanning...' : 'Re-run Checks'}
-              </button>
-            </div>
-
-            {#if loadingDiag}
-              <p class="diag-loading">Checking runner binaries, permissions, and prefix...</p>
-            {:else if diagReport}
-              <div class="diag-checks-list">
-                {#if !diagReport.checks || diagReport.checks.length === 0}
-                  <div class="diag-check check-success">
-                    <Icon icon={iconCheckCircle} size={18} class="diag-ok-icon" />
-                    <span>All system and runner checks passed. System ready for launch.</span>
-                  </div>
-                {:else}
-                  {#each diagReport.checks as check}
-                    <div class="diag-check check-{check.severity}">
-                      <span class="diag-severity-tag">{check.severity}</span>
-                      <span class="diag-message">{check.message}</span>
-                    </div>
-                  {/each}
-                {/if}
-              </div>
-            {/if}
-          </section>
-        {/if}
 
         <!-- TAB: LAUNCH & RUNNER CONFIG (INSTALLED) -->
         {#if isInstalled && activeDetailTab === 'config'}
@@ -1594,6 +1377,35 @@
             {/if}
           </SectionCard>
 
+
+          <section id="section-diagnostics" class="steam-section-card" style="margin-top: 16px;">
+            <div class="diag-header-row">
+              <h3 class="section-heading">Environment Diagnostics & Readiness</h3>
+              <button class="md3-btn tonal small" onclick={refreshDiagnostics} disabled={isRunning || loadingDiag}>
+                {loadingDiag ? 'Scanning...' : 'Re-run Checks'}
+              </button>
+            </div>
+
+            {#if loadingDiag}
+              <p class="diag-loading">Checking runner binaries, permissions, and prefix...</p>
+            {:else if diagReport}
+              <div class="diag-checks-list">
+                {#if !diagReport.checks || diagReport.checks.length === 0}
+                  <div class="diag-check check-success">
+                    <Icon icon={iconCheckCircle} size={18} class="diag-ok-icon" />
+                    <span>All system and runner checks passed. System ready for launch.</span>
+                  </div>
+                {:else}
+                  {#each diagReport.checks as check}
+                    <div class="diag-check check-{check.severity}">
+                      <span class="diag-severity-tag">{check.severity}</span>
+                      <span class="diag-message">{check.message}</span>
+                    </div>
+                  {/each}
+                {/if}
+              </div>
+            {/if}
+          </section>
         {/if}
       </main>
 
@@ -2272,83 +2084,6 @@
   }
 
   /* Tools Grid */
-  .tools-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-    gap: 16px;
-  }
-
-  .tool-card {
-    background: var(--md-sys-color-surface-container);
-    border-radius: var(--md-sys-shape-medium);
-    padding: 16px;
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-    gap: 12px;
-    border: 1px solid var(--md-sys-color-outline-variant);
-    transition: background-color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
-  }
-
-  .tool-card:hover:not(.irrelevant) {
-    background: var(--md-sys-color-surface-container-high);
-    border-color: var(--md-sys-color-outline);
-  }
-
-  .tool-card.irrelevant {
-    opacity: 0.65;
-    background: var(--md-sys-color-surface-container-low);
-  }
-
-  .tool-card.irrelevant :global(.tool-header-icon) {
-    color: var(--md-sys-color-on-surface-variant);
-  }
-
-  .tool-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-  }
-
-  .switch-container {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-
-  :global(.switch-container:has(input:disabled)) {
-    cursor: not-allowed;
-    opacity: 0.38;
-    pointer-events: none;
-  }
-
-  .tool-header-left {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  :global(.tool-header-icon) {
-    width: 20px;
-    height: 20px;
-    color: var(--md-sys-color-primary);
-    flex-shrink: 0;
-  }
-
-  .tool-header h4 {
-    margin: 0;
-    font-size: 14px;
-    font-weight: 700;
-    color: var(--md-sys-color-on-surface);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
   .tool-pill {
     font-size: 11px;
     font-weight: 600;
@@ -2375,16 +2110,6 @@
     background: var(--md-sys-color-surface-container-highest);
     color: var(--md-sys-color-on-surface-variant);
   }
-
-  .tool-desc {
-    font-size: 12px;
-    color: var(--md-sys-color-on-surface-variant);
-    line-height: 1.5;
-    margin: 0;
-    flex: 1;
-  }
-
-
 
   /* Config Form */
   .config-form {

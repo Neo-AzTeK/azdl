@@ -126,13 +126,8 @@ export async function getState() {
     settings: {
       storage_drives: [],
       default_drive: null,
-      default_runner: 'auto',
-      global_arguments: [],
-      steamstub_auto_unpack: true,
-      onlinefix_overlay_enabled: true,
       theme_mode: 'system',
-      theme_seed_color: '#3f51b5',
-      window_effect: 'none',
+      seed_color: '#3f51b5',
     },
     diagnostics: [],
     data_dir: '/preview/azdl',
@@ -197,15 +192,6 @@ export async function discoverExecutables(id) {
   return await withBusy(async () => {
     if (isDesktop()) {
       return await invoke('discover_exes', { id });
-    }
-    return [];
-  });
-}
-
-export async function scanSetup(id, title = null) {
-  return await withBusy(async () => {
-    if (isDesktop()) {
-      return await invoke('scan_game_setup', { id, title });
     }
     return [];
   });
@@ -276,20 +262,8 @@ export async function moveGameToDrive(gameId, drive_id) {
   return await runAction({ action: 'storage-move-game', id: gameId, drive_id });
 }
 
-export async function scanInstalledGames() {
-  return await runAction({ action: 'scan-installed-games' });
-}
-
-
 export async function downloadProtonGE() {
   return await runAction({ action: 'proton-download' });
-}
-
-export async function isSteamRunning() {
-  if (isDesktop()) {
-    return await invoke('is_steam_running');
-  }
-  return false;
 }
 
 export async function syncSteamShortcuts() {

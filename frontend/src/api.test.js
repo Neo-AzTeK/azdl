@@ -55,10 +55,6 @@ describe('API - Browser Fallback Mode', () => {
     expect(res).toEqual({ success: true });
   });
 
-  it('returns fallback false for isSteamRunning', async () => {
-    expect(await api.isSteamRunning()).toBe(false);
-  });
-
   it('returns a no-op unlisten function for onStateChange in browser mode', () => {
     const cb = vi.fn();
     const unsub = api.onStateChange(cb);
@@ -151,15 +147,6 @@ describe('API - Desktop Mode IPC Bridge', () => {
     expect(mockInvoke).toHaveBeenCalledWith('discover_exes', { id: 'hl2' });
   });
 
-  it('invokes scan_game_setup with id and title', async () => {
-    mockInvoke.mockResolvedValueOnce([]);
-    await api.scanSetup('prefix-1', 'Game Title');
-    expect(mockInvoke).toHaveBeenCalledWith('scan_game_setup', {
-      id: 'prefix-1',
-      title: 'Game Title',
-    });
-  });
-
   it('invokes launch_game with extra arguments or null', async () => {
     mockInvoke.mockResolvedValueOnce({ status: 'launched', pid: 1234 });
     await api.launchGame('hl2', ['-fullscreen', '-novid']);
@@ -184,7 +171,7 @@ describe('API - Desktop Mode IPC Bridge', () => {
 
   it('invokes run_action with payload', async () => {
     mockInvoke.mockResolvedValueOnce({ success: true });
-    const payload = { action: 'game-import', id: 'my-game' };
+    const payload = { action: 'args-set', id: 'my-game', arguments: [] };
     await api.runAction(payload);
     expect(mockInvoke).toHaveBeenCalledWith('run_action', { action: payload });
   });
@@ -198,14 +185,6 @@ describe('API - Desktop Mode IPC Bridge', () => {
 
     await api.windowClose();
     expect(mockInvoke).toHaveBeenCalledWith('window_close');
-  });
-
-  it('invokes is_steam_running in desktop mode', async () => {
-    mockInvoke.mockResolvedValueOnce(true);
-    const running = await api.isSteamRunning();
-    expect(mockInvoke).toHaveBeenCalledWith('is_steam_running');
-    expect(running).toBe(true);
-
   });
 
   it('invokes storage and settings action helpers correctly', async () => {
@@ -234,11 +213,6 @@ describe('API - Desktop Mode IPC Bridge', () => {
     await api.moveGameToDrive('portal-2', 'drive-2');
     expect(mockInvoke).toHaveBeenCalledWith('run_action', {
       action: { action: 'storage-move-game', id: 'portal-2', drive_id: 'drive-2' },
-    });
-
-    await api.scanInstalledGames();
-    expect(mockInvoke).toHaveBeenCalledWith('run_action', {
-      action: { action: 'scan-installed-games' },
     });
 
     await api.downloadProtonGE();
@@ -348,22 +322,6 @@ describe('API - Busy State Tracking', () => {
     expect(events[events.length - 1]).toBe(false);
 
     unsub();
-  });
-
-  it('passes steamstub action results through runAction', async () => {
-    const mockResult = {
-      success: true,
-      unpacked_count: 1,
-      steamstub: { relevant: true, stub_present: false, applied: true, label: 'Applied' },
-    };
-    mockInvoke.mockResolvedValueOnce(mockResult);
-
-    const res = await api.runAction({ action: 'steamstub-unpack', id: 'portal' });
-    expect(mockInvoke).toHaveBeenCalledWith('run_action', {
-      action: { action: 'steamstub-unpack', id: 'portal' },
-    });
-    expect(res).toEqual(mockResult);
-    expect(res.steamstub.applied).toBe(true);
   });
 
   it('registers listener on state-changed event in desktop mode', async () => {

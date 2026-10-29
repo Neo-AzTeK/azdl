@@ -84,7 +84,6 @@
         action: 'pending-add',
         id: pendingItem.id,
         title: pendingItem.id,
-        install_kind: pendingItem.kind,
         install_dir: pendingItem.directory,
         executable: finalExe,
       });
@@ -142,7 +141,6 @@
         <label for="game-directory">Game Directory</label>
         <div id="game-directory" class="directory-pill">
           <span class="dir-name">{id}</span>
-          <span class="dir-kind">{pendingItem?.kind || 'portable'}</span>
         </div>
       </div>
 
@@ -288,16 +286,6 @@
     font-size: 13px;
     font-weight: 600;
     color: var(--md-sys-color-on-surface);
-  }
-
-  .dir-kind {
-    font-size: 11px;
-    font-weight: 500;
-    text-transform: uppercase;
-    background: var(--md-sys-color-secondary-container);
-    color: var(--md-sys-color-on-secondary-container);
-    padding: 2px 6px;
-    border-radius: 4px;
   }
 
   .actions-container {
